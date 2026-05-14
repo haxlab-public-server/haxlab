@@ -1,5 +1,4 @@
 .env
 node_modules
 .debug-bot-script.js
-wazarr.js
-README_ADMIN.md
+dist/

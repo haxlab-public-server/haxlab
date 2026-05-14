@@ -1,8 +1,14 @@
-module.exports = function (ctx, player, message, commands) {
+import type { BotCommand, BotContext, BotPlayer } from '../types';
+
+function getErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+export default function (ctx: BotContext, player: BotPlayer, message: string, commands: BotCommand[]) {
   const m = (message || '').trim();
 
   try {
-    if (ctx.auto && ctx.gameState && ctx.gameState.isChooseMode && ctx.gameState.isChooseMode()) {
+    if (ctx.gameState.isChooseMode()) {
       const consumed = ctx.auto.handleChooseModeMessage(ctx, player, m);
       if (consumed) return false;
     }
@@ -37,9 +43,9 @@ module.exports = function (ctx, player, message, commands) {
     const name = parts[0];
     const args = parts.slice(1);
 
-    const cmd = commands.find(function (c) { return c.trigger === name; });
+    const cmd = commands.find((c) => c.trigger === name);
     if (!cmd) {
-      const list = commands.map(function (c) { return c.trigger; }).join(', ');
+      const list = commands.map((c) => c.trigger).join(', ');
       ctx.room.sendAnnouncement('Неизвестная команда. Доступно: ' + list, player.id, 0xFFFF00, 'normal', 0);
       return false; // do not echo unknown command
     }
@@ -48,15 +54,15 @@ module.exports = function (ctx, player, message, commands) {
       const result = cmd.handle(ctx, player, args);
       // If handler explicitly returns true, allow; otherwise swallow
       return result === true ? true : false;
-    } catch (e) {
-      const list = commands.map(function (c) { return c.trigger; }).join(', ');
+    } catch (e: unknown) {
+      const list = commands.map((c) => c.trigger).join(', ');
       ctx.room.sendAnnouncement('Ошибка или неверные аргументы. Команды: ' + list, player.id, 0xFF6600, 'bold', 0);
-      if (ctx.logger) ctx.logger.warn('Command error ' + name + ': ' + e.message);
+      ctx.logger.warn('Command error ' + name + ': ' + getErrorMessage(e));
       return false;
     }
   }
 
-  if (ctx.captainDraft && ctx.captainDraft.isDraftActive()) {
+  if (ctx.captainDraft.isDraftActive()) {
     const currentCaptain = ctx.captainDraft.getCurrentCaptain();
     if (player.id === currentCaptain.id) {
       // Try to parse as player number

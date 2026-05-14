@@ -1,11 +1,13 @@
-module.exports = function (ctx, team) {
+import type { BotContext, PlayingTeam, TouchPlayer } from '../types';
+
+export default function (ctx: BotContext, team: PlayingTeam) {
   if (!ctx.gameState) return;
   ctx.gameState.setWinnerTeam(team);
 
-  var scorer = null;
-  var assist = null;
+  let scorer: TouchPlayer | null = null;
+  let assist: TouchPlayer | null = null;
   var ownGoal = false;
-  var t = ctx.touches && ctx.touches.lastTouches ? ctx.touches.lastTouches : [null, null];
+  const t: [typeof ctx.touches.lastTouches[0], typeof ctx.touches.lastTouches[1]] = ctx.touches?.lastTouches ?? [null, null];
 
   if (t[0]) {
     if (t[0].player.team === team) {

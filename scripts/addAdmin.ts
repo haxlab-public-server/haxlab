@@ -1,7 +1,6 @@
 #!/usr/bin/env node
 
-const HaxballDatabase = require('../src/db/Database');
-
+import HaxballDatabase from '../src/db/Database';
 // Get command line arguments
 const args = process.argv.slice(2);
 

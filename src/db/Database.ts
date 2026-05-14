@@ -1,7 +1,35 @@
-const Database = require('better-sqlite3');
-const path = require('path');
+import Database from 'better-sqlite3';
+import path from 'path';
+export type PlayerRole = 'player' | 'vip' | 'admin' | 'host';
+export type DbPlayer = {
+  id: number;
+  player_auth: string;
+  name: string | null;
+  role: PlayerRole;
+  created_at: string;
+  updated_at: string;
+};
+export type DbAlias = {
+  player_auth: string;
+  alias: string;
+  updated_at: string;
+};
+export type DbPlayerStats = {
+  player_auth: string;
+  last_name: string | null;
+  games: number;
+  wins: number;
+  draws: number;
+  losses: number;
+  last_seen: string;
+  updated_at: string;
+};
+type GamePlayerPayload = { id: number; name?: string; auth?: string | null; team: 0 | 1 | 2 };
+type GamePayload = { winnerTeam: 1 | 2 | null; players: GamePlayerPayload[] };
 
 class HaxballDatabase {
+  private db: Database.Database;
+
   constructor(dbPath = path.join(__dirname, '../../haxchill.db')) {
     this.db = new Database(dbPath);
     this.initTables();
@@ -45,13 +73,13 @@ class HaxballDatabase {
   }
 
   // Get player by auth
-  getPlayerByAuth(playerAuth) {
+  getPlayerByAuth(playerAuth: string): DbPlayer | undefined {
     const stmt = this.db.prepare('SELECT * FROM players WHERE player_auth = ?');
-    return stmt.get(playerAuth);
+    return stmt.get(playerAuth) as DbPlayer | undefined;
   }
 
   // Get best-matching player by name (case-insensitive), prioritizing privileged roles
-  getPlayerByName(name) {
+  getPlayerByName(name: string): DbPlayer | undefined {
     const stmt = this.db.prepare(`
       SELECT * FROM players
       WHERE LOWER(name) = LOWER(?)
@@ -65,11 +93,11 @@ class HaxballDatabase {
         updated_at DESC
       LIMIT 1;
     `);
-    return stmt.get(name);
+    return stmt.get(name) as DbPlayer | undefined;
   }
 
   // Add or update player
-  upsertPlayer(playerAuth, name, role = 'player') {
+  upsertPlayer(playerAuth: string, name: string, role = 'player') {
     const stmt = this.db.prepare(`
       INSERT INTO players (player_auth, name, role, updated_at)
       VALUES (?, ?, ?, CURRENT_TIMESTAMP)
@@ -82,7 +110,7 @@ class HaxballDatabase {
   }
 
   // Ensure player exists and has a stats row with zeroed counters
-  ensurePlayerWithStats(playerAuth, name, role = 'player') {
+  ensurePlayerWithStats(playerAuth: string, name: string, role = 'player') {
     const upsertPlayerStmt = this.db.prepare(`
       INSERT INTO players (player_auth, name, role, updated_at)
       VALUES (?, ?, ?, CURRENT_TIMESTAMP)
@@ -100,7 +128,7 @@ class HaxballDatabase {
         updated_at = CURRENT_TIMESTAMP
     `);
 
-    const txn = this.db.transaction((auth, playerName, playerRole) => {
+    const txn = this.db.transaction((auth: string, playerName: string, playerRole: string) => {
       upsertPlayerStmt.run(auth, playerName, playerRole);
       upsertStatsStmt.run(auth, playerName);
     });
@@ -109,7 +137,7 @@ class HaxballDatabase {
   }
 
   // Set player role (player, vip, admin, host)
-  setPlayerRole(playerAuth, role) {
+  setPlayerRole(playerAuth: string, role: string) {
     const stmt = this.db.prepare(`
       UPDATE players SET role = ?, updated_at = CURRENT_TIMESTAMP
       WHERE player_auth = ?
@@ -118,38 +146,38 @@ class HaxballDatabase {
   }
 
   // Generic fetchers
-  getByRole(role) {
+  getByRole(role: PlayerRole): DbPlayer[] {
     const stmt = this.db.prepare('SELECT * FROM players WHERE role = ?');
-    return stmt.all(role);
+    return stmt.all(role) as DbPlayer[];
   }
 
-  getByRoles(roles = []) {
+  getByRoles(roles: PlayerRole[] = []): DbPlayer[] {
     if (!roles.length) return [];
     const placeholders = roles.map(() => '?').join(',');
     const stmt = this.db.prepare(`SELECT * FROM players WHERE role IN (${placeholders})`);
-    return stmt.all(...roles);
+    return stmt.all(...roles) as DbPlayer[];
   }
 
   // Convenience getters
-  getAdmins() {
+  getAdmins(): DbPlayer[] {
     return this.getByRole('admin');
   }
 
-  getHosts() {
+  getHosts(): DbPlayer[] {
     return this.getByRole('host');
   }
 
-  getPrivilegedPlayers() {
+  getPrivilegedPlayers(): DbPlayer[] {
     return this.getByRoles(['admin', 'host']);
   }
 
   // Aliases (deanon)
-  getAlias(playerAuth) {
+  getAlias(playerAuth: string): Pick<DbAlias, 'alias'> | undefined {
     const stmt = this.db.prepare('SELECT alias FROM player_aliases WHERE player_auth = ?');
-    return stmt.get(playerAuth);
+    return stmt.get(playerAuth) as Pick<DbAlias, 'alias'> | undefined;
   }
 
-  setAlias(playerAuth, alias) {
+  setAlias(playerAuth: string, alias: string) {
     const stmt = this.db.prepare(`
       INSERT INTO player_aliases (player_auth, alias, updated_at)
       VALUES (?, ?, CURRENT_TIMESTAMP)
@@ -161,12 +189,12 @@ class HaxballDatabase {
   }
 
   // Stats helpers
-  getPlayerStats(playerAuth) {
+  getPlayerStats(playerAuth: string): DbPlayerStats | undefined {
     const stmt = this.db.prepare('SELECT * FROM player_stats WHERE player_auth = ?');
-    return stmt.get(playerAuth);
+    return stmt.get(playerAuth) as DbPlayerStats | undefined;
   }
 
-  recordGame(payload) {
+  recordGame(payload: GamePayload) {
     if (!payload || !Array.isArray(payload.players)) return;
     const winnerTeam = payload.winnerTeam; // 1, 2, or null for draw
 
@@ -191,7 +219,7 @@ class HaxballDatabase {
         updated_at = CURRENT_TIMESTAMP;
     `);
 
-    const txn = this.db.transaction((rows) => {
+    const txn = this.db.transaction((rows: GamePlayerPayload[]) => {
       rows.forEach((p) => {
         // ignore spectators
         if (p.team !== 1 && p.team !== 2) return;
@@ -210,7 +238,7 @@ class HaxballDatabase {
   }
 
   // Check if player is admin
-  isAdmin(playerAuth) {
+  isAdmin(playerAuth: string) {
     const player = this.getPlayerByAuth(playerAuth);
     return player && (player.role === 'admin' || player.role === 'host');
   }
@@ -220,4 +248,4 @@ class HaxballDatabase {
   }
 }
 
-module.exports = HaxballDatabase;
+export default HaxballDatabase;

@@ -1,27 +1,22 @@
-module.exports = function (ctx) {
-  if (ctx.logger) ctx.logger.info('onGameStart triggered');
-  
-  if (!ctx.gameState) {
-    if (ctx.logger) ctx.logger.warn('gameState missing');
-    return;
-  }
+import type { BotContext } from '../types';
+
+export default function (ctx: BotContext) {
+  ctx.logger.info('onGameStart triggered');
   
   ctx.gameState.setGameInProgress(true);
   
   const totalPlayers = ctx.gameState.getTotalPlayers();
-  if (ctx.auto && typeof ctx.auto.setStadiumForPlayers === 'function') {
-    try { ctx.auto.setStadiumForPlayers(ctx, totalPlayers); } catch {}
-  }
+  try { ctx.auto.setStadiumForPlayers(ctx, totalPlayers); } catch {}
   
   // Draft mode only for 9+ players
-  if (totalPlayers >= 9 && ctx.captainDraft) {
+  if (totalPlayers >= 9) {
     const captains = ctx.gameState.getCaptains();
     if (!captains.team1Captain || !captains.team2Captain) {
-      if (ctx.logger) ctx.logger.warn('Captains not assigned yet');
+      ctx.logger.warn('Captains not assigned yet');
       return;
     }
 
-    if (ctx.logger) ctx.logger.info('Starting draft with captains: ' + captains.team1Captain.name + ' vs ' + captains.team2Captain.name);
+    ctx.logger.info('Starting draft with captains: ' + captains.team1Captain.name + ' vs ' + captains.team2Captain.name);
 
     ctx.captainDraft.startDraft(
       Object.values(ctx.gameState.getState().playerList),
@@ -40,15 +35,15 @@ module.exports = function (ctx) {
     ctx.room.sendAnnouncement('=== ДРАФТ НАЧАЛАСЬ ===', null, 0xFFFF00, 'bold', 2);
     ctx.room.sendAnnouncement('Капитан ' + currentCaptain.name + ', выбери игроков (1, 2, 3...):\n' + availableList);
     
-    if (ctx.logger) ctx.logger.info('Draft started, available players: ' + availableList);
+    ctx.logger.info('Draft started, available players: ' + availableList);
   } else {
-    if (ctx.logger) ctx.logger.info('Simple mode - auto-assigning teams for ' + totalPlayers + ' players');
+    ctx.logger.info('Simple mode - auto-assigning teams for ' + totalPlayers + ' players');
     
     ctx.gameState.simpleAssignTeams();
     const state = ctx.gameState.getState();
     
     // Apply team assignments via room API
-    Object.keys(state.players).forEach(function(playerId) {
+    Object.keys(state.players).forEach((playerId) => {
       const player = state.players[playerId];
       if (player.team !== null && player.team !== undefined) {
         ctx.room.setPlayerTeam(parseInt(playerId, 10), player.team);

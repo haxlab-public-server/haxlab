@@ -1,32 +1,25 @@
-module.exports = {
+import type { BotCommand } from '../types';
+
+function getErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+const command: BotCommand = {
   name: 'stats',
   trigger: '!stats',
   description: 'Показать вашу статистику (игры/победы/ничьи/поражения)',
-  handle: function (ctx, player, args) {
-    if (typeof loadStats !== 'function') {
-      ctx.room.sendAnnouncement('Статистика недоступна (нет соединения с БД).');
-      return false;
-    }
-
-    // Resolve auth: use player's auth if present, otherwise try DB by name
-    var authPromise = Promise.resolve(player.auth);
-    if (!player.auth && typeof resolveAuthForName === 'function') {
-      authPromise = resolveAuthForName(player.name);
-    }
-
-    authPromise
-      .then(function (resolvedAuth) {
+  handle(ctx, player, _args) {
+    void (async () => {
+      try {
+        const resolvedAuth = player.auth ?? await ctx.db.resolveAuthForName(player.name);
         if (!resolvedAuth) {
           ctx.room.sendAnnouncement('Стата недоступна: требуется вход через Haxball (auth) или запись по имени в БД.');
-          return false;
+          return;
         }
-        return loadStats(resolvedAuth);
-      })
-      .then(function (stat) {
-        if (stat === false) return false; // previous step already handled
+        const stat = await ctx.db.loadStats(resolvedAuth);
         if (!stat) {
           ctx.room.sendAnnouncement('Нет записей. Сыграй матч, чтобы появилась статистика.');
-          return false;
+          return;
         }
         const games = stat.games || 0;
         const wins = stat.wins || 0;
@@ -41,13 +34,14 @@ module.exports = {
           'Поражения ' + losses + ', ' +
           'Winrate ' + winrate
         );
-        return false;
-      })
-      .catch(function (err) {
-        if (ctx.logger) ctx.logger.warn('loadStats error: ' + err.message);
+      } catch (err: unknown) {
+        ctx.logger.warn('loadStats error: ' + getErrorMessage(err));
         ctx.room.sendAnnouncement('Ошибка загрузки статистики.');
-      });
+      }
+    })();
 
     return false; // prevent echo
   }
 };
+
+export default command;

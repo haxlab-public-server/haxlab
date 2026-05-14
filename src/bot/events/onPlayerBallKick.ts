@@ -1,4 +1,6 @@
-module.exports = function (ctx, player) {
+import type { BotContext, BotPlayer } from '../types';
+
+export default function (ctx: BotContext, player: BotPlayer) {
   if (!ctx.touches) ctx.touches = { lastTouches: [null, null], lastTeamTouched: 0 };
   var lt = ctx.touches.lastTouches;
 

@@ -1,7 +1,6 @@
 #!/usr/bin/env node
 
-const HaxballDatabase = require('../src/db/Database');
-
+import HaxballDatabase from '../src/db/Database';
 try {
   const db = new HaxballDatabase();
   

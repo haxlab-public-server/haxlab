@@ -1,11 +1,10 @@
-module.exports = function (ctx, player) {
-  if (!ctx.gameState) return;
-  
+import type { BotContext } from '../types';
+
+export default function (ctx: BotContext, player: PlayerObject) {
   ctx.gameState.removePlayer(player.id);
-  const state = ctx.gameState.getState();
   const totalPlayers = ctx.gameState.getTotalPlayers();
 
-  if (ctx.afkTimers && ctx.afkTimers[player.id]) {
+  if (ctx.afkTimers[player.id]) {
     clearTimeout(ctx.afkTimers[player.id]);
     delete ctx.afkTimers[player.id];
   }
@@ -26,7 +25,7 @@ module.exports = function (ctx, player) {
       
       let team1Count = 0;
       let team2Count = 0;
-      let spectators = [];
+      const spectators: PlayerObject[] = [];
       
       for (let i = 0; i < playerList.length; i++) {
         const p = playerList[i];
@@ -35,9 +34,7 @@ module.exports = function (ctx, player) {
         else if (p.team === 0) spectators.push(p);
       }
       
-      if (ctx.logger) {
-        ctx.logger.info('Team balance: Team 1=' + team1Count + ', Team 2=' + team2Count + ', Spectators=' + spectators.length);
-      }
+      ctx.logger.info('Team balance: Team 1=' + team1Count + ', Team 2=' + team2Count + ', Spectators=' + spectators.length);
       
       const diff = Math.abs(team1Count - team2Count);
       if (diff > 0 && spectators.length > 0) {
@@ -55,15 +52,13 @@ module.exports = function (ctx, player) {
           1
         );
         
-        if (ctx.logger) {
-          ctx.logger.info('Moved spectator ' + spectatorToMove.name + ' to team ' + targetTeam);
-        }
+        ctx.logger.info('Moved spectator ' + spectatorToMove.name + ' to team ' + targetTeam);
       }
     }
   }
 
   // Attempt balance after leave
   try {
-    if (ctx.auto && typeof ctx.auto.balanceTeams === 'function') ctx.auto.balanceTeams(ctx);
+    ctx.auto.balanceTeams(ctx);
   } catch {}
 };
