@@ -45,7 +45,14 @@ module.exports = function createTeamBalance({
                 room.setPlayerTeam(state.players[0].id, Team.RED);
             } else if (Math.abs(state.teamRed.length - state.teamBlue.length) == state.teamSpec.length && state.teamSpec.length > 0) {
                 const n = Math.abs(state.teamRed.length - state.teamBlue.length);
-                if (state.players.length == 2) {
+                // Only a genuine training -> classic transition (the lone
+                // player from the branch above just got a 2nd player) needs
+                // a restart — there's no real match in progress yet to
+                // interrupt. If this same 2-player shape is reached by a
+                // bigger match shrinking down instead, currentStadium is
+                // already 'classic'/'big' and the match plays out as-is;
+                // matches only ever get cut short by the single-player case.
+                if (state.players.length == 2 && state.currentStadium == 'training') {
                     instantRestart();
                     setTimeout(() => {
                         stadiumCommand(emptyPlayer, `!classic`);
@@ -69,12 +76,13 @@ module.exports = function createTeamBalance({
                     }, 5);
                     room.setPlayerTeam(state.players[0].id, Team.RED);
                     return;
-                } else if (teamSize > 2 && state.players.length == 5) {
-                    instantRestart();
-                    setTimeout(() => {
-                        stadiumCommand(emptyPlayer, `!classic`);
-                    }, 5);
                 }
+                // A shrinking match (someone left, leaving more excess
+                // players on one side than there are spectators to fill the
+                // other) no longer restarts/switches stadium here — only
+                // the single-player case above does that. The excess
+                // players below just get benched to spectators and the
+                // match keeps playing on whatever map it's already on.
                 if (state.players.length == teamSize * 2 - 1) {
                     state.teamRedStats = [];
                     state.teamBlueStats = [];
@@ -115,12 +123,24 @@ module.exports = function createTeamBalance({
                         }
                     }
                 }
+            } else if (state.teamRed.length == state.teamBlue.length && state.teamSpec.length > 0 && state.currentStadium != 'training') {
+                // Teams are already balanced (e.g. a running 1v1) but there's
+                // still room to grow within the CURRENT stadium's own
+                // capacity — classic tops out at 2v2, big at teamSize v
+                // teamSize — so waiting spectators get pulled in one pair at
+                // a time instead of sitting through the rest of the round.
+                // Growing PAST the current stadium's capacity is still
+                // deliberately not done here — that needs a stadium switch +
+                // restart, which stays a between-rounds/handlePlayersStop
+                // concern (see the note this replaced).
+                const stadiumCap = state.currentStadium == 'classic' ? 2 : teamSize;
+                const slotsAvailable = stadiumCap - state.teamRed.length;
+                const n = Math.min(slotsAvailable, Math.floor(state.teamSpec.length / 2));
+                for (let i = 0; i < n; i++) {
+                    room.setPlayerTeam(state.teamSpec[2 * i].id, Team.RED);
+                    room.setPlayerTeam(state.teamSpec[2 * i + 1].id, Team.BLUE);
+                }
             }
-            // Deliberately no branch grows an already-balanced, already-full
-            // match (e.g. a running 2v2) into a bigger one on its own — the
-            // room's policy is that whichever map/team size is currently
-            // active stays put, and any extra joiners simply wait as
-            // spectators rather than forcing a stadium switch + restart.
         }
     }
 

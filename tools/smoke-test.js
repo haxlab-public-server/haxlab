@@ -665,6 +665,45 @@ console.log('\n--- team/balance.js: an already-full match never auto-upgrades to
     balance.handlePlayersJoin();
     check('handlePlayersJoin does not upgrade the stadium either — the extra players just joined balanceTeams\' no-op path', calls, []);
 
+    // The actual bug this guards against: a running 1v1 on classic (which
+    // supports up to 2v2) with spectators waiting must grow to fill the
+    // CURRENT map instead of leaving them stuck watching until the round
+    // ends — this is growth WITHIN the active stadium's own capacity, not
+    // the cross-stadium auto-upgrade the tests above correctly forbid.
+    state.teamRed = [{ id: 1 }];
+    state.teamBlue = [{ id: 2 }];
+    state.teamSpec = [{ id: 3 }, { id: 4 }, { id: 5 }, { id: 6 }];
+    state.players = [{ id: 1 }, { id: 2 }, { id: 3 }, { id: 4 }, { id: 5 }, { id: 6 }];
+    roomCalls.length = 0;
+    calls.length = 0;
+    balance.balanceTeams();
+    check('a running 1v1 on classic pulls in exactly one pair from spectators to make 2v2', roomCalls, [`setPlayerTeam:3:${Team.RED}`, `setPlayerTeam:4:${Team.BLUE}`]);
+    check('growing within the current map does not restart or switch stadiums', calls, []);
+
+    // Once at classic's 2v2 cap, further spectators keep waiting — this is
+    // exactly the "already-full match" case the very first check in this
+    // block covers, just reached by growth instead of starting there.
+    state.teamRed = [{ id: 1 }, { id: 3 }];
+    state.teamBlue = [{ id: 2 }, { id: 4 }];
+    state.teamSpec = [{ id: 5 }, { id: 6 }];
+    roomCalls.length = 0;
+    calls.length = 0;
+    balance.balanceTeams();
+    check('a 2v2 already at classic\'s cap leaves the rest of the spectators waiting', roomCalls, []);
+
+    // Big allows growing all the way to a full 4v4 (still short of the
+    // 8-player choose-mode threshold covered separately below).
+    state.currentStadium = 'big';
+    state.teamRed = [{ id: 1 }, { id: 3 }];
+    state.teamBlue = [{ id: 2 }, { id: 4 }];
+    state.teamSpec = [{ id: 5 }, { id: 6 }];
+    state.players = [{ id: 1 }, { id: 2 }, { id: 3 }, { id: 4 }, { id: 5 }, { id: 6 }];
+    roomCalls.length = 0;
+    calls.length = 0;
+    balance.balanceTeams();
+    check('a running 2v2 on big grows to 3v3', roomCalls, [`setPlayerTeam:5:${Team.RED}`, `setPlayerTeam:6:${Team.BLUE}`]);
+    state.currentStadium = 'classic';
+
     // The small-scale auto-selection (1 player -> training, 2 -> classic) is
     // untouched by this change — only growth past an already-settled match
     // was removed.
@@ -675,6 +714,48 @@ console.log('\n--- team/balance.js: an already-full match never auto-upgrades to
     calls.length = 0;
     balance.balanceTeams();
     check('a single joining player still auto-starts training (unchanged)', calls.includes('instantRestart'), true);
+
+    // Matches must be played out even as they shrink — only ending up with
+    // a single player left (no possible opponent) is still allowed to
+    // restart/switch stadium. A match shrinking down to exactly 2 players
+    // (their teammate/opponent left) must NOT restart or switch away from
+    // whatever stadium it's already on.
+    state.currentStadium = 'big';
+    state.teamRed = [{ id: 1 }];
+    state.teamBlue = [];
+    state.teamSpec = [{ id: 2 }];
+    state.players = [{ id: 1 }, { id: 2 }];
+    roomCalls.length = 0;
+    calls.length = 0;
+    balance.balanceTeams();
+    check('a match shrinking down to 2 players does not restart or switch stadium', calls, []);
+    check('the shrunk match still rebalances to 1v1 from the remaining spectator', roomCalls, [`setPlayerTeam:2:${Team.BLUE}`]);
+
+    // Same for shrinking down to 5 (more excess on one side than there are
+    // spectators to cover) — the excess still gets benched to spectators,
+    // just without restarting/switching maps.
+    state.teamRed = [{ id: 1 }, { id: 2 }, { id: 3 }];
+    state.teamBlue = [{ id: 4 }];
+    state.teamSpec = [{ id: 5 }];
+    state.players = [{ id: 1 }, { id: 2 }, { id: 3 }, { id: 4 }, { id: 5 }];
+    roomCalls.length = 0;
+    calls.length = 0;
+    balance.balanceTeams();
+    check('a match shrinking down to 5 players does not restart or switch stadium', calls, []);
+    check('the excess players are benched to spectators instead', roomCalls, [`setPlayerTeam:3:${Team.SPECTATORS}`, `setPlayerTeam:2:${Team.SPECTATORS}`]);
+
+    // The actual exception: a match shrinking all the way down to a single
+    // remaining player (reached via the "excess beyond spectators" branch
+    // this time, not the fresh-join branch tested above) still restarts to
+    // training — there's no possible opponent left to play out a match with.
+    state.teamRed = [{ id: 1 }];
+    state.teamBlue = [];
+    state.teamSpec = [];
+    state.players = [{ id: 1 }];
+    calls.length = 0;
+    balance.balanceTeams();
+    check('a match shrinking down to a single remaining player still restarts to training', calls.includes('instantRestart'), true);
+    state.currentStadium = 'classic';
 
     // Captain-choosing mode is reserved for a genuine full 4v4 house (8
     // players) — below that, an imbalanced team with excess spectators should

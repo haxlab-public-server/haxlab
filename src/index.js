@@ -1,4 +1,6 @@
 const path = require('node:path');
+const os = require('node:os');
+const { monitorEventLoopDelay } = require('node:perf_hooks');
 const HaxballJS = require('haxball.js').default;
 
 HaxballJS({ debug: false }).then((HBInit) => {
@@ -147,6 +149,22 @@ function spawnDiscordProcess() {
     discordProcess = child;
     const spawnedAt = Date.now();
 
+    // The host this runs on has a single vCPU — separating the event loops
+    // doesn't separate the CPU itself, both processes still take turns on
+    // the same core. Lowering the child's OS scheduling priority means the
+    // kernel favors the room (physics ticks — i.e. player ping) over
+    // Discord traffic whenever both want the CPU at the same instant,
+    // rather than splitting it evenly between a real-time game and a chat
+    // bot. Best-effort: some platforms/permission setups don't allow this,
+    // and that must never take the room down with it.
+    if (child.pid) {
+        try {
+            os.setPriority(child.pid, os.constants.priority.PRIORITY_LOW);
+        } catch (err) {
+            console.error('[WARN] Could not lower Discord process OS priority:', err.message);
+        }
+    }
+
     // Handles the two things the Discord process can't do on its own:
     // relaying a !say/`/say` message into the room chat, and kicking a
     // currently-connected player by auth for !banauth/`/banauth` (the ban
@@ -245,6 +263,32 @@ process.on('unhandledRejection', (reason) => {
     console.error('[FATAL] Unhandled rejection:', reason);
     discordBot.sendLog(`⚠️ **Необработанный reject:**\n\`\`\`${(reason && reason.stack) || reason}\`\`\``);
 });
+
+/* EVENT LOOP LAG MONITORING */
+
+// Diagnostic, not a fix: players have kept reporting ping spikes ("redbars")
+// even after isolating the Discord process onto its own event loop, and the
+// host's own CPU/RAM graphs never show it (coarse averaging hides a
+// sub-second stall, and on this single-vCPU host both processes share one
+// core regardless of isolation). Rather than keep guessing at the cause,
+// this reports whenever the ROOM process's own event loop actually stalls
+// meaningfully, so the next report can be checked against real measured
+// numbers — what stalled, how long, and when — instead of a hypothesis.
+const eventLoopMonitor = monitorEventLoopDelay({ resolution: 20 });
+eventLoopMonitor.enable();
+const EVENT_LOOP_CHECK_INTERVAL_MS = 30000;
+const EVENT_LOOP_WARN_THRESHOLD_MS = 150;
+setInterval(() => {
+    const maxMs = eventLoopMonitor.max / 1e6;
+    if (maxMs >= EVENT_LOOP_WARN_THRESHOLD_MS) {
+        const meanMs = eventLoopMonitor.mean / 1e6;
+        discordBot.sendLog(
+            `⚠️ Event loop room-процесса подвисал: макс ${maxMs.toFixed(0)}мс, среднее ${meanMs.toFixed(0)}мс ` +
+            `за последние ${EVENT_LOOP_CHECK_INTERVAL_MS / 1000}с — вероятная причина редбаров в этом окне.`
+        );
+    }
+    eventLoopMonitor.reset();
+}, EVENT_LOOP_CHECK_INTERVAL_MS);
 
 /* OVERFLOW PASSWORD */
 
