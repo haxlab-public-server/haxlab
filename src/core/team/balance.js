@@ -95,9 +95,26 @@ module.exports = function createTeamBalance({
                     }
                 }
             } else if (Math.abs(state.teamRed.length - state.teamBlue.length) < state.teamSpec.length && state.teamRed.length != state.teamBlue.length) {
-                room.pauseGame(true);
-                activateChooseMode();
-                choosePlayer();
+                const n = Math.abs(state.teamRed.length - state.teamBlue.length);
+                if (state.players.length >= 2 * teamSize) {
+                    // Enough for a full 4v4 — let captains hand-pick from the
+                    // extra spectators instead of just auto-filling.
+                    room.pauseGame(true);
+                    activateChooseMode();
+                    choosePlayer();
+                } else {
+                    // Not yet a full house — just balance directly and keep
+                    // playing (2v2/3v3/etc); the rest wait as spectators.
+                    if (state.teamRed.length > state.teamBlue.length) {
+                        for (let i = 0; i < n; i++) {
+                            room.setPlayerTeam(state.teamSpec[i].id, Team.BLUE);
+                        }
+                    } else {
+                        for (let i = 0; i < n; i++) {
+                            room.setPlayerTeam(state.teamSpec[i].id, Team.RED);
+                        }
+                    }
+                }
             }
             // Deliberately no branch grows an already-balanced, already-full
             // match (e.g. a running 2v2) into a bigger one on its own — the
@@ -272,6 +289,14 @@ module.exports = function createTeamBalance({
             if (state.chooseMode) {
                 if (state.players.length == 2 * teamSize) {
                     state.chooseMode = false;
+                    // A full 4v4 needs the big map — classic (1v1/2v2-sized)
+                    // is too small and would otherwise stay active if the
+                    // room simply grew into this from a smaller match.
+                    if (state.currentStadium != 'big') {
+                        setTimeout(() => {
+                            stadiumCommand(emptyPlayer, `!big`);
+                        }, 5);
+                    }
                     resetButton();
                     for (let i = 0; i < teamSize; i++) {
                         clearTimeout(state.insertingTimeout);
@@ -287,6 +312,15 @@ module.exports = function createTeamBalance({
                         room.startGame();
                     }, 2000);
                 } else {
+                    // Any other count while choose mode is active (9, 10, ...
+                    // up to whatever's in the room) is still a 4v4-or-bigger
+                    // situation by definition — choose mode only ever turns on
+                    // at a full 4v4 house — so this must be on the big map too.
+                    if (state.currentStadium != 'big') {
+                        setTimeout(() => {
+                            stadiumCommand(emptyPlayer, `!big`);
+                        }, 5);
+                    }
                     if (state.lastWinner == Team.RED) {
                         blueToSpecButton();
                     } else if (state.lastWinner == Team.BLUE) {
@@ -314,7 +348,20 @@ module.exports = function createTeamBalance({
                     state.startTimeout = setTimeout(() => {
                         room.startGame();
                     }, 2000);
-                } else if (state.players.length == 3 || state.players.length >= 2 * teamSize + 1) {
+                } else if (state.players.length == 3 || state.players.length == 5 || state.players.length >= 2 * teamSize + 1) {
+                    // 5 used to also trigger captain-choosing mode here — the
+                    // room's policy now is to wait for a full 4v4 house before
+                    // doing that, so 5 (like 3) just keeps playing: the losing
+                    // team benches, topButton() pulls someone back in. 9+ here
+                    // shouldn't normally happen — endGame() already turns on
+                    // choose mode at a full 4v4 house before this ever runs —
+                    // but if it somehow does, it's still big-map territory,
+                    // unlike the 3/5 cases sharing this branch.
+                    if (state.players.length >= 2 * teamSize + 1 && state.currentStadium != 'big') {
+                        setTimeout(() => {
+                            stadiumCommand(emptyPlayer, `!big`);
+                        }, 5);
+                    }
                     if (state.lastWinner == Team.RED) {
                         blueToSpecButton();
                     } else {
@@ -335,6 +382,13 @@ module.exports = function createTeamBalance({
                         room.startGame();
                     }, 2000);
                 } else if (state.players.length == 4) {
+                    // 2v2 belongs on the small classic map — re-assert it in
+                    // case the room just shrank down from a bigger match.
+                    if (state.currentStadium != 'classic') {
+                        setTimeout(() => {
+                            stadiumCommand(emptyPlayer, `!classic`);
+                        }, 5);
+                    }
                     resetButton();
                     clearTimeout(state.insertingTimeout);
                     state.insertingPlayers = true;
@@ -350,25 +404,13 @@ module.exports = function createTeamBalance({
                     state.startTimeout = setTimeout(() => {
                         room.startGame();
                     }, 2000);
-                } else if (state.players.length == 5 || state.players.length >= 2 * teamSize + 1) {
-                    if (state.lastWinner == Team.RED) {
-                        blueToSpecButton();
-                    } else {
-                        redToSpecButton();
+                } else if (state.players.length == 6) {
+                    // 3v3 needs the big map, same reasoning as the 4v4 case above.
+                    if (state.currentStadium != 'big') {
                         setTimeout(() => {
-                            swapButton();
+                            stadiumCommand(emptyPlayer, `!big`);
                         }, 5);
                     }
-                    clearTimeout(state.insertingTimeout);
-                    state.insertingPlayers = true;
-                    state.insertingTimeout = setTimeout(() => {
-                        state.insertingPlayers = false;
-                    }, 200);
-                    setTimeout(() => {
-                        topButton();
-                    }, 200);
-                    activateChooseMode();
-                } else if (state.players.length == 6) {
                     resetButton();
                     clearTimeout(state.insertingTimeout);
                     state.insertingPlayers = true;

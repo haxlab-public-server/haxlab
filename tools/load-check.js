@@ -73,6 +73,23 @@ Module._load = function (request) {
             createDatabaseApi: () => ({ ...createSqliteDatabase(':memory:'), backup: () => {} }),
         };
     }
+    if (request === 'node:child_process') {
+        // index.js forks a real, separate OS process for the Discord bot
+        // (core/discordProcess.js) — this Module._load hook only patches
+        // requires inside *this* process, so a real fork() would run that
+        // module unstubbed: a real DB connection against the real sqlite
+        // file, a real (if token-less) discord.js client, a real backup
+        // timer. Stubbed out to a no-op object with the same shape index.js
+        // calls (on/send/kill), so init is exercised without ever spawning
+        // that process.
+        return {
+            fork: () => ({
+                on: () => {},
+                send: () => {},
+                kill: () => {},
+            }),
+        };
+    }
     return origLoad.apply(this, arguments);
 };
 

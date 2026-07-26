@@ -14,6 +14,10 @@ module.exports = function createAdminCommands({
     trainingMap,
     classicMap,
     bigMap,
+    classicScoreLimit,
+    classicTimeLimit,
+    bigScoreLimit,
+    bigTimeLimit,
     State,
     Situation,
     announcementColor,
@@ -92,6 +96,8 @@ module.exports = function createAdminCommands({
                     room.setCustomStadium(classicMap);
                 }
                 state.currentStadium = 'classic';
+                room.setScoreLimit(classicScoreLimit);
+                room.setTimeLimit(classicTimeLimit);
             } else if (['!big'].includes(msgArray[0].toLowerCase())) {
                 if (JSON.parse(bigMap).name == 'Big') {
                     room.setDefaultStadium('Big');
@@ -99,6 +105,8 @@ module.exports = function createAdminCommands({
                     room.setCustomStadium(bigMap);
                 }
                 state.currentStadium = 'big';
+                room.setScoreLimit(bigScoreLimit);
+                room.setTimeLimit(bigTimeLimit);
             } else if (['!training'].includes(msgArray[0].toLowerCase())) {
                 room.setCustomStadium(trainingMap);
                 state.currentStadium = 'training';

@@ -6,6 +6,12 @@ function createSqliteDatabase(filePath = path.join(__dirname, 'haxchill.sqlite')
     const database = new DatabaseSync(filePath);
     database.exec('PRAGMA journal_mode = WAL');
     database.exec('PRAGMA foreign_keys = ON');
+    // The room process and the Discord process (see core/discordProcess.js)
+    // now each hold their own connection to this same file. WAL allows that,
+    // but two writes landing in the same instant would otherwise throw
+    // SQLITE_BUSY immediately instead of just waiting the near-instant it
+    // takes the other connection's transaction to commit.
+    database.exec('PRAGMA busy_timeout = 5000');
 
     const initStatement = database.prepare(`
         CREATE TABLE IF NOT EXISTS player_stats (

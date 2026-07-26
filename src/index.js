@@ -1,5 +1,4 @@
 const path = require('node:path');
-const fs = require('node:fs');
 const HaxballJS = require('haxball.js').default;
 
 HaxballJS({ debug: false }).then((HBInit) => {
@@ -17,13 +16,6 @@ const {
     maxPlayers,
     roomPublic,
     roomPassword,
-    discordToken,
-    discordLogChannelId,
-    discordReportChannelId,
-    discordOwnerId,
-    discordAutoRoleId,
-    discordStatusChannelId,
-    discordPasswordChannelId,
     fetchRecordingVariable,
     timeLimit,
     scoreLimit,
@@ -90,50 +82,152 @@ const { createDatabaseApi } = require('../api/database');
 const db = createDatabaseApi();
 db.init();
 
-// Replaces the old roomWebhook/gameWebhook: posts the activity log and match
-// reports, relays the owner's Discord messages into the room chat, and
-// answers the !stats lookup command.
-//
-// printPlayerStats is wired much later (in the STATS FUNCTIONS block), so it's
-// reached through a lazy accessor rather than passed by value — same reason
-// chat.js reads `commands` through getCommands() instead of capturing it directly.
-const createDiscordBot = require('./core/discord');
-const discordBot = createDiscordBot({
-    discordToken,
-    discordLogChannelId,
-    discordReportChannelId,
-    discordOwnerId,
-    discordAutoRoleId,
-    discordStatusChannelId,
-    discordPasswordChannelId,
-    maxPlayers,
-    db,
-    state,
-    // authArray is declared later (in the AUTH block) — reached lazily for the
-    // same reason printPlayerStats is: it must not be captured by value before
-    // it exists.
-    getAuthArray: () => authArray,
-    getPrintPlayerStats: () => printPlayerStats,
-    // room.sendChat() speaks as the host's own player character, which doesn't
-    // exist when buildGameConfig() sets noPlayer: true — sendAnnouncement isn't
-    // tied to a player at all, which is why every other message in this bot
-    // already goes through it.
-    relayToRoom: (username, content) => room.sendAnnouncement(`[DISCORD] ${username}: ${content}`, null, announcementColor, 'bold', HaxNotification.CHAT),
-    // Only kicks a currently-connected player found by auth; the ban itself is
-    // recorded by the caller (db.banAuth) regardless of whether anyone was
-    // online to kick. authArray is referenced here (not through a getter) only
-    // because this whole function body is deferred until a real !banauth
-    // command arrives, long after authArray exists — same reasoning as
-    // getAuthArray above, just without needing the extra indirection since
-    // this is already a function, not a plain value.
-    kickPlayerByAuth: (auth, reason) => {
-        const target = state.playersAll.find((p) => authArray[p.id]?.[0] === auth);
-        if (!target) return null;
-        room.kickPlayer(target.id, reason ? `Вы забанены: ${reason}` : 'Вы забанены.', false);
-        return { name: target.name };
+// Runs the Discord bot in its own process (see core/discordProcess.js)
+// instead of in-process like the old roomWebhook/gameWebhook replacement
+// used to be. Reason: discord.js's gateway traffic, JSON parsing and object
+// churn were sharing this event loop with the room's physics tick — any
+// stall there (a GC pause, a burst of chat traffic) could delay a tick just
+// enough for players to see it as ping lag ("redbars"), while a
+// minute-averaged CPU/RAM graph from the host never shows a few hundred ms
+// of stolen event-loop time. `serialization: 'advanced'` lets game
+// recordings (Uint8Array, from room.stopRecording()) cross the IPC boundary
+// via structured clone instead of a lossy/expensive JSON detour. The DB
+// backup (VACUUM INTO, see db/sqlite.js) moved there too, for the same
+// reason — it also fully blocks whichever event loop runs it.
+const { fork } = require('node:child_process');
+
+// Mutable: a dead Discord process gets respawned (see spawnDiscordProcess
+// below) rather than left permanently gone, so this always points at
+// whichever child is currently live — or null in the brief gap while one is
+// restarting.
+let discordProcess = null;
+let discordRespawnTimer = null;
+const DISCORD_RESPAWN_BASE_DELAY_MS = 5000;
+const DISCORD_RESPAWN_MAX_DELAY_MS = 5 * 60 * 1000;
+// If it stayed up at least this long, the next crash starts the backoff
+// over from the base delay instead of continuing to escalate — only a
+// tight crash loop (bad token, a bug on every startup path) should ever
+// reach the max delay above.
+const DISCORD_STABLE_UPTIME_MS = 60 * 1000;
+let discordRespawnDelay = DISCORD_RESPAWN_BASE_DELAY_MS;
+
+// room.onRoomLink only fires once, right when the room is first created —
+// a respawned Discord process (see spawnDiscordProcess below) would
+// otherwise never learn it and leave the status embed's join button
+// permanently missing/stale. Cached here so resyncDiscordProcess can
+// replay it after a respawn.
+let lastRoomLink = null;
+
+// Guards every send: with no live/connected child (mid-respawn, or the
+// channel dropped a moment before 'exit' fires), this degrades to "the
+// message is dropped" instead of a thrown/queued-forever call.
+function sendToDiscord(message) {
+    if (discordProcess && discordProcess.connected) discordProcess.send(message);
+}
+
+// Replays the state a freshly (re)spawned Discord process would otherwise
+// have missed — it only exists from this point forward, but the roster and
+// room link were both established earlier, via events that won't fire
+// again. Deliberately NOT called after the very first spawnDiscordProcess()
+// at module load: state.playersAll/authArray don't exist yet at that point
+// (see the AUTH/OBJECTS blocks below), and there is nothing to replay for a
+// room that has no players and hasn't linked yet anyway.
+function resyncDiscordProcess() {
+    sendToDiscord({
+        type: 'roster',
+        players: state.playersAll.map((p) => ({ id: p.id, name: p.name, auth: authArray[p.id]?.[0] ?? null })),
+    });
+    if (lastRoomLink) sendToDiscord({ type: 'roomLink', url: lastRoomLink });
+}
+
+function spawnDiscordProcess() {
+    const child = fork(path.join(__dirname, 'core', 'discordProcess.js'), {
+        serialization: 'advanced',
+    });
+    discordProcess = child;
+    const spawnedAt = Date.now();
+
+    // Handles the two things the Discord process can't do on its own:
+    // relaying a !say/`/say` message into the room chat, and kicking a
+    // currently-connected player by auth for !banauth/`/banauth` (the ban
+    // record itself is written directly by that process's own DB
+    // connection — see discordProcess.js).
+    child.on('message', (msg) => {
+        if (!msg || typeof msg !== 'object') return;
+        if (msg.type === 'relay') {
+            // room.sendChat() speaks as the host's own player character,
+            // which doesn't exist when buildGameConfig() sets noPlayer:
+            // true — sendAnnouncement isn't tied to a player at all, which
+            // is why every other message already goes through it.
+            room.sendAnnouncement(`[DISCORD] ${msg.username}: ${msg.content}`, null, announcementColor, 'bold', HaxNotification.CHAT);
+            return;
+        }
+        if (msg.type === 'kickByAuth') {
+            const target = state.playersAll.find((p) => authArray[p.id]?.[0] === msg.auth);
+            const result = target ? { name: target.name } : null;
+            if (target) room.kickPlayer(target.id, msg.reason ? `Вы забанены: ${msg.reason}` : 'Вы забанены.', false);
+            sendToDiscord({ type: 'kickResult', requestId: msg.requestId, result });
+        }
+    });
+    child.on('error', (err) => {
+        console.error('[WARN] Discord process error:', err);
+    });
+    // Auto-respawned rather than left dead: a crash in discord.js (or the
+    // process being OOM-killed, etc.) must not permanently lose logging/
+    // moderation/stats until someone notices and restarts the whole VPS
+    // process by hand.
+    child.on('exit', (code, signal) => {
+        discordRespawnDelay = Date.now() - spawnedAt >= DISCORD_STABLE_UPTIME_MS
+            ? DISCORD_RESPAWN_BASE_DELAY_MS
+            : Math.min(discordRespawnDelay * 2, DISCORD_RESPAWN_MAX_DELAY_MS);
+        console.error(`[WARN] Discord process exited (code=${code}, signal=${signal}), respawning in ${discordRespawnDelay}ms`);
+        if (discordProcess === child) discordProcess = null;
+        discordRespawnTimer = setTimeout(() => {
+            spawnDiscordProcess();
+            resyncDiscordProcess();
+        }, discordRespawnDelay);
+    });
+
+    return child;
+}
+spawnDiscordProcess();
+
+// Same public shape the old same-process discordBot had, so every call site
+// below (sendLog, sendReport, sendRecording, setRoomLink, updateRoomStatus,
+// sendPassword) is unchanged — only the implementation now forwards over IPC.
+const discordBot = {
+    init() {},
+    sendLog(content) {
+        sendToDiscord({ type: 'log', content });
     },
+    sendReport(embedData) {
+        sendToDiscord({ type: 'report', embedData });
+    },
+    sendRecording(buffer, filename) {
+        sendToDiscord({ type: 'recording', buffer, filename });
+    },
+    setRoomLink(url) {
+        lastRoomLink = url;
+        sendToDiscord({ type: 'roomLink', url });
+    },
+    sendPassword(password) {
+        sendToDiscord({ type: 'password', password });
+    },
+    // authArray is declared later (in the AUTH block) — reached lazily for
+    // the same reason it always was: this must not capture it by value
+    // before it exists.
+    updateRoomStatus() {
+        sendToDiscord({
+            type: 'roster',
+            players: state.playersAll.map((p) => ({ id: p.id, name: p.name, auth: authArray[p.id]?.[0] ?? null })),
+        });
+    },
+};
+
+process.on('exit', () => {
+    clearTimeout(discordRespawnTimer);
+    if (discordProcess) discordProcess.kill();
 });
-discordBot.init();
 
 // Last-resort safety net: safeEventHandlers (see below) already catches sync
 // errors inside every room.onXxx handler so one bad command can't take the
@@ -151,33 +245,6 @@ process.on('unhandledRejection', (reason) => {
     console.error('[FATAL] Unhandled rejection:', reason);
     discordBot.sendLog(`⚠️ **Необработанный reject:**\n\`\`\`${(reason && reason.stack) || reason}\`\`\``);
 });
-
-/* DATABASE BACKUPS */
-
-// VACUUM INTO takes a safe, consistent snapshot even while the DB is live —
-// see db/sqlite.js's backup(). Rotated to bound disk usage; runs once at
-// startup too, so there's always at least one backup even on a short-lived run.
-const backupDir = path.join(__dirname, '..', 'db', 'backups');
-const backupIntervalMs = 6 * 60 * 60 * 1000;
-const maxBackups = 28; // 1 week of history at the 6h cadence
-
-function runDatabaseBackup() {
-    try {
-        const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-        db.backup(path.join(backupDir, `haxchill-${stamp}.sqlite`));
-        const backups = fs.existsSync(backupDir)
-            ? fs.readdirSync(backupDir).filter((f) => f.endsWith('.sqlite')).sort()
-            : [];
-        while (backups.length > maxBackups) {
-            fs.unlinkSync(path.join(backupDir, backups.shift()));
-        }
-    } catch (err) {
-        console.error('DB backup failed:', err);
-        discordBot.sendLog(`⚠️ Не удалось создать резервную копию БД: ${err.message}`);
-    }
-}
-runDatabaseBackup();
-setInterval(runDatabaseBackup, backupIntervalMs);
 
 /* OVERFLOW PASSWORD */
 
@@ -234,9 +301,15 @@ room.setPassword(state.roomPassword != '' ? state.roomPassword : null);
 
 const drawTimeLimit = Infinity;
 const teamSize = 4;
+// Per-stadium score/time limits, applied whenever stadiumCommand switches
+// arenas — classic is the small 1v1/2v2 map, big is the 3v3/4v4 map.
+const classicScoreLimit = 3;
+const classicTimeLimit = 3;
+const bigScoreLimit = 5;
+const bigTimeLimit = 5;
 const disableBans = false;
 const debugMode = false;
-const afkLimit = debugMode ? Infinity : 12;
+const afkLimit = debugMode ? Infinity : 15;
 
 const defaultSlowMode = 0.5;
 const chooseModeSlowMode = 1;
@@ -415,6 +488,10 @@ const {
     trainingMap,
     classicMap,
     bigMap,
+    classicScoreLimit,
+    classicTimeLimit,
+    bigScoreLimit,
+    bigTimeLimit,
     State,
     Situation,
     announcementColor,
@@ -512,7 +589,10 @@ function resumeGame() {
 }
 
 function endGame(winner) {
-    if (state.players.length >= 2 * teamSize - 1) activateChooseMode();
+    // Captain-choosing mode is reserved for a genuine full house (enough for
+    // 4v4) — with fewer players, people should just keep playing whatever
+    // smaller size they naturally have (2v2, 3v3) without the pick ritual.
+    if (state.players.length >= 2 * teamSize) activateChooseMode();
     const scores = room.getScores();
     state.game.scores = scores;
     state.lastWinner = winner;
@@ -638,7 +718,7 @@ function handleActivityPlayer(player) {
         pComp.inactivityTicks++;
         if (pComp.inactivityTicks == 60 * ((2 / 3) * afkLimit)) {
             room.sendAnnouncement(
-                `⛔ ${player.name}, если вы не активны, вы будете кикнуты через ${afkLimit / 3} минут.`,
+                `⛔ ${player.name}, если вы не активны, вы будете кикнуты через ${afkLimit / 3} секунд.`,
                 player.id,
                 warningColor,
                 'bold',

@@ -4,6 +4,15 @@
  * Discord), rotating it hourly while active, and clears it again once the
  * population drops back below the threshold.
  *
+ * The rotation timer runs continuously once started rather than being
+ * torn down/recreated on every activate/deactivate — the population
+ * naturally flaps right around the threshold (someone leaving and
+ * rejoining within minutes is the common case, not an edge case), and
+ * re-activating must reuse whatever password is still current instead of
+ * minting a brand new one each time. Without this, a room hovering at the
+ * threshold could get a fresh password (and a fresh Discord announcement)
+ * every few minutes instead of the intended once an hour.
+ *
  * Mutable room state is reached through `state`, never captured by value.
  *
  * Note: this shares state.roomPassword/room.setPassword with the master
@@ -22,25 +31,39 @@ module.exports = function createOverflowPassword({
     rotateIntervalMs,
 }) {
     let active = false;
+    let currentPassword = null;
     let rotateTimer = null;
 
-    function applyPassword() {
-        const password = generateRoomPassword();
-        state.roomPassword = password;
-        room.setPassword(password);
-        discordBot.sendPassword(password);
+    function applyNewPassword() {
+        currentPassword = generateRoomPassword();
+        state.roomPassword = currentPassword;
+        room.setPassword(currentPassword);
+        discordBot.sendPassword(currentPassword);
     }
 
     function activate() {
         active = true;
-        applyPassword();
-        rotateTimer = setInterval(applyPassword, rotateIntervalMs);
+        if (currentPassword) {
+            // Still within this password's rotation window — reuse it
+            // rather than generating (and re-announcing to Discord) a new
+            // one just because the room briefly dipped below the threshold.
+            state.roomPassword = currentPassword;
+            room.setPassword(currentPassword);
+        } else {
+            applyNewPassword();
+        }
+        // Started once and left running: it only needs to check `active`
+        // on each tick, so activate()/deactivate() flapping never needs to
+        // touch it.
+        if (!rotateTimer) {
+            rotateTimer = setInterval(() => {
+                if (active) applyNewPassword();
+            }, rotateIntervalMs);
+        }
     }
 
     function deactivate() {
         active = false;
-        clearInterval(rotateTimer);
-        rotateTimer = null;
         state.roomPassword = '';
         room.setPassword(null);
     }

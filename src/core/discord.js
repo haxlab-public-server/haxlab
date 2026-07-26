@@ -70,7 +70,9 @@ function listCurrentPlayers(state, getAuthArray) {
 
 // Pure and independently testable: decides what (if anything) to do with an
 // incoming Discord message, without touching the discord.js Client itself.
-function handleIncomingMessage(message, { discordOwnerId, db, state, getAuthArray, getPrintPlayerStats, relayToRoom, kickPlayerByAuth }) {
+// Async because kickPlayerByAuth crosses to the game process over IPC (see
+// core/discordProcess.js) — it's no longer a same-process function call.
+async function handleIncomingMessage(message, { discordOwnerId, db, state, getAuthArray, getPrintPlayerStats, relayToRoom, kickPlayerByAuth }) {
     if (message.author.bot) return null;
 
     if (message.content.toLowerCase().startsWith(SAY_PREFIX)) {
@@ -105,7 +107,7 @@ function handleIncomingMessage(message, { discordOwnerId, db, state, getAuthArra
         const auth = rest[0];
         if (!auth) return 'Использование: !banauth <auth> [причина]';
         const reason = rest.slice(1).join(' ');
-        const kicked = kickPlayerByAuth(auth, reason);
+        const kicked = await kickPlayerByAuth(auth, reason);
         db.banAuth(auth, kicked ? kicked.name : auth, reason);
         return kicked
             ? `${kicked.name} забанен по auth и выгнан из комнаты.`
@@ -146,7 +148,7 @@ const OWNER_ONLY_REPLY = { content: 'Только владелец может и
 // behavior command-for-command, just reading typed slash-command options instead
 // of parsing message text — /stats replies publicly (like !stats) since it's an
 // open lookup, the rest stay ephemeral (owner-only moderation/utility actions).
-function handleSlashCommand(interaction, { discordOwnerId, db, state, getAuthArray, getPrintPlayerStats, relayToRoom, kickPlayerByAuth }) {
+async function handleSlashCommand(interaction, { discordOwnerId, db, state, getAuthArray, getPrintPlayerStats, relayToRoom, kickPlayerByAuth }) {
     const { commandName } = interaction;
 
     if (commandName === 'say') {
@@ -165,7 +167,7 @@ function handleSlashCommand(interaction, { discordOwnerId, db, state, getAuthArr
         if (interaction.user.id !== discordOwnerId) return OWNER_ONLY_REPLY;
         const auth = interaction.options.getString('auth');
         const reason = interaction.options.getString('reason') ?? '';
-        const kicked = kickPlayerByAuth(auth, reason);
+        const kicked = await kickPlayerByAuth(auth, reason);
         db.banAuth(auth, kicked ? kicked.name : auth, reason);
         const content = kicked
             ? `${kicked.name} забанен по auth и выгнан из комнаты.`
@@ -289,8 +291,8 @@ module.exports = function createDiscordBot({
         updateRoomStatus();
     });
 
-    client.on(Events.MessageCreate, (message) => {
-        const reply = handleIncomingMessage(message, { discordOwnerId, db, state, getAuthArray, getPrintPlayerStats, relayToRoom, kickPlayerByAuth });
+    client.on(Events.MessageCreate, async (message) => {
+        const reply = await handleIncomingMessage(message, { discordOwnerId, db, state, getAuthArray, getPrintPlayerStats, relayToRoom, kickPlayerByAuth });
         if (reply) message.channel.send(reply).catch((err) => console.error('Discord reply failed:', err));
     });
 
@@ -298,9 +300,9 @@ module.exports = function createDiscordBot({
         handleGuildMemberAdd(member, { discordAutoRoleId });
     });
 
-    client.on(Events.InteractionCreate, (interaction) => {
+    client.on(Events.InteractionCreate, async (interaction) => {
         if (!interaction.isChatInputCommand()) return;
-        const reply = handleSlashCommand(interaction, { discordOwnerId, db, state, getAuthArray, getPrintPlayerStats, relayToRoom, kickPlayerByAuth });
+        const reply = await handleSlashCommand(interaction, { discordOwnerId, db, state, getAuthArray, getPrintPlayerStats, relayToRoom, kickPlayerByAuth });
         if (reply) interaction.reply(reply).catch((err) => console.error('Discord interaction reply failed:', err));
     });
 

@@ -36,6 +36,8 @@ const room = {
     stopGame: () => roomCalls.push('stopGame'),
     setScoreLimit: (n) => roomCalls.push('setScoreLimit:' + n),
     setTimeLimit: (n) => roomCalls.push('setTimeLimit:' + n),
+    setCustomStadium: (map) => roomCalls.push('setCustomStadium'),
+    setDefaultStadium: (name) => roomCalls.push('setDefaultStadium:' + name),
     getPlayerList: () => [],
 };
 
@@ -387,7 +389,13 @@ console.log('\n--- db + roomStats.js/player.js: player data actually round-trips
 }
 
 console.log('\n--- discord.js: message/interaction-handling logic (no live Discord connection needed) ---');
-{
+// Wrapped in an async IIFE: handleIncomingMessage/handleSlashCommand are now
+// async (kickPlayerByAuth crosses to the game process over IPC in real use —
+// see core/discordProcess.js), so their result must be awaited. This runs
+// concurrently with the synchronous sections below it (there's no top-level
+// await in CommonJS); the final tally at the bottom of this file waits long
+// enough for it to finish before counting pass/fail.
+(async () => {
     const { createSqliteDatabase } = require(path.join(__dirname, '..', 'db', 'sqlite'));
     const { handleIncomingMessage, handleSlashCommand, handleGuildMemberAdd, listCurrentPlayers } = require(path.join(CORE, 'discord'));
     const db = createSqliteDatabase(':memory:');
@@ -413,28 +421,28 @@ console.log('\n--- discord.js: message/interaction-handling logic (no live Disco
     };
     const msg = (authorId, content, bot = false) => ({ author: { id: authorId, bot, displayName: authorId }, content });
 
-    handleIncomingMessage(msg('OWNER_ID', '!say hello room'), deps);
+    await handleIncomingMessage(msg('OWNER_ID', '!say hello room'), deps);
     check('!say from the owner relays the text (prefix stripped) with the sender name', relayed, [{ username: 'OWNER_ID', content: 'hello room' }]);
 
     relayed.length = 0;
-    handleIncomingMessage(msg('SOME_OTHER_USER', '!say hello room'), deps);
+    await handleIncomingMessage(msg('SOME_OTHER_USER', '!say hello room'), deps);
     check('!say from a non-owner is ignored', relayed, []);
 
     relayed.length = 0;
-    handleIncomingMessage(msg('OWNER_ID', 'just chatting, not a command'), deps);
+    await handleIncomingMessage(msg('OWNER_ID', 'just chatting, not a command'), deps);
     check('an ordinary owner message is NOT relayed (no more blanket relay)', relayed, []);
 
-    check('!say with no text shows usage', handleIncomingMessage(msg('OWNER_ID', '!say'), deps), 'Использование: !say <message>');
-    check('bot messages are ignored entirely', handleIncomingMessage(msg('OWNER_ID', '!stats Xara', true), deps), null);
+    check('!say with no text shows usage', await handleIncomingMessage(msg('OWNER_ID', '!say'), deps), 'Использование: !say <message>');
+    check('bot messages are ignored entirely', await handleIncomingMessage(msg('OWNER_ID', '!stats Xara', true), deps), null);
 
-    check('!stats <name> falls back to the DB when nobody live matches', handleIncomingMessage(msg('U1', '!stats Xara'), deps), 'Xara: 7G');
-    check('!stats is case-insensitive on the name', handleIncomingMessage(msg('U1', '!stats xARA'), deps), 'Xara: 7G');
-    check('!stats <current in-room name> resolves via live auth, even though the DB still has the old name', handleIncomingMessage(msg('U1', '!stats NewNick'), deps), 'Xara: 7G');
-    check('!stats for an unknown player says so', handleIncomingMessage(msg('U1', '!stats Ghost'), deps), 'Статистика для "Ghost" не найдена.');
-    check('!stats with no name, from a linked account, shows that account\'s own stats', handleIncomingMessage(msg('LINKED_USER', '!stats'), deps), 'Xara: 7G');
-    check('!stats with no name, from an unlinked account, explains how to link', handleIncomingMessage(msg('U1', '!stats'), deps), 'Ваш аккаунт Discord не привязан. Используйте "!discord <ваш ID Discord>" в комнате, или "!stats <имя игрока>" здесь.');
-    check('!stats with no name, linked but no qualifying game yet', handleIncomingMessage(msg('LINKED_NO_STATS', '!stats'), deps), "Вы еще не играли в квалификационные игры.");
-    check('unrelated message produces no reply', handleIncomingMessage(msg('U1', 'gg wp'), deps), null);
+    check('!stats <name> falls back to the DB when nobody live matches', await handleIncomingMessage(msg('U1', '!stats Xara'), deps), 'Xara: 7G');
+    check('!stats is case-insensitive on the name', await handleIncomingMessage(msg('U1', '!stats xARA'), deps), 'Xara: 7G');
+    check('!stats <current in-room name> resolves via live auth, even though the DB still has the old name', await handleIncomingMessage(msg('U1', '!stats NewNick'), deps), 'Xara: 7G');
+    check('!stats for an unknown player says so', await handleIncomingMessage(msg('U1', '!stats Ghost'), deps), 'Статистика для "Ghost" не найдена.');
+    check('!stats with no name, from a linked account, shows that account\'s own stats', await handleIncomingMessage(msg('LINKED_USER', '!stats'), deps), 'Xara: 7G');
+    check('!stats with no name, from an unlinked account, explains how to link', await handleIncomingMessage(msg('U1', '!stats'), deps), 'Ваш аккаунт Discord не привязан. Используйте "!discord <ваш ID Discord>" в комнате, или "!stats <имя игрока>" здесь.');
+    check('!stats with no name, linked but no qualifying game yet', await handleIncomingMessage(msg('LINKED_NO_STATS', '!stats'), deps), "Вы еще не играли в квалификационные игры.");
+    check('unrelated message produces no reply', await handleIncomingMessage(msg('U1', 'gg wp'), deps), null);
 
     // Every slash command mirrors its !prefix twin command-for-command, just
     // reading typed options instead of parsing message text.
@@ -445,19 +453,19 @@ console.log('\n--- discord.js: message/interaction-handling logic (no live Disco
     });
 
     relayed.length = 0;
-    const ownerReply = handleSlashCommand(interaction('OWNER_ID', 'say', { message: 'hi from slash' }), deps);
+    const ownerReply = await handleSlashCommand(interaction('OWNER_ID', 'say', { message: 'hi from slash' }), deps);
     check('/say from the owner relays the text with the sender name', relayed, [{ username: 'OWNER_ID', content: 'hi from slash' }]);
     check('/say confirms back to the owner, ephemerally', ownerReply, { content: 'Отправлено: hi from slash', ephemeral: true });
 
     relayed.length = 0;
-    const strangerReply = handleSlashCommand(interaction('SOME_OTHER_USER', 'say', { message: 'hi from slash' }), deps);
+    const strangerReply = await handleSlashCommand(interaction('SOME_OTHER_USER', 'say', { message: 'hi from slash' }), deps);
     check('/say from a non-owner is rejected, not relayed', relayed, []);
     check('/say rejection is ephemeral', strangerReply.ephemeral, true);
 
-    check('/stats <name> resolves the same as !stats', handleSlashCommand(interaction('U1', 'stats', { name: 'Xara' }), deps), { content: 'Xara: 7G' });
-    check('/stats with no name, from a linked account, resolves the same as !stats', handleSlashCommand(interaction('LINKED_USER', 'stats', {}), deps), { content: 'Xara: 7G' });
-    check('/stats for an unknown player says so', handleSlashCommand(interaction('U1', 'stats', { name: 'Ghost' }), deps), { content: 'Статистика для "Ghost" не найдена.' });
-    check('an unrecognised slash command produces no reply', handleSlashCommand(interaction('U1', 'nope', {}), deps), null);
+    check('/stats <name> resolves the same as !stats', await handleSlashCommand(interaction('U1', 'stats', { name: 'Xara' }), deps), { content: 'Xara: 7G' });
+    check('/stats with no name, from a linked account, resolves the same as !stats', await handleSlashCommand(interaction('LINKED_USER', 'stats', {}), deps), { content: 'Xara: 7G' });
+    check('/stats for an unknown player says so', await handleSlashCommand(interaction('U1', 'stats', { name: 'Ghost' }), deps), { content: 'Статистика для "Ghost" не найдена.' });
+    check('an unrecognised slash command produces no reply', await handleSlashCommand(interaction('U1', 'nope', {}), deps), null);
 
     check('listCurrentPlayers lists the live roster with auth', listCurrentPlayers(discordState, deps.getAuthArray), 'Игроки в комнате:\nNewNick [AUTH_X]');
     check('listCurrentPlayers reports an empty room', listCurrentPlayers({ playersAll: [] }, deps.getAuthArray), 'В комнате никого нет.');
@@ -475,40 +483,40 @@ console.log('\n--- discord.js: message/interaction-handling logic (no live Disco
         },
     };
 
-    check('!players from the owner lists the room', handleIncomingMessage(msg('OWNER_ID', '!players'), authBanDeps), 'Игроки в комнате:\nNewNick [AUTH_X]');
-    check('!players from a non-owner is ignored', handleIncomingMessage(msg('SOME_OTHER_USER', '!players'), authBanDeps), null);
+    check('!players from the owner lists the room', await handleIncomingMessage(msg('OWNER_ID', '!players'), authBanDeps), 'Игроки в комнате:\nNewNick [AUTH_X]');
+    check('!players from a non-owner is ignored', await handleIncomingMessage(msg('SOME_OTHER_USER', '!players'), authBanDeps), null);
 
-    check('!banauth with no auth shows usage', handleIncomingMessage(msg('OWNER_ID', '!banauth'), authBanDeps), 'Использование: !banauth <auth> [причина]');
-    check('!banauth from a non-owner is ignored', handleIncomingMessage(msg('SOME_OTHER_USER', '!banauth AUTH_X cheating'), authBanDeps), null);
+    check('!banauth with no auth shows usage', await handleIncomingMessage(msg('OWNER_ID', '!banauth'), authBanDeps), 'Использование: !banauth <auth> [причина]');
+    check('!banauth from a non-owner is ignored', await handleIncomingMessage(msg('SOME_OTHER_USER', '!banauth AUTH_X cheating'), authBanDeps), null);
 
     kicked.length = 0;
-    const banReply = handleIncomingMessage(msg('OWNER_ID', '!banauth AUTH_X cheating'), authBanDeps);
+    const banReply = await handleIncomingMessage(msg('OWNER_ID', '!banauth AUTH_X cheating'), authBanDeps);
     check('!banauth on a currently-online auth kicks them', kicked, [{ auth: 'AUTH_X', reason: 'cheating' }]);
     check('!banauth on a currently-online auth confirms by name', banReply, 'NewNick забанен по auth и выгнан из комнаты.');
     check('!banauth records the ban in the db', db.getAuthBan('AUTH_X'), { auth: 'AUTH_X', playerName: 'NewNick', reason: 'cheating' });
 
     kicked.length = 0;
-    const banOfflineReply = handleIncomingMessage(msg('OWNER_ID', '!banauth AUTH_OFFLINE griefing'), authBanDeps);
+    const banOfflineReply = await handleIncomingMessage(msg('OWNER_ID', '!banauth AUTH_OFFLINE griefing'), authBanDeps);
     check('!banauth on an offline auth does not attempt a kick', kicked, []);
     check('!banauth on an offline auth confirms without a kick', banOfflineReply, 'AUTH_OFFLINE забанен по auth (сейчас не в комнате).');
 
-    check('!unbanauth with no auth shows usage', handleIncomingMessage(msg('OWNER_ID', '!unbanauth'), authBanDeps), 'Использование: !unbanauth <auth>');
-    check('!unbanauth from a non-owner is ignored', handleIncomingMessage(msg('SOME_OTHER_USER', '!unbanauth AUTH_X'), authBanDeps), null);
-    check('!unbanauth on an auth that was never banned reports so', handleIncomingMessage(msg('OWNER_ID', '!unbanauth AUTH_GHOST'), authBanDeps), 'Этот auth не забанен.');
-    check('!unbanauth clears an existing ban', handleIncomingMessage(msg('OWNER_ID', '!unbanauth AUTH_X'), authBanDeps), 'NewNick разбанен по auth.');
+    check('!unbanauth with no auth shows usage', await handleIncomingMessage(msg('OWNER_ID', '!unbanauth'), authBanDeps), 'Использование: !unbanauth <auth>');
+    check('!unbanauth from a non-owner is ignored', await handleIncomingMessage(msg('SOME_OTHER_USER', '!unbanauth AUTH_X'), authBanDeps), null);
+    check('!unbanauth on an auth that was never banned reports so', await handleIncomingMessage(msg('OWNER_ID', '!unbanauth AUTH_GHOST'), authBanDeps), 'Этот auth не забанен.');
+    check('!unbanauth clears an existing ban', await handleIncomingMessage(msg('OWNER_ID', '!unbanauth AUTH_X'), authBanDeps), 'NewNick разбанен по auth.');
     check('!unbanauth actually removed the ban from the db', db.getAuthBan('AUTH_X'), null);
 
     // Same commands again, as slash interactions this time.
-    check('/players from the owner lists the room', handleSlashCommand(interaction('OWNER_ID', 'players', {}), authBanDeps), { content: 'Игроки в комнате:\nNewNick [AUTH_X]', ephemeral: true });
-    check('/players from a non-owner is rejected', handleSlashCommand(interaction('SOME_OTHER_USER', 'players', {}), authBanDeps).ephemeral, true);
+    check('/players from the owner lists the room', await handleSlashCommand(interaction('OWNER_ID', 'players', {}), authBanDeps), { content: 'Игроки в комнате:\nNewNick [AUTH_X]', ephemeral: true });
+    check('/players from a non-owner is rejected', (await handleSlashCommand(interaction('SOME_OTHER_USER', 'players', {}), authBanDeps)).ephemeral, true);
 
     kicked.length = 0;
-    const slashBanReply = handleSlashCommand(interaction('OWNER_ID', 'banauth', { auth: 'AUTH_X', reason: 'cheating' }), authBanDeps);
+    const slashBanReply = await handleSlashCommand(interaction('OWNER_ID', 'banauth', { auth: 'AUTH_X', reason: 'cheating' }), authBanDeps);
     check('/banauth on a currently-online auth kicks them', kicked, [{ auth: 'AUTH_X', reason: 'cheating' }]);
     check('/banauth on a currently-online auth confirms by name', slashBanReply, { content: 'NewNick забанен по auth и выгнан из комнаты.', ephemeral: true });
 
-    check('/unbanauth clears the ban just placed', handleSlashCommand(interaction('OWNER_ID', 'unbanauth', { auth: 'AUTH_X' }), authBanDeps), { content: 'NewNick разбанен по auth.', ephemeral: true });
-    check('/unbanauth on an auth that was never banned reports so', handleSlashCommand(interaction('OWNER_ID', 'unbanauth', { auth: 'AUTH_GHOST' }), authBanDeps), { content: 'Этот auth не забанен.', ephemeral: true });
+    check('/unbanauth clears the ban just placed', await handleSlashCommand(interaction('OWNER_ID', 'unbanauth', { auth: 'AUTH_X' }), authBanDeps), { content: 'NewNick разбанен по auth.', ephemeral: true });
+    check('/unbanauth on an auth that was never banned reports so', await handleSlashCommand(interaction('OWNER_ID', 'unbanauth', { auth: 'AUTH_GHOST' }), authBanDeps), { content: 'Этот auth не забанен.', ephemeral: true });
 
     // Auto-role on join: every new Discord member gets the configured role,
     // regardless of whether they've ever linked a HaxBall account.
@@ -522,7 +530,7 @@ console.log('\n--- discord.js: message/interaction-handling logic (no live Disco
     check('handleGuildMemberAdd is a no-op when no role is configured', addedRoles, []);
 
     db.close();
-}
+})();
 
 console.log('\n--- events/activity.js: MASTER/ADMIN/VIP get a chat prefix, regular players don\'t ---');
 {
@@ -623,6 +631,7 @@ console.log('\n--- team/balance.js: an already-full match never auto-upgrades to
 {
     const State = { PLAY: 0, PAUSE: 1, STOP: 2 };
     const calls = [];
+    const stadiumCalls = [];
     const noop = (name) => () => calls.push(name);
     const state = {
         chooseMode: false,
@@ -630,6 +639,7 @@ console.log('\n--- team/balance.js: an already-full match never auto-upgrades to
         teamBlue: [{ id: 3 }, { id: 4 }],
         teamSpec: [{ id: 5 }, { id: 6 }],
         players: [{ id: 1 }, { id: 2 }, { id: 3 }, { id: 4 }, { id: 5 }, { id: 6 }],
+        currentStadium: 'classic',
     };
     const balance = require(path.join(CORE, 'team', 'balance'))({
         room, state, Team, State, HaxNotification, emptyPlayer: {}, infoColor: 5,
@@ -639,7 +649,11 @@ console.log('\n--- team/balance.js: an already-full match never auto-upgrades to
         endGame: noop('endGame'), getRandomInt: () => 0, getSpecList: noop('getSpecList'),
         instantRestart: noop('instantRestart'), randomButton: noop('randomButton'),
         redToSpecButton: noop('redToSpecButton'), resetButton: noop('resetButton'),
-        resumeGame: noop('resumeGame'), stadiumCommand: noop('stadiumCommand'),
+        resumeGame: noop('resumeGame'),
+        stadiumCommand: (player, msg) => {
+            calls.push('stadiumCommand');
+            stadiumCalls.push(msg);
+        },
         swapButton: noop('swapButton'), topButton: noop('topButton'),
     });
 
@@ -661,6 +675,109 @@ console.log('\n--- team/balance.js: an already-full match never auto-upgrades to
     calls.length = 0;
     balance.balanceTeams();
     check('a single joining player still auto-starts training (unchanged)', calls.includes('instantRestart'), true);
+
+    // Captain-choosing mode is reserved for a genuine full 4v4 house (8
+    // players) — below that, an imbalanced team with excess spectators should
+    // just get balanced directly, not send everyone into the pick ritual.
+    state.teamRed = [{ id: 1 }, { id: 2 }];
+    state.teamBlue = [{ id: 3 }];
+    state.teamSpec = [{ id: 5 }, { id: 6 }];
+    state.players = [{ id: 1 }, { id: 2 }, { id: 3 }, { id: 5 }, { id: 6 }];
+    roomCalls.length = 0;
+    calls.length = 0;
+    balance.balanceTeams();
+    check('below a full house, an imbalanced team is balanced directly instead of entering choose mode', calls.includes('activateChooseMode'), false);
+    check('exactly one spectator fills the smaller team, the rest keep waiting', roomCalls, [`setPlayerTeam:5:${Team.BLUE}`]);
+
+    // Same shape, but now with a full 8-player house — choose mode is warranted.
+    state.teamRed = [{ id: 1 }, { id: 2 }, { id: 7 }, { id: 8 }];
+    state.teamBlue = [{ id: 3 }, { id: 9 }, { id: 10 }];
+    state.teamSpec = [{ id: 5 }, { id: 6 }];
+    state.players = new Array(9).fill(0).map((_, i) => ({ id: i }));
+    roomCalls.length = 0;
+    calls.length = 0;
+    balance.balanceTeams();
+    check('with a full house, the same imbalance DOES enter choose mode', calls.includes('activateChooseMode'), true);
+
+    // handlePlayersStop: 5 players used to enter choose mode directly after a
+    // game ended; now it should behave like the 3-player case instead (loser
+    // benches, topButton pulls someone back in) and stay out of choose mode.
+    state.endGameVariable = true;
+    state.lastWinner = Team.RED;
+    state.players = new Array(5).fill(0).map((_, i) => ({ id: i }));
+    calls.length = 0;
+    balance.handlePlayersStop(null);
+    check('handlePlayersStop at 5 players no longer enters choose mode', calls.includes('activateChooseMode'), false);
+    check('handlePlayersStop at 5 players benches the losing team like the 3-player case does', calls.includes('blueToSpecButton'), true);
+
+    // Bug fix: 3v3/4v4 must use the big map — it must not stay on classic
+    // just because the room grew into that size without an explicit !big.
+    // Wrapped in an outer setTimeout so any earlier test's own deferred
+    // stadiumCommand call (e.g. the single-player -> training case above,
+    // itself scheduled via setTimeout(5)) has already fired and can't leak
+    // into stadiumCalls; each scenario below is then chained the same way,
+    // only starting once the previous one's check has run.
+    setTimeout(() => {
+        state.chooseMode = true;
+        state.currentStadium = 'classic';
+        state.players = new Array(8).fill(0).map((_, i) => ({ id: i }));
+        stadiumCalls.length = 0;
+        balance.handlePlayersStop(null);
+        setTimeout(() => {
+            check('a full 4v4 switches to the big map if it was still on classic', stadiumCalls, ['!big']);
+
+            state.chooseMode = false;
+            state.currentStadium = 'classic';
+            state.players = new Array(6).fill(0).map((_, i) => ({ id: i }));
+            stadiumCalls.length = 0;
+            balance.handlePlayersStop(null);
+            setTimeout(() => {
+                check('a 3v3 switches to the big map if it was still on classic', stadiumCalls, ['!big']);
+
+                state.currentStadium = 'big';
+                state.players = new Array(6).fill(0).map((_, i) => ({ id: i }));
+                stadiumCalls.length = 0;
+                balance.handlePlayersStop(null);
+                setTimeout(() => {
+                    check('a 3v3 already on the big map does not needlessly re-switch', stadiumCalls, []);
+
+                    state.currentStadium = 'big';
+                    state.players = [{ id: 1 }, { id: 2 }, { id: 3 }, { id: 4 }];
+                    stadiumCalls.length = 0;
+                    balance.handlePlayersStop(null);
+                    setTimeout(() => {
+                        check('a 2v2 switches back to classic if it was still on the big map', stadiumCalls, ['!classic']);
+
+                        // 9+ players: choose mode's "any other count" branch
+                        // (not exactly 2*teamSize) must also assert big — it's
+                        // still a full-house-or-more scenario by definition.
+                        state.chooseMode = true;
+                        state.currentStadium = 'classic';
+                        state.lastWinner = Team.RED;
+                        state.players = new Array(9).fill(0).map((_, i) => ({ id: i }));
+                        stadiumCalls.length = 0;
+                        balance.handlePlayersStop(null);
+                        setTimeout(() => {
+                            check('9 players inside choose mode also asserts the big map', stadiumCalls, ['!big']);
+
+                            // Defensive-only: 9+ outside choose mode shouldn't
+                            // normally happen (endGame already turns choose
+                            // mode on by then), but if it did, it must not be
+                            // left on classic either.
+                            state.chooseMode = false;
+                            state.currentStadium = 'classic';
+                            state.players = new Array(9).fill(0).map((_, i) => ({ id: i }));
+                            stadiumCalls.length = 0;
+                            balance.handlePlayersStop(null);
+                            setTimeout(() => {
+                                check('9 players outside choose mode (defensive edge case) also asserts the big map', stadiumCalls, ['!big']);
+                            }, 20);
+                        }, 20);
+                    }, 20);
+                }, 20);
+            }, 20);
+        }, 20);
+    }, 20);
 }
 
 console.log('\n--- events/misc.js: nobody keeps an admin badge unless they are MASTER/ADMIN_PERM ---');
@@ -693,6 +810,28 @@ console.log('\n--- events/misc.js: nobody keeps an admin badge unless they are M
     roomCalls.length = 0;
     misc.onPlayerAdminChange({ id: 3, admin: false }, null);
     check('a master who lost the badge gets it restored too', roomCalls, ['setPlayerAdmin:3:true']);
+}
+
+console.log('\n--- commands/admin.js: stadiumCommand applies per-arena score/time limits ---');
+{
+    const State = { PLAY: 0, PAUSE: 1, STOP: 2 };
+    const admin = require(path.join(CORE, 'commands', 'admin'))({
+        room, state: { gameState: State.STOP }, authArray: [], muteArray: {}, muteDuration: 10, MutePlayer: class {},
+        trainingMap: '{"name":"Training"}', classicMap: '{"name":"Classic1v1"}', bigMap: '{"name":"Big3x3"}',
+        classicScoreLimit: 3, classicTimeLimit: 3, bigScoreLimit: 5, bigTimeLimit: 5,
+        State, Situation: {}, announcementColor: 1, errorColor: 2, HaxNotification,
+        instantRestart: () => {}, swapButton: () => {},
+    });
+
+    roomCalls.length = 0;
+    admin.stadiumCommand({ id: 1 }, '!classic');
+    check('!classic sets the classic score limit (3)', roomCalls.includes('setScoreLimit:3'), true);
+    check('!classic sets the classic time limit (3)', roomCalls.includes('setTimeLimit:3'), true);
+
+    roomCalls.length = 0;
+    admin.stadiumCommand({ id: 1 }, '!big');
+    check('!big sets the big score limit (5)', roomCalls.includes('setScoreLimit:5'), true);
+    check('!big sets the big time limit (5)', roomCalls.includes('setTimeLimit:5'), true);
 }
 
 console.log('\n--- stats/goalAttribution.js: an assist can never be the same player as the scorer ---');
@@ -768,17 +907,32 @@ console.log('\n--- core/overflowPassword.js: activates/rotates/deactivates aroun
     check('dropping back below the threshold clears the password immediately', roomCallsLocal, ['PW1', null]);
     check('state.roomPassword is cleared too', state.roomPassword, '');
 
+    // The actual bug this guards against: someone leaving and rejoining
+    // right around the threshold (very much the common case at 12/14, not
+    // an edge case) must reuse whatever password is still current instead
+    // of minting — and re-announcing to Discord — a brand new one on every
+    // single re-crossing.
     state.playersAll = new Array(11).fill(0).map((_, i) => ({ id: i }));
     checkOverflowPassword();
+    check('re-crossing the threshold shortly after reuses the same password on the room', roomCallsLocal, ['PW1', null, 'PW1']);
+    check('re-crossing the threshold does not re-announce a new password to Discord', passwords, ['PW1']);
+    check('state.roomPassword is restored to the reused password, not a new one', state.roomPassword, 'PW1');
+
+    // Unlike the checks above, reuse never applies here — only the interval
+    // (20ms) drives further rotation now, so this needs real elapsed time
+    // rather than the synchronous "free" regenerations the pre-fix version
+    // got from every re-crossing. 150ms gives it ~7 possible ticks, well
+    // clear of ordinary event-loop jitter for a >=3 threshold.
     setTimeout(() => {
-        check('the password rotates on its own while the room stays full', passwords.length >= 3, true);
-    }, 50);
+        check('the password still rotates on its own while the room stays full', passwords.length >= 3, true);
+    }, 150);
 }
 
-// The movement.js leave broadcast fires from inside a 10ms setTimeout, and the
-// overflowPassword rotation check above waits 50ms — give both time to run
-// before tallying and exiting.
+// The movement.js leave broadcast fires from inside a 10ms setTimeout, the
+// overflowPassword rotation check above waits 150ms for real interval
+// ticks, and the balance.js stadium-switch checks chain four 20ms steps (up
+// to 80ms) — give all of them time to run before tallying and exiting.
 setTimeout(() => {
     console.log(`\n${pass} passed, ${fail} failed`);
     process.exit(fail ? 1 : 0);
-}, 100);
+}, 350);
