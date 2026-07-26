@@ -85,6 +85,17 @@ function createSqliteDatabase(filePath = path.join(__dirname, 'haxchill.sqlite')
         );
     `);
 
+    // Generic key/value store for small bits of bot state that need to survive
+    // a restart but don't warrant their own table — e.g. the Discord status
+    // message ID, so the bot edits the same message instead of leaving a stale
+    // one (with a dead room link) behind every time the process restarts.
+    const settingsStatement = database.prepare(`
+        CREATE TABLE IF NOT EXISTS bot_settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        );
+    `);
+
     function init() {
         fs.mkdirSync(path.dirname(filePath), { recursive: true });
         initStatement.run();
@@ -94,7 +105,22 @@ function createSqliteDatabase(filePath = path.join(__dirname, 'haxchill.sqlite')
         vipsStatement.run();
         discordLinksStatement.run();
         authBansStatement.run();
+        settingsStatement.run();
         return true;
+    }
+
+    function getSetting(key) {
+        const row = database.prepare('SELECT value FROM bot_settings WHERE key = ?').get(key);
+        return row ? row.value : null;
+    }
+
+    function setSetting(key, value) {
+        database
+            .prepare(
+                `INSERT INTO bot_settings (key, value) VALUES (?, ?)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value`
+            )
+            .run(key, value);
     }
 
     function computeWinrate(games, wins) {
@@ -337,6 +363,8 @@ function createSqliteDatabase(filePath = path.join(__dirname, 'haxchill.sqlite')
         getAuthBan,
         getAuthBans,
         backup,
+        getSetting,
+        setSetting,
         saveGameReport,
         close,
     };

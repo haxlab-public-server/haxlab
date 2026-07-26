@@ -67,6 +67,12 @@ function createDatabaseApi(options = {}) {
         backup(destPath) {
             return sqlite.backup(destPath);
         },
+        getSetting(key) {
+            return sqlite.getSetting(key);
+        },
+        setSetting(key, value) {
+            return sqlite.setSetting(key, value);
+        },
         saveGameReport(report) {
             return sqlite.saveGameReport(report);
         },

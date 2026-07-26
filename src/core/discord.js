@@ -13,6 +13,7 @@ const STATS_COMMAND_PREFIX = '!stats';
 const PLAYERS_PREFIX = '!players';
 const BANAUTH_PREFIX = '!banauth';
 const UNBANAUTH_PREFIX = '!unbanauth';
+const STATUS_MESSAGE_SETTING_KEY = 'statusMessageId';
 
 const slashCommandData = [
     new SlashCommandBuilder()
@@ -238,8 +239,12 @@ module.exports = function createDiscordBot({
 
     // Keeps a single message live in discordStatusChannelId, with a real
     // "Присоединиться" link button — edited in place rather than reposted so
-    // it doesn't get buried. Nothing pushes this on its own, so the room has
-    // to poke it whenever the player count or room link changes.
+    // it doesn't get buried, and so a bot restart never leaves a stale message
+    // with a dead room link sitting in the channel. Nothing pushes this on its
+    // own, so the room has to poke it whenever the player count or room link
+    // changes. The message ID is persisted (db.setSetting) since `statusMessage`
+    // itself is only an in-memory reference — without that, every restart would
+    // forget the old message and post a brand new one instead of editing it.
     function updateRoomStatus() {
         if (!statusChannel || !roomLink) return;
         const playerCount = state.playersAll.length;
@@ -260,7 +265,10 @@ module.exports = function createDiscordBot({
             statusMessage.edit(payload).catch((err) => console.error('Discord room status edit failed:', err));
         } else {
             statusChannel.send(payload)
-                .then((msg) => { statusMessage = msg; })
+                .then((msg) => {
+                    statusMessage = msg;
+                    db.setSetting(STATUS_MESSAGE_SETTING_KEY, msg.id);
+                })
                 .catch((err) => console.error('Discord room status send failed:', err));
         }
     }
@@ -270,6 +278,10 @@ module.exports = function createDiscordBot({
         if (discordReportChannelId) reportChannel = await client.channels.fetch(discordReportChannelId).catch(() => null);
         if (discordStatusChannelId) statusChannel = await client.channels.fetch(discordStatusChannelId).catch(() => null);
         if (discordPasswordChannelId) passwordChannel = await client.channels.fetch(discordPasswordChannelId).catch(() => null);
+        if (statusChannel) {
+            const savedMessageId = db.getSetting(STATUS_MESSAGE_SETTING_KEY);
+            if (savedMessageId) statusMessage = await statusChannel.messages.fetch(savedMessageId).catch(() => null);
+        }
         // Global, not per-guild: works in every server the bot is invited to
         // (and in DMs) without re-registering anywhere. The trade-off is a
         // newly added/changed command can take up to ~1h to show up.

@@ -377,6 +377,12 @@ console.log('\n--- db + roomStats.js/player.js: player data actually round-trips
         fs.unlinkSync(backupPath);
     }
 
+    check('getSetting returns null for an unknown key', db.getSetting('statusMessageId'), null);
+    db.setSetting('statusMessageId', '111222333');
+    check('setSetting/getSetting round-trips a value', db.getSetting('statusMessageId'), '111222333');
+    db.setSetting('statusMessageId', '999888777');
+    check('setSetting upserts rather than duplicating', db.getSetting('statusMessageId'), '999888777');
+
     db.close();
 }
 
