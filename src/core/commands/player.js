@@ -99,8 +99,8 @@ module.exports = function createPlayerCommands({
         }
     }
 
-    function globalStatsCommand(player, message) {
-        const stats = db.getPlayerStats(authArray[player.id][0]) ?? new HaxStatistics(player.name);
+    async function globalStatsCommand(player, message) {
+        const stats = (await db.getPlayerStats(authArray[player.id][0])) ?? new HaxStatistics(player.name);
         const statsString = printPlayerStats(stats);
         room.sendAnnouncement(
             statsString,
@@ -111,13 +111,13 @@ module.exports = function createPlayerCommands({
         );
     }
 
-    function renameCommand(player, message) {
+    async function renameCommand(player, message) {
         const msgArray = message.split(/ +/).slice(1);
         const auth = authArray[player.id][0];
-        const stats = db.getPlayerStats(auth);
+        const stats = await db.getPlayerStats(auth);
         if (stats) {
             stats.playerName = msgArray.length == 0 ? player.name : msgArray.join(' ');
-            db.savePlayerStats(auth, stats);
+            await db.savePlayerStats(auth, stats);
             room.sendAnnouncement(
                 `Вы успешно переименовали себя на ${stats.playerName} !`,
                 player.id,
@@ -136,7 +136,7 @@ module.exports = function createPlayerCommands({
         }
     }
 
-    function linkDiscordCommand(player, message) {
+    async function linkDiscordCommand(player, message) {
         const discordId = message.split(/ +/)[1];
         if (!discordId || !/^\d{15,20}$/.test(discordId)) {
             room.sendAnnouncement(
@@ -148,7 +148,7 @@ module.exports = function createPlayerCommands({
             );
             return;
         }
-        db.linkDiscordId(authArray[player.id][0], discordId);
+        await db.linkDiscordId(authArray[player.id][0], discordId);
         room.sendAnnouncement(
             `Ваш аккаунт Discord был связан ! Теперь вы можете использовать "!stats" в Discord, не вводя свое имя.`,
             player.id,
@@ -158,9 +158,9 @@ module.exports = function createPlayerCommands({
         );
     }
 
-    function statsLeaderboardCommand(player, message) {
+    async function statsLeaderboardCommand(player, message) {
         const key = message.split(/ +/)[0].substring(1).toLowerCase();
-        printRankings(key, player.id);
+        await printRankings(key, player.id);
     }
 
     function afkCommand(player, message) {

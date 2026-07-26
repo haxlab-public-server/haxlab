@@ -9,7 +9,17 @@ module.exports = function wrapEventHandlers(handlers) {
     for (const [name, fn] of Object.entries(handlers)) {
         wrapped[name] = function (...args) {
             try {
-                return fn.apply(this, args);
+                const result = fn.apply(this, args);
+                // An async fn never throws synchronously — any error inside
+                // it (even one before its first await) surfaces only as a
+                // rejected Promise, which the try/catch above can't see.
+                // Left unhandled, that becomes a global unhandled rejection
+                // instead of the per-handler log this wrapper exists to
+                // provide, so it's caught here too.
+                if (result instanceof Promise) {
+                    result.catch((err) => console.error(`Error in room.${name}:`, err));
+                }
+                return result;
             } catch (err) {
                 console.error(`Error in room.${name}:`, err);
             }

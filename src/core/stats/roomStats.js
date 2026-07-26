@@ -23,10 +23,10 @@ module.exports = function createRoomStats({
     getPlayerComp,
     getTimeStats,
 }) {
-    function updatePlayerStats(player, teamStats) {
+    async function updatePlayerStats(player, teamStats) {
         const auth = authArray[player.id][0];
         const pComp = getPlayerComp(player);
-        const stats = db.getPlayerStats(auth) ?? new HaxStatistics(player.name);
+        const stats = (await db.getPlayerStats(auth)) ?? new HaxStatistics(player.name);
         stats.games++;
         if (state.lastWinner == teamStats) stats.wins++;
         stats.winrate = ((100 * stats.wins) / (stats.games || 1)).toFixed(1) + `%`;
@@ -35,10 +35,10 @@ module.exports = function createRoomStats({
         stats.ownGoals += getOwnGoalsPlayer(pComp);
         stats.CS += getCSPlayer(pComp);
         stats.playtime += getGametimePlayer(pComp);
-        db.savePlayerStats(auth, stats);
+        await db.savePlayerStats(auth, stats);
     }
 
-    function updateStats() {
+    async function updateStats() {
         if (
             state.players.length >= 2 * teamSize &&
             (
@@ -49,10 +49,10 @@ module.exports = function createRoomStats({
             state.teamRedStats.length >= teamSize && state.teamBlueStats.length >= teamSize
         ) {
             for (let player of state.teamRedStats) {
-                updatePlayerStats(player, Team.RED);
+                await updatePlayerStats(player, Team.RED);
             }
             for (let player of state.teamBlueStats) {
-                updatePlayerStats(player, Team.BLUE);
+                await updatePlayerStats(player, Team.BLUE);
             }
         }
     }
@@ -68,9 +68,9 @@ module.exports = function createRoomStats({
         playtime: 'Время игры',
     };
 
-    function printRankings(statKey, id = 0) {
+    async function printRankings(statKey, id = 0) {
         statKey = statKey == "cs" ? "CS" : statKey;
-        const leaderboard = db.getLeaderboard(statKey, 5);
+        const leaderboard = await db.getLeaderboard(statKey, 5);
         if (leaderboard.length < 5) {
             if (id != 0) {
                 room.sendAnnouncement(

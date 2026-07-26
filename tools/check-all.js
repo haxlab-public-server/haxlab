@@ -44,7 +44,7 @@ step('module dependency resolution', () =>
 step('runtime smoke tests', () =>
     execFileSync(node, [path.join(__dirname, 'smoke-test.js')], { encoding: 'utf8' })
 );
-step('full initialisation (haxball.js stubbed)', () =>
+step('full initialisation (browser globals stubbed)', () =>
     execFileSync(node, [path.join(__dirname, 'load-check.js')], { encoding: 'utf8' })
 );
 step('parity with upstream monolith', () => {

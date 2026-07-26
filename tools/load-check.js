@@ -1,21 +1,18 @@
 /*
- * Loads src/index.js end to end with haxball.js stubbed out.
+ * Loads src/browser/entry.js end to end with browser globals stubbed out.
  *
  * This catches initialisation-order faults — TDZ errors, undefined factory
- * arguments, functions wired before they exist — without touching the network
- * or opening a real room. No connection is made and no room is created.
- *
- * The haxball.js stub below invokes the room-scope callback SYNCHRONOUSLY inside
- * a try/catch, rather than returning a real Promise. This is deliberate: in this
- * sandboxed environment, process.on('unhandledRejection'/'uncaughtException')
- * were observed to print the error text and then let execution continue with
- * exit code 0 — i.e. they do not reliably fail the process here. Catching the
- * throw directly, synchronously, sidesteps that unreliability entirely.
+ * arguments, functions wired before they exist — without a real browser or
+ * a real room. This is where that risk actually lives post-Puppeteer-
+ * migration: src/index.js (the orchestrator) just launches a real browser
+ * and injects the bundle, which isn't appropriate to do on every
+ * `npm run check` — all the factory-wiring order this check exists to catch
+ * now happens inside entry.js instead, which runs fine directly under Node
+ * once HBInit/window are stubbed the same way a real page would provide them.
  *
  * Usage: node tools/load-check.js
  */
 const path = require('path');
-const Module = require('module');
 
 const calls = [];
 function makeRoom() {
@@ -41,66 +38,44 @@ function makeRoom() {
     );
 }
 
-let initError = null;
-const origLoad = Module._load;
-Module._load = function (request) {
-    if (request === 'haxball.js') {
-        return {
-            default: () =>
-                // A minimal thenable: calls the room-scope callback synchronously
-                // and captures any throw, instead of a real (async, event-based) Promise.
-                ({
-                    then(onFulfilled) {
-                        try {
-                            onFulfilled(() => makeRoom());
-                        } catch (err) {
-                            initError = err;
-                        }
-                        return { catch() {} };
-                    },
-                }),
-        };
-    }
-    if (request === '../api/database') {
-        // Exercise the real database module, but against an in-memory database —
-        // this check must never touch (or create) the production sqlite file.
-        // backup() is overridden to a no-op too: index.js runs one at startup,
-        // and VACUUM INTO writes to a real disk path regardless of the source
-        // DB being in-memory, which would otherwise litter db/backups/ on
-        // every `npm run check`.
-        const { createSqliteDatabase } = require(path.join(__dirname, '..', 'db', 'sqlite'));
-        return {
-            createDatabaseApi: () => ({ ...createSqliteDatabase(':memory:'), backup: () => {} }),
-        };
-    }
-    if (request === 'node:child_process') {
-        // index.js forks a real, separate OS process for the Discord bot
-        // (core/discordProcess.js) — this Module._load hook only patches
-        // requires inside *this* process, so a real fork() would run that
-        // module unstubbed: a real DB connection against the real sqlite
-        // file, a real (if token-less) discord.js client, a real backup
-        // timer. Stubbed out to a no-op object with the same shape index.js
-        // calls (on/send/kill), so init is exercised without ever spawning
-        // that process.
-        return {
-            fork: () => ({
-                on: () => {},
-                send: () => {},
-                kill: () => {},
-            }),
-        };
-    }
-    return origLoad.apply(this, arguments);
+// entry.js only ever reaches two things outside the room object itself:
+// HBInit (a real page global) and window.__secrets/__dbCall/__discordSend
+// (the bridge — see dbBridgeClient.js/discordBridgeClient.js). Neither
+// api/database.js nor node:child_process are touched here at all anymore —
+// those live entirely in src/index.js (the orchestrator) now, not in the
+// bundle this check exercises.
+global.HBInit = () => makeRoom();
+const dbCalls = [];
+global.window = {
+    __secrets: { token: '', roomPassword: '' },
+    __dbCall: (method) => {
+        dbCalls.push(method);
+        // getAdmins/getVips/getMasters are awaited directly during init
+        // (state.adminList/vipList, masterList) — every other bridged
+        // method only ever runs later, from an actual command/event.
+        if (method === 'getAdmins' || method === 'getVips') return Promise.resolve([]);
+        if (method === 'getMasters') return Promise.resolve([]);
+        return Promise.resolve(null);
+    },
+    __discordSend: () => {},
+    // entry.js registers window.addEventListener('error'/'unhandledrejection')
+    // as its browser-side crash reporter — never actually fired during a
+    // normal init, just needs to exist so wiring it up doesn't throw.
+    addEventListener: () => {},
 };
+global.btoa = (str) => Buffer.from(str, 'binary').toString('base64');
 
-require(path.join(__dirname, '..', 'src', 'index.js'));
+const { ready } = require(path.join(__dirname, '..', 'src', 'browser', 'entry.js'));
 
-if (initError) {
-    console.log('INITIALISATION FAILED:');
-    console.log(initError.stack || initError);
-    process.exit(1);
-}
+ready.then((errorOrUndefined) => {
+    if (errorOrUndefined instanceof Error) {
+        console.log('INITIALISATION FAILED:');
+        console.log(errorOrUndefined.stack || errorOrUndefined);
+        process.exit(1);
+    }
 
-console.log('initialised without throwing');
-console.log('room API used during init: ' + [...new Set(calls)].sort().join(', '));
-process.exit(0);
+    console.log('initialised without throwing');
+    console.log('room API used during init: ' + [...new Set(calls)].sort().join(', '));
+    console.log('db bridge methods called during init: ' + [...new Set(dbCalls)].sort().join(', '));
+    process.exit(0);
+});

@@ -118,7 +118,7 @@ module.exports = function createMasterCommands({
         );
     }
 
-    function setAdminCommand(player, message) {
+    async function setAdminCommand(player, message) {
         const msgArray = message.split(/ +/).slice(1);
         if (msgArray.length > 0) {
             if (msgArray[0].length > 0 && msgArray[0][0] == '#') {
@@ -130,7 +130,7 @@ module.exports = function createMasterCommands({
                         if (!masterList.includes(authArray[playerAdmin.id][0])) {
                             room.setPlayerAdmin(playerAdmin.id, true);
                             state.adminList.push([authArray[playerAdmin.id][0], playerAdmin.name]);
-                            db.addAdmin(authArray[playerAdmin.id][0], playerAdmin.name);
+                            await db.addAdmin(authArray[playerAdmin.id][0], playerAdmin.name);
                             room.sendAnnouncement(
                                 `${playerAdmin.name} теперь администратор комнаты !`,
                                 null,
@@ -185,7 +185,7 @@ module.exports = function createMasterCommands({
         }
     }
 
-    function removeAdminCommand(player, message) {
+    async function removeAdminCommand(player, message) {
         const msgArray = message.split(/ +/).slice(1);
         if (msgArray.length > 0) {
             if (msgArray[0].length > 0 && msgArray[0][0] == '#') {
@@ -196,7 +196,7 @@ module.exports = function createMasterCommands({
                     if (state.adminList.map((a) => a[0]).includes(authArray[playerAdmin.id][0])) {
                         room.setPlayerAdmin(playerAdmin.id, false);
                         state.adminList = state.adminList.filter((a) => a[0] != authArray[playerAdmin.id][0]);
-                        db.removeAdmin(authArray[playerAdmin.id][0]);
+                        await db.removeAdmin(authArray[playerAdmin.id][0]);
                         room.sendAnnouncement(
                             `${playerAdmin.name} больше не администратор комнаты !`,
                             null,
@@ -231,7 +231,7 @@ module.exports = function createMasterCommands({
                     room.setPlayerAdmin(state.playersAll[indexRem].id, false);
                 }
                 state.adminList.splice(index);
-                db.removeAdmin(playerAdmin[0]);
+                await db.removeAdmin(playerAdmin[0]);
                 room.sendAnnouncement(
                     `${playerAdmin[1]} больше не администратор комнаты !`,
                     null,
@@ -262,7 +262,7 @@ module.exports = function createMasterCommands({
     // VIP grants no permissions (no command role check treats it specially) —
     // it's purely a chat-prefix perk, so unlike setAdminCommand there's no
     // room admin badge to grant and no need to exclude masters/admins.
-    function setVipCommand(player, message) {
+    async function setVipCommand(player, message) {
         const msgArray = message.split(/ +/).slice(1);
         if (msgArray.length > 0) {
             if (msgArray[0].length > 0 && msgArray[0][0] == '#') {
@@ -272,7 +272,7 @@ module.exports = function createMasterCommands({
 
                     if (!state.vipList.map((v) => v[0]).includes(authArray[playerVip.id][0])) {
                         state.vipList.push([authArray[playerVip.id][0], playerVip.name]);
-                        db.addVip(authArray[playerVip.id][0], playerVip.name);
+                        await db.addVip(authArray[playerVip.id][0], playerVip.name);
                         room.sendAnnouncement(
                             `${playerVip.name} теперь VIP !`,
                             null,
@@ -318,7 +318,7 @@ module.exports = function createMasterCommands({
         }
     }
 
-    function removeVipCommand(player, message) {
+    async function removeVipCommand(player, message) {
         const msgArray = message.split(/ +/).slice(1);
         if (msgArray.length > 0) {
             if (msgArray[0].length > 0 && msgArray[0][0] == '#') {
@@ -328,7 +328,7 @@ module.exports = function createMasterCommands({
 
                     if (state.vipList.map((v) => v[0]).includes(authArray[playerVip.id][0])) {
                         state.vipList = state.vipList.filter((v) => v[0] != authArray[playerVip.id][0]);
-                        db.removeVip(authArray[playerVip.id][0]);
+                        await db.removeVip(authArray[playerVip.id][0]);
                         room.sendAnnouncement(
                             `${playerVip.name} больше не VIP !`,
                             null,
@@ -358,7 +358,7 @@ module.exports = function createMasterCommands({
                 const index = parseInt(msgArray[0]);
                 const playerVip = state.vipList[index];
                 state.vipList.splice(index, 1);
-                db.removeVip(playerVip[0]);
+                await db.removeVip(playerVip[0]);
                 room.sendAnnouncement(
                     `${playerVip[1]} больше не VIP !`,
                     null,
@@ -415,7 +415,7 @@ module.exports = function createMasterCommands({
     // player who isn't in the room right now, and survives them reconnecting
     // with a fresh connection under the same auth (see db.getAuthBan(), checked
     // in room.onPlayerJoin).
-    function banAuthCommand(player, message) {
+    async function banAuthCommand(player, message) {
         const msgArray = message.split(/ +/).slice(1);
         const auth = msgArray[0];
         if (!auth) {
@@ -431,7 +431,7 @@ module.exports = function createMasterCommands({
         const reason = msgArray.slice(1).join(' ');
         const targetIndex = state.playersAll.findIndex((p) => authArray[p.id][0] == auth);
         const targetName = targetIndex != -1 ? state.playersAll[targetIndex].name : auth;
-        db.banAuth(auth, targetName, reason);
+        await db.banAuth(auth, targetName, reason);
         if (targetIndex != -1) {
             room.kickPlayer(state.playersAll[targetIndex].id, reason ? `Вы забанены: ${reason}` : 'Вы забанены.', false);
         }
@@ -444,7 +444,7 @@ module.exports = function createMasterCommands({
         );
     }
 
-    function unbanAuthCommand(player, message) {
+    async function unbanAuthCommand(player, message) {
         const msgArray = message.split(/ +/).slice(1);
         const auth = msgArray[0];
         if (!auth) {
@@ -457,7 +457,7 @@ module.exports = function createMasterCommands({
             );
             return;
         }
-        const existing = db.getAuthBan(auth);
+        const existing = await db.getAuthBan(auth);
         if (!existing) {
             room.sendAnnouncement(
                 `Этот auth не забанен !`,
@@ -468,7 +468,7 @@ module.exports = function createMasterCommands({
             );
             return;
         }
-        db.unbanAuth(auth);
+        await db.unbanAuth(auth);
         room.sendAnnouncement(
             `✔️ ${existing.playerName} разбанен по auth !`,
             null,
@@ -478,8 +478,8 @@ module.exports = function createMasterCommands({
         );
     }
 
-    function authBanListCommand(player, message) {
-        const bans = db.getAuthBans();
+    async function authBanListCommand(player, message) {
+        const bans = await db.getAuthBans();
         if (bans.length == 0) {
             room.sendAnnouncement(
                 "📢 В списке банов по auth никого нет.",

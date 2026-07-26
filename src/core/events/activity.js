@@ -41,7 +41,15 @@ module.exports = function createActivityEvents({
         discordBot.sendLog(`[${getDate()}] 💬 CHAT\n**${player.name}** : ${message.replace('@', '@ ')}`);
         if (msgArray[0][0] == '!') {
             let command = getCommand(msgArray[0].slice(1).toLowerCase());
-            if (command != false && commands[command].roles <= getRole(player)) commands[command].function(player, message);
+            if (command != false && commands[command].roles <= getRole(player)) {
+                // Fire-and-forget, same as every call site here always was —
+                // some command functions are now async (they touch the DB
+                // through a bridge), so this catches a rejection that would
+                // otherwise have nothing else awaiting it and become an
+                // unhandled rejection instead of a logged, per-command error.
+                const result = commands[command].function(player, message);
+                if (result instanceof Promise) result.catch((err) => console.error(`Error in command !${command}:`, err));
+            }
             else
                 room.sendAnnouncement(
                     `Команда, которую вы пытались ввести, не существует для вас. Введите "!help" для получения доступных команд.`,

@@ -36,14 +36,14 @@ module.exports = function createMovementEvents({
     handlePlayersTeamChange,
     updateTeams,
 }) {
-    function onPlayerJoin(player) {
+    async function onPlayerJoin(player) {
         authArray[player.id] = [player.auth, player.conn];
 
         // Auth-ban check: HaxBall's own ban (the client kick dialog's checkbox)
         // only blocks the connection that was live when it was issued — it can't
         // reach someone who reconnects later, or who was never online when the
         // ban was made. This is enforced here regardless, straight from the DB.
-        const ban = db.getAuthBan(player.auth);
+        const ban = await db.getAuthBan(player.auth);
         if (ban) {
             room.kickPlayer(player.id, ban.reason ? `Вы забанены: ${ban.reason}` : 'Вы забанены.', false);
             return;

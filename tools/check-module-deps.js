@@ -24,6 +24,12 @@ const GLOBALS = new Set([
     'File', 'Blob', 'localStorage', 'structuredClone', 'encodeURIComponent', 'decodeURIComponent',
     'arguments', 'Function', 'Intl', 'URL', 'URLSearchParams', 'AbortController', 'TextEncoder',
     'TextDecoder', 'queueMicrotask', 'atob', 'btoa',
+    // Real browser globals — only ever referenced from src/browser/*, which
+    // runs inside the actual room page (see src/browser/entry.js), not
+    // under Node. HBInit is the page's own global (loaded before the
+    // bundle is injected — see src/index.js); window/performance are
+    // standard browser globals.
+    'window', 'HBInit', 'performance',
 ]);
 
 function collectPattern(p, out) {

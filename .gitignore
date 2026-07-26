@@ -4,3 +4,4 @@ db/*.sqlite-shm
 db/*.sqlite-wal
 db/backups/
 .env
+dist/

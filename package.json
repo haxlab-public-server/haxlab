@@ -2,20 +2,30 @@
   "name": "haxchill",
   "private": true,
   "version": "0.1.0",
-  "description": "Public HaxBall room bot built on haxball.js",
+  "description": "Public HaxBall room bot — real headless Chromium via Puppeteer, room logic bundled and injected into the page",
   "main": "HaxBot_public.js",
   "scripts": {
     "start": "node HaxBot_public.js",
     "check": "node tools/check-all.js",
     "check:deps": "node tools/check-module-deps.js",
     "check:parity": "node tools/audit-parity.js",
-    "test:smoke": "node tools/smoke-test.js"
+    "test:smoke": "node tools/smoke-test.js",
+    "build:bundle": "node tools/build-bundle.js"
   },
   "dependencies": {
     "discord.js": "^14.27.0",
-    "haxball.js": "*"
+    "esbuild": "^0.28.1",
+    "puppeteer": "^25.3.0"
   },
   "engines": {
     "node": ">=22.18"
+  },
+  "devDependencies": {
+    "acorn": "^8.17.0",
+    "acorn-walk": "^8.3.5"
+  },
+  "allowScripts": {
+    "esbuild@0.28.1": true,
+    "puppeteer@25.3.0": true
   }
 }

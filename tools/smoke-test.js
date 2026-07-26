@@ -98,10 +98,30 @@ console.log('\n--- chat.js: helpers must see state populated AFTER wiring ---');
 }
 
 console.log('\n--- commands/master.js: writes must land in shared state ---');
-{
+// Wrapped in an async IIFE with its OWN local room/sent/roomCalls mocks
+// (not the shared module-level ones): 7 of these commands are now async
+// (they touch the DB through what's a bridge in real use — see
+// dbBridgeClient.js), and this file has no top-level await, so this block
+// runs concurrently with whatever comes after it. Sharing the module-level
+// `sent`/`roomCalls` arrays across two concurrently-running async blocks
+// would risk their resets/pushes interleaving; local mocks make that
+// impossible regardless of microtask timing.
+(async () => {
     const { createSqliteDatabase } = require(path.join(__dirname, '..', 'db', 'sqlite'));
     const db = createSqliteDatabase(':memory:');
     db.init();
+
+    const sent = [];
+    const roomCalls = [];
+    const room = {
+        sendAnnouncement: (msg, id, color, style) => sent.push({ msg, id, style }),
+        clearBans: () => roomCalls.push('clearBans'),
+        clearBan: (id) => roomCalls.push('clearBan:' + id),
+        setPlayerAdmin: (id, v) => roomCalls.push(`setPlayerAdmin:${id}:${v}`),
+        setPassword: (p) => roomCalls.push('setPassword:' + p),
+        kickPlayer: (id, reason, ban) => roomCalls.push(`kickPlayer:${id}:${reason}:${ban}`),
+        getPlayer: (id) => (id === 5 ? { id: 5, name: 'NewAdmin' } : null),
+    };
 
     const state = { banList: [], roomPassword: '', adminList: [], vipList: [], playersAll: [] };
     const authArray = [];
@@ -136,15 +156,14 @@ console.log('\n--- commands/master.js: writes must land in shared state ---');
     // admin grants/revokes must persist to the database, not just state, so
     // they survive a bot restart — that's the whole point of moving off the
     // in-memory-only adminList.
-    room.getPlayer = (id) => (id === 5 ? { id: 5, name: 'NewAdmin' } : null);
     roomCalls.length = 0;
-    master.setAdminCommand(caller, '!setadmin #5');
+    await master.setAdminCommand(caller, '!setadmin #5');
     check('setAdminCommand adds to in-memory adminList', state.adminList, [['AUTH_TARGET', 'NewAdmin']]);
     check('setAdminCommand persists the admin to the database', db.getAdmins(), [{ auth: 'AUTH_TARGET', playerName: 'NewAdmin' }]);
     check('setAdminCommand grants the room admin badge', roomCalls.includes('setPlayerAdmin:5:true'), true);
 
     roomCalls.length = 0;
-    master.removeAdminCommand(caller, '!removeadmin #5');
+    await master.removeAdminCommand(caller, '!removeadmin #5');
     check('removeAdminCommand clears the in-memory adminList', state.adminList, []);
     check('removeAdminCommand removes the admin from the database', db.getAdmins(), []);
     check('removeAdminCommand revokes the room admin badge', roomCalls.includes('setPlayerAdmin:5:false'), true);
@@ -152,13 +171,13 @@ console.log('\n--- commands/master.js: writes must land in shared state ---');
     // VIP grants no permissions — unlike setAdminCommand, no room admin badge
     // should ever be touched by these.
     roomCalls.length = 0;
-    master.setVipCommand(caller, '!setvip #5');
+    await master.setVipCommand(caller, '!setvip #5');
     check('setVipCommand adds to the in-memory vipList', state.vipList, [['AUTH_TARGET', 'NewAdmin']]);
     check('setVipCommand persists the VIP to the database', db.getVips(), [{ auth: 'AUTH_TARGET', playerName: 'NewAdmin' }]);
     check('setVipCommand never touches the room admin badge', roomCalls.some((c) => c.startsWith('setPlayerAdmin')), false);
 
     sent.length = 0;
-    master.setVipCommand(caller, '!setvip #5');
+    await master.setVipCommand(caller, '!setvip #5');
     check('setVipCommand rejects someone who is already VIP', /уже является VIP/.test(sent[0].msg), true);
 
     sent.length = 0;
@@ -166,7 +185,7 @@ console.log('\n--- commands/master.js: writes must land in shared state ---');
     check('vipListCommand lists the current VIP', sent[0].msg, '📢 Список VIP : NewAdmin[0].');
 
     roomCalls.length = 0;
-    master.removeVipCommand(caller, '!removevip #5');
+    await master.removeVipCommand(caller, '!removevip #5');
     check('removeVipCommand clears the in-memory vipList', state.vipList, []);
     check('removeVipCommand removes the VIP from the database', db.getVips(), []);
     check('removeVipCommand never touches the room admin badge', roomCalls.some((c) => c.startsWith('setPlayerAdmin')), false);
@@ -180,26 +199,26 @@ console.log('\n--- commands/master.js: writes must land in shared state ---');
     state.playersAll = [{ id: 5, name: 'Cheater' }];
     roomCalls.length = 0;
     sent.length = 0;
-    master.banAuthCommand(caller, '!banauth AUTH_TARGET aimbot');
+    await master.banAuthCommand(caller, '!banauth AUTH_TARGET aimbot');
     check('banAuthCommand records the ban under the live player\'s current name', db.getAuthBan('AUTH_TARGET'), { auth: 'AUTH_TARGET', playerName: 'Cheater', reason: 'aimbot' });
     check('banAuthCommand kicks the player if they are currently online', roomCalls.includes('kickPlayer:5:Вы забанены: aimbot:false'), true);
 
     roomCalls.length = 0;
     sent.length = 0;
-    master.banAuthCommand(caller, '!banauth AUTH_OFFLINE griefing');
+    await master.banAuthCommand(caller, '!banauth AUTH_OFFLINE griefing');
     check('banAuthCommand records an offline auth using the auth itself as the name', db.getAuthBan('AUTH_OFFLINE'), { auth: 'AUTH_OFFLINE', playerName: 'AUTH_OFFLINE', reason: 'griefing' });
     check('banAuthCommand does not try to kick when nobody with that auth is online', roomCalls.some((c) => c.startsWith('kickPlayer')), false);
 
     sent.length = 0;
-    master.unbanAuthCommand(caller, '!unbanauth AUTH_NEVER_BANNED');
+    await master.unbanAuthCommand(caller, '!unbanauth AUTH_NEVER_BANNED');
     check('unbanAuthCommand reports an auth that was never banned', /не забанен/.test(sent[0].msg), true);
 
     sent.length = 0;
-    master.unbanAuthCommand(caller, '!unbanauth AUTH_TARGET');
+    await master.unbanAuthCommand(caller, '!unbanauth AUTH_TARGET');
     check('unbanAuthCommand clears the ban', db.getAuthBan('AUTH_TARGET'), null);
 
     sent.length = 0;
-    master.authBanListCommand(caller, '!authbans');
+    await master.authBanListCommand(caller, '!authbans');
     check('authBanListCommand lists the remaining auth ban', /AUTH_OFFLINE/.test(sent[0].msg), true);
 
     sent.length = 0;
@@ -212,7 +231,7 @@ console.log('\n--- commands/master.js: writes must land in shared state ---');
     check('playersListCommand reports an empty room', /никого нет/.test(sent[0].msg), true);
 
     db.close();
-}
+})();
 
 console.log('\n--- safeEventHandlers.js: a throwing handler must not crash the process ---');
 {
@@ -240,10 +259,20 @@ console.log('\n--- safeEventHandlers.js: a throwing handler must not crash the p
 }
 
 console.log('\n--- db + roomStats.js/player.js: player data actually round-trips through sqlite ---');
-{
+// Async IIFE with its own local room/sent (updatePlayerStats/printRankings/
+// globalStatsCommand/renameCommand/linkDiscordCommand are now async — they
+// touch the DB through what's a bridge in real use) — local mocks for the
+// same reason the commands/master.js block above has them: no shared
+// mutable state with anything else running concurrently in this file.
+(async () => {
     const { createSqliteDatabase } = require(path.join(__dirname, '..', 'db', 'sqlite'));
     const db = createSqliteDatabase(':memory:');
     db.init();
+
+    const sent = [];
+    const room = {
+        sendAnnouncement: (msg, id, color, style) => sent.push({ msg, id, style }),
+    };
 
     const HaxStatistics = function (playerName = '') {
         this.playerName = playerName;
@@ -282,27 +311,25 @@ console.log('\n--- db + roomStats.js/player.js: player data actually round-trips
     // state.lastWinner is Team.RED: Alice is reported as playing RED (wins),
     // Bob as playing BLUE (loses) — this is how updateStats() actually calls
     // updatePlayerStats for each side.
-    roomStats.updatePlayerStats({ id: 1, name: 'Alice' }, Team.RED);
-    roomStats.updatePlayerStats({ id: 2, name: 'Bob' }, Team.BLUE);
+    await roomStats.updatePlayerStats({ id: 1, name: 'Alice' }, Team.RED);
+    await roomStats.updatePlayerStats({ id: 2, name: 'Bob' }, Team.BLUE);
     check('goals persisted for the winner', db.getPlayerStats('AUTH_ALICE').goals, 5);
     check('wins only counted for the winning team', db.getPlayerStats('AUTH_BOB').wins, 0);
     check('wins counted for the winning team', db.getPlayerStats('AUTH_ALICE').wins, 1);
 
-    check('games increments across saves', (() => {
-        roomStats.updatePlayerStats({ id: 1, name: 'Alice' }, Team.RED);
-        return db.getPlayerStats('AUTH_ALICE').games;
-    })(), 2);
+    await roomStats.updatePlayerStats({ id: 1, name: 'Alice' }, Team.RED);
+    check('games increments across saves', db.getPlayerStats('AUTH_ALICE').games, 2);
     check('goals accumulate across saves', db.getPlayerStats('AUTH_ALICE').goals, 10);
 
     // 2 players so far (Alice, Bob); 2 more fillers keeps it at 4 — still short of 5.
     for (let i = 0; i < 2; i++) db.savePlayerStats(`AUTH_FILLER${i}`, new HaxStatistics(`Filler${i}`));
     sent.length = 0;
-    roomStats.printRankings('goals', 0);
+    await roomStats.printRankings('goals', 0);
     check('leaderboard needs >= 5 entries before announcing', sent.length, 0);
 
     db.savePlayerStats('AUTH_FILLER2', Object.assign(new HaxStatistics('Filler2'), { goals: 100 }));
     sent.length = 0;
-    roomStats.printRankings('goals', 0);
+    await roomStats.printRankings('goals', 0);
     check('leaderboard is announced once 5 players exist, top scorer first', /^Голы> #1 Filler2 : 100/.test(sent[0].msg), true);
 
     const player = require(path.join(CORE, 'commands', 'player'))({
@@ -316,30 +343,30 @@ console.log('\n--- db + roomStats.js/player.js: player data actually round-trips
     });
 
     sent.length = 0;
-    player.globalStatsCommand({ id: 1, name: 'Alice' }, '!me');
+    await player.globalStatsCommand({ id: 1, name: 'Alice' }, '!me');
     check('globalStatsCommand reads the same row updatePlayerStats wrote', sent[0].msg, 'stats-for-Alice');
 
     sent.length = 0;
-    player.renameCommand({ id: 1, name: 'Alice' }, '!rename Queen Alice');
+    await player.renameCommand({ id: 1, name: 'Alice' }, '!rename Queen Alice');
     check('renameCommand updates only the name', db.getPlayerStats('AUTH_ALICE').playerName, 'Queen Alice');
     check('renameCommand preserves other stats', db.getPlayerStats('AUTH_ALICE').goals, 10);
 
     sent.length = 0;
-    player.renameCommand({ id: 3, name: 'NewPlayer' }, '!rename');
+    await player.renameCommand({ id: 3, name: 'NewPlayer' }, '!rename');
     check('renameCommand on a player with no games reports the error, not a crash', /еще не играли/.test(sent[0].msg), true);
 
     sent.length = 0;
-    player.linkDiscordCommand({ id: 1, name: 'Alice' }, '!discord 123456789012345678');
+    await player.linkDiscordCommand({ id: 1, name: 'Alice' }, '!discord 123456789012345678');
     check('linkDiscordCommand stores the link', db.getDiscordIdByAuth('AUTH_ALICE'), '123456789012345678');
     check('linkDiscordCommand confirms success', /связан/.test(sent[0].msg), true);
 
     sent.length = 0;
-    player.linkDiscordCommand({ id: 1, name: 'Alice' }, '!discord not-a-real-id');
+    await player.linkDiscordCommand({ id: 1, name: 'Alice' }, '!discord not-a-real-id');
     check('linkDiscordCommand rejects a non-numeric ID', /Неверный ID Discord/.test(sent[0].msg), true);
     check('linkDiscordCommand does not overwrite the valid link with garbage', db.getDiscordIdByAuth('AUTH_ALICE'), '123456789012345678');
 
     sent.length = 0;
-    player.linkDiscordCommand({ id: 1, name: 'Alice' }, '!discord');
+    await player.linkDiscordCommand({ id: 1, name: 'Alice' }, '!discord');
     check('linkDiscordCommand requires an argument', /Неверный ID Discord/.test(sent[0].msg), true);
 
     check('getAuthByDiscordId resolves the link back to the auth', db.getAuthByDiscordId('123456789012345678'), 'AUTH_ALICE');
@@ -386,7 +413,7 @@ console.log('\n--- db + roomStats.js/player.js: player data actually round-trips
     check('setSetting upserts rather than duplicating', db.getSetting('statusMessageId'), '999888777');
 
     db.close();
-}
+})();
 
 console.log('\n--- discord.js: message/interaction-handling logic (no live Discord connection needed) ---');
 // Wrapped in an async IIFE: handleIncomingMessage/handleSlashCommand are now
@@ -582,11 +609,21 @@ console.log('\n--- events/activity.js: MASTER/ADMIN/VIP get a chat prefix, regul
 }
 
 console.log('\n--- events/movement.js: auth-bans block a join regardless of connection, small-font auth broadcast on join/leave ---');
-{
+// Async IIFE with local room/sent/roomCalls: onPlayerJoin is now async (the
+// auth-ban check touches the DB through what's a bridge in real use) — same
+// isolation reasoning as the other newly-async blocks above.
+(async () => {
     const { createSqliteDatabase } = require(path.join(__dirname, '..', 'db', 'sqlite'));
     const db = createSqliteDatabase(':memory:');
     db.init();
     db.banAuth('AUTH_BANNED', 'Banned', 'aimbot');
+
+    const sent = [];
+    const roomCalls = [];
+    const room = {
+        sendAnnouncement: (msg, id, color, style) => sent.push({ msg, id, style }),
+        kickPlayer: (id, reason, ban) => roomCalls.push(`kickPlayer:${id}:${reason}:${ban}`),
+    };
 
     const state = { playersAll: [], adminList: [], kickFetchVariable: false };
     const authArray = [];
@@ -606,14 +643,14 @@ console.log('\n--- events/movement.js: auth-bans block a join regardless of conn
 
     roomCalls.length = 0;
     sent.length = 0;
-    movement.onPlayerJoin({ id: 7, name: 'Banned', auth: 'AUTH_BANNED', conn: 'CONN1' });
+    await movement.onPlayerJoin({ id: 7, name: 'Banned', auth: 'AUTH_BANNED', conn: 'CONN1' });
     check('a banned auth is kicked immediately on join, even on a brand new connection', roomCalls, ['kickPlayer:7:Вы забанены: aimbot:false']);
     check('a banned auth never gets the join broadcast or welcome message', sent, []);
 
     roomCalls.length = 0;
     sent.length = 0;
     state.playersAll = [{ id: 8, name: 'Newbie' }];
-    movement.onPlayerJoin({ id: 8, name: 'Newbie', auth: 'AUTH_NEW', conn: 'CONN2' });
+    await movement.onPlayerJoin({ id: 8, name: 'Newbie', auth: 'AUTH_NEW', conn: 'CONN2' });
     check('a clean auth is not kicked on join', roomCalls.some((c) => c.startsWith('kickPlayer')), false);
     check('join broadcasts the player\'s auth in small font', sent[0], { msg: 'Newbie [AUTH_NEW]', id: null, style: 'small' });
 
@@ -625,7 +662,7 @@ console.log('\n--- events/movement.js: auth-bans block a join regardless of conn
         check('leave also logs to discord', discordLogs.length, 1);
         db.close();
     }, 20);
-}
+})();
 
 console.log('\n--- team/balance.js: an already-full match never auto-upgrades to a bigger arena ---');
 {
