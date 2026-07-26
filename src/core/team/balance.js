@@ -68,7 +68,6 @@ module.exports = function createTeamBalance({
                     }
                 }
             } else if (Math.abs(state.teamRed.length - state.teamBlue.length) > state.teamSpec.length) {
-                const n = Math.abs(state.teamRed.length - state.teamBlue.length);
                 if (state.players.length == 1) {
                     instantRestart();
                     setTimeout(() => {
@@ -79,28 +78,15 @@ module.exports = function createTeamBalance({
                 }
                 // A shrinking match (someone left, leaving more excess
                 // players on one side than there are spectators to fill the
-                // other) no longer restarts/switches stadium here — only
-                // the single-player case above does that. The excess
-                // players below just get benched to spectators and the
-                // match keeps playing on whatever map it's already on.
+                // other) used to bench the excess players to force parity —
+                // the room's policy now is to just keep playing uneven
+                // instead of pulling a player off the field because their
+                // opponent quit. The teamSize*2-1 reset below is unrelated
+                // to benching (it voids qualification-game stat tracking
+                // once the house is no longer full) and stays either way.
                 if (state.players.length == teamSize * 2 - 1) {
                     state.teamRedStats = [];
                     state.teamBlueStats = [];
-                }
-                if (state.teamRed.length > state.teamBlue.length) {
-                    for (let i = 0; i < n; i++) {
-                        room.setPlayerTeam(
-                            state.teamRed[state.teamRed.length - 1 - i].id,
-                            Team.SPECTATORS
-                        );
-                    }
-                } else {
-                    for (let i = 0; i < n; i++) {
-                        room.setPlayerTeam(
-                            state.teamBlue[state.teamBlue.length - 1 - i].id,
-                            Team.SPECTATORS
-                        );
-                    }
                 }
             } else if (Math.abs(state.teamRed.length - state.teamBlue.length) < state.teamSpec.length && state.teamRed.length != state.teamBlue.length) {
                 const n = Math.abs(state.teamRed.length - state.teamBlue.length);

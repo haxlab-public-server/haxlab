@@ -223,6 +223,21 @@ const { checkOverflowPassword } = createOverflowPassword({
     initialPasswordSetAt: persistedPasswordSetAt,
 });
 
+/* ANNOUNCEMENTS */
+
+// Broadcasts core/announcementMessages.js's list to the room chat, one at a
+// time, in order, every 3 minutes — edit that file's array to change what
+// gets said, no logic changes needed.
+const createAnnouncements = require('../core/announcements');
+const announcementMessages = require('../core/announcementMessages');
+createAnnouncements({
+    room,
+    messages: announcementMessages,
+    announcementColor,
+    HaxNotification,
+    intervalMs: 3 * 60 * 1000,
+}).start();
+
 const { trainingMap, classicMap, bigMap } = require('../core/stadiums');
 
 const {
@@ -999,6 +1014,7 @@ const commands = createCommands({
     authBanListCommand,
     playersListCommand,
     passwordCommand,
+    teamChat,
 });
 
 stadiumCommand(emptyPlayer, "!training");

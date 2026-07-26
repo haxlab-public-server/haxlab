@@ -95,6 +95,23 @@ console.log('\n--- chat.js: helpers must see state populated AFTER wiring ---');
     check('playerChat reaches both sides', sent.map((s) => s.id), [1, 2]);
     check('playerChat rejects unknown target', chat.playerChat(playersAll[0], '@@Ghost hi'), false);
     check('playerChat rejects self-PM', chat.playerChat(playersAll[0], '@@Alice hi'), false);
+
+    // !x is just the standard command-table dispatch wired straight to the
+    // same teamChat used by the bare "t <message>" trigger — no new chat
+    // logic, just another entry point into it.
+    sent.length = 0;
+    chat.teamChat(playersAll[0], '!x hello via x');
+    check('!x reaches team chat the same way "t" does', sent.map((s) => s.id), [1]);
+}
+
+console.log('\n--- commands.js: !x is wired to teamChat ---');
+{
+    const commands = require(path.join(CORE, 'commands'))({
+        Role: { PLAYER: 0 }, teamChat: 'TEAM_CHAT_MARKER',
+    });
+    check('the "x" command exists', typeof commands.x, 'object');
+    check('the "x" command is available to every player', commands.x.roles, 0);
+    check('the "x" command dispatches to teamChat', commands.x.function, 'TEAM_CHAT_MARKER');
 }
 
 console.log('\n--- commands/master.js: writes must land in shared state ---');
@@ -769,8 +786,9 @@ console.log('\n--- team/balance.js: an already-full match never auto-upgrades to
     check('the shrunk match still rebalances to 1v1 from the remaining spectator', roomCalls, [`setPlayerTeam:2:${Team.BLUE}`]);
 
     // Same for shrinking down to 5 (more excess on one side than there are
-    // spectators to cover) — the excess still gets benched to spectators,
-    // just without restarting/switching maps.
+    // spectators to cover) — the excess used to get benched to spectators to
+    // force parity; the room's policy now is to just keep playing uneven
+    // instead of pulling a player off the field because their opponent quit.
     state.teamRed = [{ id: 1 }, { id: 2 }, { id: 3 }];
     state.teamBlue = [{ id: 4 }];
     state.teamSpec = [{ id: 5 }];
@@ -779,7 +797,22 @@ console.log('\n--- team/balance.js: an already-full match never auto-upgrades to
     calls.length = 0;
     balance.balanceTeams();
     check('a match shrinking down to 5 players does not restart or switch stadium', calls, []);
-    check('the excess players are benched to spectators instead', roomCalls, [`setPlayerTeam:3:${Team.SPECTATORS}`, `setPlayerTeam:2:${Team.SPECTATORS}`]);
+    check('the excess player is left on the field instead of being benched', roomCalls, []);
+
+    // Dropping from a full 4v4 house (8) down to 7 (teamSize*2-1) still
+    // voids qualification-game stat tracking — that's a separate concern
+    // from benching (the match is no longer a full house, so it no longer
+    // counts as a quals game) and stays even though nobody gets benched now.
+    state.teamRed = [{ id: 1 }, { id: 2 }, { id: 3 }, { id: 4 }];
+    state.teamBlue = [{ id: 5 }, { id: 6 }, { id: 7 }];
+    state.teamSpec = [];
+    state.players = [{ id: 1 }, { id: 2 }, { id: 3 }, { id: 4 }, { id: 5 }, { id: 6 }, { id: 7 }];
+    state.teamRedStats = [{ id: 1 }];
+    state.teamBlueStats = [{ id: 5 }];
+    roomCalls.length = 0;
+    balance.balanceTeams();
+    check('dropping to 7 players (teamSize*2-1) does not bench anyone', roomCalls, []);
+    check('dropping to 7 players still voids qualification-game stat tracking', [state.teamRedStats, state.teamBlueStats], [[], []]);
 
     // The actual exception: a match shrinking all the way down to a single
     // remaining player (reached via the "excess beyond spectators" branch
@@ -1102,11 +1135,55 @@ console.log('\n--- core/overflowPassword.js: ignores a persisted password past i
     check('a fresh password is announced instead', passwords, ['FRESHPW']);
 }
 
+console.log('\n--- core/announcements.js: cycles through messages in order, on an interval ---');
+{
+    const sentLocal = [];
+    const roomMock = { sendAnnouncement: (msg) => sentLocal.push(msg) };
+    const HaxNotificationMock = { CHAT: 1 };
+
+    const { start } = require(path.join(CORE, 'announcements'))({
+        room: roomMock,
+        messages: ['one', 'two', 'three'],
+        announcementColor: 0xffffff,
+        HaxNotification: HaxNotificationMock,
+        intervalMs: 20,
+    });
+    start();
+
+    // 20ms interval, checked at 250ms — well over the 4 ticks needed to
+    // prove the loop-back, with plenty of margin for event-loop jitter from
+    // the other timer-driven checks running in this same process.
+    setTimeout(() => {
+        check('messages are sent in order and loop back to the start', sentLocal.slice(0, 4), ['one', 'two', 'three', 'one']);
+    }, 250);
+}
+
+console.log('\n--- core/announcements.js: an empty message list never fires (and never throws) ---');
+{
+    const sentLocal = [];
+    const roomMock = { sendAnnouncement: (msg) => sentLocal.push(msg) };
+    const HaxNotificationMock = { CHAT: 1 };
+
+    const { start } = require(path.join(CORE, 'announcements'))({
+        room: roomMock,
+        messages: [],
+        announcementColor: 0xffffff,
+        HaxNotification: HaxNotificationMock,
+        intervalMs: 20,
+    });
+    start();
+
+    setTimeout(() => {
+        check('nothing is sent when the message list is empty', sentLocal, []);
+    }, 100);
+}
+
 // The movement.js leave broadcast fires from inside a 10ms setTimeout, the
 // overflowPassword rotation check above waits 150ms for real interval
-// ticks, and the balance.js stadium-switch checks chain four 20ms steps (up
-// to 80ms) — give all of them time to run before tallying and exiting.
+// ticks, the balance.js stadium-switch checks chain four 20ms steps (up to
+// 80ms), and the announcements loop-back check above waits 250ms for
+// interval ticks — give all of them time to run before tallying and exiting.
 setTimeout(() => {
     console.log(`\n${pass} passed, ${fail} failed`);
     process.exit(fail ? 1 : 0);
-}, 350);
+}, 400);

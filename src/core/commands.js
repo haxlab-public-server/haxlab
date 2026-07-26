@@ -30,6 +30,7 @@ module.exports = function createCommands({
     authBanListCommand,
     playersListCommand,
     passwordCommand,
+    teamChat,
 }) {
     return {
 
@@ -130,6 +131,14 @@ module.exports = function createCommands({
         desc: `
         Эта команда показывает топ 5 игроков с самым большим временем игры в комнате.`,
         function: statsLeaderboardCommand,
+    },
+    x: {
+        aliases: [],
+        roles: Role.PLAYER,
+        desc: `
+        Эта команда отправляет сообщение только вашей команде (работает так же, как обычный командный чат — набрать "t <сообщение>").
+    Пример: !x привет отправит "привет" только вашей команде.`,
+        function: teamChat,
     },
     training: {
         aliases: ['tr'],
