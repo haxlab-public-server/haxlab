@@ -204,6 +204,12 @@ setInterval(() => {
 // core/overflowPassword.js for the activate/rotate/deactivate lifecycle.
 const passwordThreshold = maxPlayers - 2;
 const createOverflowPassword = require('../core/overflowPassword');
+// Read once at startup, before the room can have refilled past the
+// threshold — lets a restart reuse whatever password was last posted to
+// Discord (if it hasn't hit its hourly rotation yet) instead of silently
+// invalidating it. See overflowPassword.js's docblock for the full story.
+const persistedPassword = await db.getSetting('overflowPasswordValue');
+const persistedPasswordSetAt = Number(await db.getSetting('overflowPasswordSetAt')) || 0;
 const { checkOverflowPassword } = createOverflowPassword({
     room,
     state,
@@ -212,6 +218,9 @@ const { checkOverflowPassword } = createOverflowPassword({
     discordBot,
     generateRoomPassword,
     rotateIntervalMs: 60 * 60 * 1000,
+    db,
+    initialPassword: persistedPassword,
+    initialPasswordSetAt: persistedPasswordSetAt,
 });
 
 const { trainingMap, classicMap, bigMap } = require('../core/stadiums');

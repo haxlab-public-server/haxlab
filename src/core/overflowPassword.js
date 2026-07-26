@@ -13,6 +13,20 @@
  * threshold could get a fresh password (and a fresh Discord announcement)
  * every few minutes instead of the intended once an hour.
  *
+ * currentPassword/active/rotateTimer are otherwise pure in-memory state,
+ * which used to mean a full bot restart silently invalidated whatever
+ * password was last posted to Discord — the room comes back with 0
+ * players (below threshold, correctly open), but once it refills past the
+ * threshold again this used to mint and announce a brand new password even
+ * though the one people already have in Discord is still "current" from
+ * their point of view. initialPassword/initialPasswordSetAt (persisted via
+ * db.setSetting, read once at startup in entry.js before this factory is
+ * even called) seed currentPassword across that gap: if the persisted
+ * password hasn't hit its hourly rotation yet, the very next threshold
+ * crossing reuses it (and does NOT re-announce, exactly like any other
+ * reuse-across-flapping case) instead of generating a new one nobody's
+ * seen yet.
+ *
  * Mutable room state is reached through `state`, never captured by value.
  *
  * Note: this shares state.roomPassword/room.setPassword with the master
@@ -21,6 +35,9 @@
  * hourly rotation here will silently overwrite it — an accepted rough edge,
  * not handled specially.
  */
+const PASSWORD_SETTING_KEY = 'overflowPasswordValue';
+const PASSWORD_SET_AT_SETTING_KEY = 'overflowPasswordSetAt';
+
 module.exports = function createOverflowPassword({
     room,
     state,
@@ -29,16 +46,32 @@ module.exports = function createOverflowPassword({
     discordBot,
     generateRoomPassword,
     rotateIntervalMs,
+    db,
+    initialPassword,
+    initialPasswordSetAt,
 }) {
     let active = false;
-    let currentPassword = null;
+    // A persisted password past its hourly rotation is just as stale as no
+    // password at all — only seed from it if it's still within window.
+    let currentPassword = (initialPassword && Date.now() - initialPasswordSetAt < rotateIntervalMs)
+        ? initialPassword
+        : null;
     let rotateTimer = null;
+
+    // Fire-and-forget like every other db write from this bundle (see
+    // dbBridgeClient.js) — a failed persist just means the next restart
+    // falls back to minting a fresh password, not a crash.
+    function persistPassword(password) {
+        db.setSetting(PASSWORD_SETTING_KEY, password).catch((err) => console.error('[overflowPassword] persist failed:', err));
+        db.setSetting(PASSWORD_SET_AT_SETTING_KEY, String(Date.now())).catch((err) => console.error('[overflowPassword] persist failed:', err));
+    }
 
     function applyNewPassword() {
         currentPassword = generateRoomPassword();
         state.roomPassword = currentPassword;
         room.setPassword(currentPassword);
         discordBot.sendPassword(currentPassword);
+        persistPassword(currentPassword);
     }
 
     function activate() {

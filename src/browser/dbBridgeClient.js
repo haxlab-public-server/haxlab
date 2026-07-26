@@ -30,6 +30,8 @@ const BRIDGED_METHODS = [
     'savePlayerStats',
     'getLeaderboard',
     'linkDiscordId',
+    'getSetting',
+    'setSetting',
 ];
 
 function createBridgedDb() {

@@ -1002,10 +1002,16 @@ console.log('\n--- core/overflowPassword.js: activates/rotates/deactivates aroun
     const discordBotMock = { sendPassword: (p) => passwords.push(p) };
     let passwordCounter = 0;
     const generateRoomPassword = () => `PW${++passwordCounter}`;
+    const persistedSettings = {};
+    const dbMock = {
+        setSetting: (key, value) => { persistedSettings[key] = value; return Promise.resolve(); },
+        getSetting: (key) => Promise.resolve(persistedSettings[key] ?? null),
+    };
 
     const { checkOverflowPassword } = require(path.join(CORE, 'overflowPassword'))({
         room: roomMock, state, maxPlayers: 12, passwordThreshold: 10,
         discordBot: discordBotMock, generateRoomPassword, rotateIntervalMs: 20,
+        db: dbMock,
     });
 
     checkOverflowPassword();
@@ -1016,6 +1022,7 @@ console.log('\n--- core/overflowPassword.js: activates/rotates/deactivates aroun
     check('crossing the threshold sets a fresh password on the room', roomCallsLocal, ['PW1']);
     check('crossing the threshold announces it to Discord', passwords, ['PW1']);
     check('the active password is also recorded on state.roomPassword', state.roomPassword, 'PW1');
+    check('the fresh password is persisted for a future restart to pick up', persistedSettings.overflowPasswordValue, 'PW1');
 
     checkOverflowPassword();
     check('staying at/above the threshold does not re-activate outside of the hourly rotation', roomCallsLocal, ['PW1']);
@@ -1044,6 +1051,55 @@ console.log('\n--- core/overflowPassword.js: activates/rotates/deactivates aroun
     setTimeout(() => {
         check('the password still rotates on its own while the room stays full', passwords.length >= 3, true);
     }, 150);
+}
+
+console.log('\n--- core/overflowPassword.js: reuses a persisted password across a simulated restart ---');
+{
+    // A restart tears down the whole module (fresh closure, fresh `active`/
+    // `currentPassword`/`rotateTimer`) — this is exactly the bug report that
+    // prompted persistence: the room comes back empty, and once it refills
+    // past the threshold the old, still-valid-in-Discord password must keep
+    // working instead of a silent new one nobody's seen.
+    const state = { playersAll: new Array(9).fill(0).map((_, i) => ({ id: i })), roomPassword: '' };
+    const roomCallsLocal = [];
+    const roomMock = { setPassword: (p) => roomCallsLocal.push(p) };
+    const passwords = [];
+    const discordBotMock = { sendPassword: (p) => passwords.push(p) };
+    const generateRoomPassword = () => 'SHOULD-NOT-BE-USED';
+    const dbMock = { setSetting: () => Promise.resolve(), getSetting: () => Promise.resolve(null) };
+
+    const { checkOverflowPassword } = require(path.join(CORE, 'overflowPassword'))({
+        room: roomMock, state, maxPlayers: 12, passwordThreshold: 10,
+        discordBot: discordBotMock, generateRoomPassword, rotateIntervalMs: 60 * 60 * 1000,
+        db: dbMock, initialPassword: 'OLDPW', initialPasswordSetAt: Date.now() - 1000,
+    });
+
+    state.playersAll = new Array(11).fill(0).map((_, i) => ({ id: i }));
+    checkOverflowPassword();
+    check('a persisted password still within its rotation window is reused on the room', roomCallsLocal, ['OLDPW']);
+    check('reusing a persisted password does not re-announce it to Discord', passwords, []);
+    check('state.roomPassword reflects the reused persisted password', state.roomPassword, 'OLDPW');
+}
+
+console.log('\n--- core/overflowPassword.js: ignores a persisted password past its rotation window ---');
+{
+    const state = { playersAll: new Array(11).fill(0).map((_, i) => ({ id: i })), roomPassword: '' };
+    const roomCallsLocal = [];
+    const roomMock = { setPassword: (p) => roomCallsLocal.push(p) };
+    const passwords = [];
+    const discordBotMock = { sendPassword: (p) => passwords.push(p) };
+    const generateRoomPassword = () => 'FRESHPW';
+    const dbMock = { setSetting: () => Promise.resolve(), getSetting: () => Promise.resolve(null) };
+
+    const { checkOverflowPassword } = require(path.join(CORE, 'overflowPassword'))({
+        room: roomMock, state, maxPlayers: 12, passwordThreshold: 10,
+        discordBot: discordBotMock, generateRoomPassword, rotateIntervalMs: 60 * 60 * 1000,
+        db: dbMock, initialPassword: 'EXPIREDPW', initialPasswordSetAt: Date.now() - 2 * 60 * 60 * 1000,
+    });
+
+    checkOverflowPassword();
+    check('an expired persisted password is not reused', roomCallsLocal, ['FRESHPW']);
+    check('a fresh password is announced instead', passwords, ['FRESHPW']);
 }
 
 // The movement.js leave broadcast fires from inside a 10ms setTimeout, the

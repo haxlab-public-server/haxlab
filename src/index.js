@@ -195,11 +195,17 @@ async function launchRoom() {
     // is load-bearing (Chrome hides host ICE candidates behind mDNS by
     // default, which breaks headless server-side connectivity), --no-sandbox/
     // --disable-setuid-sandbox are needed running as root without the
-    // sandbox's usual setuid helper configured.
+    // sandbox's usual setuid helper configured. AsyncDns is also disabled:
+    // Chrome's own async DNS resolver returned a different (unreachable from
+    // this VPS) address for www.haxball.com than the system resolver curl
+    // uses, causing every navigation to hang until net::ERR_TIMED_OUT —
+    // confirmed directly by forcing the system-resolved IP via
+    // --host-resolver-rules and seeing navigation succeed; disabling AsyncDns
+    // fixes it generally, without hardcoding an IP that could change.
     const browser = await puppeteer.launch({
         args: [
             '--remote-debugging-port=9222',
-            '--disable-features=WebRtcHideLocalIpsWithMdns',
+            '--disable-features=WebRtcHideLocalIpsWithMdns,AsyncDns',
             '--no-sandbox',
             '--disable-setuid-sandbox',
         ],
@@ -223,7 +229,24 @@ async function launchRoom() {
     await newPage.exposeFunction('__dbCall', handleDbCall);
     await newPage.exposeFunction('__discordSend', handleDiscordSend);
 
-    await newPage.goto('https://www.haxball.com/headless', { waitUntil: 'networkidle2' });
+    // Without this, everything the injected bundle logs (console.log/error
+    // calls inside the page, including onRoomLink's own console.log(url))
+    // only ever reaches the browser's own devtools console — invisible to
+    // `pm2 logs`. Forwarding it here is the only way to see it from Node.
+    newPage.on('console', (msg) => {
+        console.log(`[PAGE ${msg.type()}]`, msg.text());
+    });
+    newPage.on('pageerror', (err) => {
+        console.error('[PAGE ERROR]', err);
+    });
+
+    // networkidle2 previously hung indefinitely here (30s timeout) — this
+    // page appears to keep some background connection alive, so "network
+    // idle" never actually arrives. domcontentloaded is enough to have the
+    // page's own scripts running, then wait for the one thing we actually
+    // need: HBInit becoming available as a global.
+    await newPage.goto('https://www.haxball.com/headless', { waitUntil: 'domcontentloaded', timeout: 60000 });
+    await newPage.waitForFunction(() => typeof window.HBInit === 'function', { timeout: 60000 });
     await newPage.evaluate((secrets) => {
         window.__secrets = secrets;
     }, { token, roomPassword });
