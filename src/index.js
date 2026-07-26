@@ -266,25 +266,31 @@ process.on('unhandledRejection', (reason) => {
 
 /* EVENT LOOP LAG MONITORING */
 
-// Diagnostic, not a fix: players have kept reporting ping spikes ("redbars")
-// even after isolating the Discord process onto its own event loop, and the
-// host's own CPU/RAM graphs never show it (coarse averaging hides a
-// sub-second stall, and on this single-vCPU host both processes share one
-// core regardless of isolation). Rather than keep guessing at the cause,
-// this reports whenever the ROOM process's own event loop actually stalls
-// meaningfully, so the next report can be checked against real measured
-// numbers — what stalled, how long, and when — instead of a hypothesis.
+// Diagnostic, not a fix: reports of choppy player/ball movement kept coming
+// in even with stable ping and no redbars — which points away from packet
+// loss/RTT and toward tick-delivery JITTER instead (the client interpolates
+// between the 60/sec physics ticks this process sends; even a stall well
+// under the old 150ms redbar-hunting threshold, like 20-40ms, is enough to
+// visibly skip a frame of that interpolation without ever showing up as a
+// connection problem). Lower threshold + percentiles (not just max/mean) so
+// an alert actually reflects how often small stalls happen, not just the
+// single worst one. Expect this to fire fairly often at first — that's the
+// point, to get real numbers instead of a hypothesis; raise the threshold
+// back up once there's enough data to know what's normal for this host.
 const eventLoopMonitor = monitorEventLoopDelay({ resolution: 20 });
 eventLoopMonitor.enable();
 const EVENT_LOOP_CHECK_INTERVAL_MS = 30000;
-const EVENT_LOOP_WARN_THRESHOLD_MS = 150;
+const EVENT_LOOP_WARN_THRESHOLD_MS = 30;
 setInterval(() => {
     const maxMs = eventLoopMonitor.max / 1e6;
     if (maxMs >= EVENT_LOOP_WARN_THRESHOLD_MS) {
-        const meanMs = eventLoopMonitor.mean / 1e6;
+        const p50Ms = eventLoopMonitor.percentile(50) / 1e6;
+        const p95Ms = eventLoopMonitor.percentile(95) / 1e6;
+        const p99Ms = eventLoopMonitor.percentile(99) / 1e6;
         discordBot.sendLog(
-            `⚠️ Event loop room-процесса подвисал: макс ${maxMs.toFixed(0)}мс, среднее ${meanMs.toFixed(0)}мс ` +
-            `за последние ${EVENT_LOOP_CHECK_INTERVAL_MS / 1000}с — вероятная причина редбаров в этом окне.`
+            `⚠️ Event loop room-процесса подтормаживал (может ощущаться как подёргивание персонажа/мяча, ` +
+            `даже без редбаров и с ровным пингом): p50 ${p50Ms.toFixed(1)}мс, p95 ${p95Ms.toFixed(1)}мс, ` +
+            `p99 ${p99Ms.toFixed(1)}мс, макс ${maxMs.toFixed(1)}мс за последние ${EVENT_LOOP_CHECK_INTERVAL_MS / 1000}с.`
         );
     }
     eventLoopMonitor.reset();
