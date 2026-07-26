@@ -1,0 +1,21 @@
+{
+  "name": "haxchill",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Public HaxBall room bot built on haxball.js",
+  "main": "HaxBot_public.js",
+  "scripts": {
+    "start": "node HaxBot_public.js",
+    "check": "node tools/check-all.js",
+    "check:deps": "node tools/check-module-deps.js",
+    "check:parity": "node tools/audit-parity.js",
+    "test:smoke": "node tools/smoke-test.js"
+  },
+  "dependencies": {
+    "discord.js": "^14.27.0",
+    "haxball.js": "*"
+  },
+  "engines": {
+    "node": ">=22.18"
+  }
+}

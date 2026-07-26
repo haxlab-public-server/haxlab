@@ -1,0 +1,81 @@
+const { createSqliteDatabase } = require('../db/sqlite');
+
+function createDatabaseApi(options = {}) {
+    const sqlite = options.sqlite ?? createSqliteDatabase(options.filePath);
+
+    return {
+        init() {
+            return sqlite.init();
+        },
+        getPlayerStats(auth) {
+            return sqlite.getPlayerStats(auth);
+        },
+        getPlayerStatsByName(playerName) {
+            return sqlite.getPlayerStatsByName(playerName);
+        },
+        savePlayerStats(auth, stats) {
+            return sqlite.savePlayerStats(auth, stats);
+        },
+        getLeaderboard(statKey, limit) {
+            return sqlite.getLeaderboard(statKey, limit);
+        },
+        getMasters() {
+            return sqlite.getMasters();
+        },
+        addMaster(auth) {
+            return sqlite.addMaster(auth);
+        },
+        getAdmins() {
+            return sqlite.getAdmins();
+        },
+        addAdmin(auth, playerName) {
+            return sqlite.addAdmin(auth, playerName);
+        },
+        removeAdmin(auth) {
+            return sqlite.removeAdmin(auth);
+        },
+        getVips() {
+            return sqlite.getVips();
+        },
+        addVip(auth, playerName) {
+            return sqlite.addVip(auth, playerName);
+        },
+        removeVip(auth) {
+            return sqlite.removeVip(auth);
+        },
+        linkDiscordId(auth, discordId) {
+            return sqlite.linkDiscordId(auth, discordId);
+        },
+        getDiscordIdByAuth(auth) {
+            return sqlite.getDiscordIdByAuth(auth);
+        },
+        getAuthByDiscordId(discordId) {
+            return sqlite.getAuthByDiscordId(discordId);
+        },
+        banAuth(auth, playerName, reason) {
+            return sqlite.banAuth(auth, playerName, reason);
+        },
+        unbanAuth(auth) {
+            return sqlite.unbanAuth(auth);
+        },
+        getAuthBan(auth) {
+            return sqlite.getAuthBan(auth);
+        },
+        getAuthBans() {
+            return sqlite.getAuthBans();
+        },
+        backup(destPath) {
+            return sqlite.backup(destPath);
+        },
+        saveGameReport(report) {
+            return sqlite.saveGameReport(report);
+        },
+        close() {
+            return sqlite.close();
+        },
+    };
+}
+
+module.exports = {
+    createDatabaseApi,
+};
