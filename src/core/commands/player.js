@@ -33,7 +33,7 @@ module.exports = function createPlayerCommands({
     getCommands,
 }) {
     function leaveCommand(player, message) {
-        room.kickPlayer(player.id, 'Bye !', false);
+        room.kickPlayer(player.id, 'Пока !', false);
     }
 
     function helpCommand(player, message) {

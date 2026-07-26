@@ -14,8 +14,17 @@ module.exports = function createGoalAttribution({
         let goalAttribution = Array(2).fill(null);
         if (state.lastTouches[0] != null) {
             if (state.lastTouches[0].player.team == team) {
-                // Direct goal scored by player
-                if (state.lastTouches[1] != null && state.lastTouches[1].player.team == team) {
+                // Direct goal scored by player. The assist candidate must be a
+                // different player than the scorer — without this check, a
+                // stale/duplicate touch entry for the same player (touch
+                // tracking runs off two separate mechanisms, a kick event and
+                // a per-tick proximity check) could otherwise credit someone
+                // with assisting their own goal.
+                if (
+                    state.lastTouches[1] != null &&
+                    state.lastTouches[1].player.team == team &&
+                    state.lastTouches[1].player.id != state.lastTouches[0].player.id
+                ) {
                     goalAttribution = [state.lastTouches[0].player, state.lastTouches[1].player];
                 } else {
                     goalAttribution = [state.lastTouches[0].player, null];

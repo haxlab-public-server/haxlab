@@ -695,6 +695,47 @@ console.log('\n--- events/misc.js: nobody keeps an admin badge unless they are M
     check('a master who lost the badge gets it restored too', roomCalls, ['setPlayerAdmin:3:true']);
 }
 
+console.log('\n--- stats/goalAttribution.js: an assist can never be the same player as the scorer ---');
+{
+    const { Goal } = require(path.join(__dirname, '..', 'src', 'core', 'models'));
+    const state = { lastTouches: [null, null], game: { scores: { time: 120 }, goals: [] } };
+    const goalAttribution = require(path.join(CORE, 'stats', 'goalAttribution'))({
+        state, Team, Goal, getTimeGame: (t) => `[${t}]`,
+    });
+
+    const scorer = { id: 1, name: 'Alice', team: Team.RED };
+    const assister = { id: 2, name: 'Bob', team: Team.RED };
+
+    state.lastTouches = [{ player: scorer }, { player: assister }];
+    state.game.goals = [];
+    let goalString = goalAttribution.getGoalString(Team.RED);
+    check('a normal goal+assist credits both players in the announcement', goalString.includes('Alice') && goalString.includes('Bob'), true);
+    check('the Goal record keeps the real assist', state.game.goals[0].assist, assister);
+
+    // The bug this guards against: touch tracking runs off two mechanisms (a
+    // kick event and a per-tick proximity check) that can, in some sequence,
+    // both end up pointing at the same player for lastTouches[0] and [1] —
+    // that must never be credited as a self-assist.
+    state.lastTouches = [{ player: scorer }, { player: scorer }];
+    state.game.goals = [];
+    goalString = goalAttribution.getGoalString(Team.RED);
+    check('a duplicate same-player touch is never announced as an assist', goalString.includes('ассистом'), false);
+    check('the Goal record has no assist for a self-touch duplicate', state.game.goals[0].assist, null);
+    check('the scorer is still credited correctly', state.game.goals[0].striker, scorer);
+
+    const ownGoalScorer = { id: 3, name: 'Carol', team: Team.BLUE };
+    state.lastTouches = [{ player: ownGoalScorer }, { player: assister }];
+    state.game.goals = [];
+    goalString = goalAttribution.getGoalString(Team.RED);
+    check('an own goal is never credited with an assist', state.game.goals[0].assist, null);
+    check('an own goal message names whoever touched it', goalString.includes('Carol'), true);
+
+    state.lastTouches = [null, null];
+    state.game.goals = [];
+    goalAttribution.getGoalString(Team.RED);
+    check('a goal with no recorded touch falls back to a generic message, no striker', state.game.goals[0].striker, null);
+}
+
 console.log('\n--- core/overflowPassword.js: activates/rotates/deactivates around a threshold ---');
 {
     const state = { playersAll: new Array(9).fill(0).map((_, i) => ({ id: i })), roomPassword: '' };

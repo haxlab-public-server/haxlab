@@ -34,7 +34,7 @@ module.exports = function createCommands({
     return {
 
     help: {
-        aliases: ['commands'],
+        aliases: ['commands', 'рудз'],
         roles: Role.PLAYER,
         desc: `
 	Эта команда показывает все доступные вам команды. Она также может показать описание конкретной команды.
@@ -42,7 +42,7 @@ module.exports = function createCommands({
         function: helpCommand,
     },
     afk: {
-        aliases: [],
+        aliases: ['афк', 'фал'],
         roles: Role.PLAYER,
         desc: `
         Эта команда делает вас AFK.
@@ -50,21 +50,21 @@ module.exports = function createCommands({
         function: afkCommand,
     },
     afks: {
-        aliases: ['afklist'],
+        aliases: ['afklist', 'фалы'],
         roles: Role.PLAYER,
         desc: `
         Эта команда показывает всех игроков, которые находятся AFK.`,
         function: afkListCommand,
     },
     bb: {
-        aliases: ['bye', 'gn', 'cya'],
+        aliases: ['bye', 'gn', 'cya', 'ии'],
         roles: Role.PLAYER,
         desc: `
 	Эта команда мгновенно выводит вас из комнаты (рекомендуется использовать).`,
         function: leaveCommand,
     },
     me: {
-        aliases: ['stat', 'stats'],
+        aliases: ['stat', 'stats', 'ы', 's'],
         roles: Role.PLAYER,
         desc: `
         Эта команда показывает ваши глобальные статистики в комнате.`,
@@ -125,28 +125,28 @@ module.exports = function createCommands({
     //     function: statsLeaderboardCommand,
     // },
     playtime: {
-        aliases: [],
+        aliases: ['pt'],
         roles: Role.PLAYER,
         desc: `
         Эта команда показывает топ 5 игроков с самым большим временем игры в комнате.`,
         function: statsLeaderboardCommand,
     },
     training: {
-        aliases: [],
+        aliases: ['tr'],
         roles: Role.ADMIN_TEMP,
         desc: `
         Эта команда загружает классическую тренировочную арену.`,
         function: stadiumCommand,
     },
     classic: {
-        aliases: [],
+        aliases: ['cl'],
         roles: Role.ADMIN_TEMP,
         desc: `
         Эта команда загружает классическую арену.`,
         function: stadiumCommand,
     },
     big: {
-        aliases: [],
+        aliases: ['bg'],
         roles: Role.ADMIN_TEMP,
         desc: `
         Эта команда загружает большую арену.`,

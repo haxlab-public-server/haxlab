@@ -1,7 +1,7 @@
 // Secrets and instance-specific IDs live in .env (gitignored), never here —
 // see .env.example for the template. process.loadEnvFile() (HaxBot_public.js)
 // populates process.env before this module is required.
-const roomName = '🌴 HaxChill | dsc.gg/haxchill 🌴'; // room name
+const roomName = '🌴 HaxChill | 4v4 Winstay | dsc.gg/haxchill 🌴'; // room name
 const maxPlayers = 14;
 const roomPublic = true;
 const roomPassword = process.env.ROOM_PASSWORD ?? ''; // leave unset for no password
