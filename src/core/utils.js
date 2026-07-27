@@ -84,6 +84,18 @@ function formatBanRemaining(expiresAt) {
     return `${minutesLeft} мин.`;
 }
 
+// Russian noun pluralization for the coin economy (!shop/!inventory/etc.) —
+// монетка (1, 21, 31...), монетки (2-4, 22-24...), монеток (0, 5-20, 25-30...).
+function formatCoins(amount) {
+    const mod10 = amount % 10;
+    const mod100 = amount % 100;
+    let word;
+    if (mod10 === 1 && mod100 !== 11) word = 'монетка';
+    else if (mod10 >= 2 && mod10 <= 4 && !(mod100 >= 12 && mod100 <= 14)) word = 'монетки';
+    else word = 'монеток';
+    return `${amount} ${word}`;
+}
+
 module.exports = {
     getDate,
     getRandomInt,
@@ -102,4 +114,5 @@ module.exports = {
     findFirstNumberCharString,
     generateRoomPassword,
     formatBanRemaining,
+    formatCoins,
 };

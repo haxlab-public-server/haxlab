@@ -24,6 +24,7 @@ module.exports = function createMovementEvents({
     maxPlayers,
     welcomeColor,
     getDate,
+    applyEquippedDiscCosmetics,
     checkCaptainLeave,
     checkOverflowPassword,
     getRole,
@@ -111,6 +112,14 @@ module.exports = function createMovementEvents({
                 HaxNotification.CHAT
             );
             return;
+        }
+        // Landing on an actual team (not spectators) is the other moment
+        // (alongside gameManagement.js's onGameStart) a worn form/size needs
+        // re-applying — a fresh join is balanced onto a team from here, not
+        // from onPlayerJoin itself, and HaxBall gives a disc no custom
+        // color/radius by default.
+        if (changedPlayer.team != Team.SPECTATORS) {
+            applyEquippedDiscCosmetics(changedPlayer).catch((err) => console.error('[economy] applyEquippedDiscCosmetics failed:', err));
         }
         updateTeams();
         if (state.gameState != State.STOP) {

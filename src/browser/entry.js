@@ -100,6 +100,7 @@ const {
     findFirstNumberCharString,
     generateRoomPassword,
     formatBanRemaining,
+    formatCoins,
 } = require('../core/utils');
 const {
     getIdReport,
@@ -223,6 +224,38 @@ const { checkOverflowPassword } = createOverflowPassword({
     initialPassword: persistedPassword,
     initialPasswordSetAt: persistedPasswordSetAt,
 });
+
+/* ECONOMY */
+
+// Coins for wins/losses/playtime, spent in !shop on cosmetics (forms +
+// goal animations) worn via !equip — see core/economy.js and
+// core/shopItems.js (the editable catalog).
+const shopItems = require('../core/shopItems');
+const createEconomy = require('../core/economy');
+const {
+    awardMatchCoins,
+    tickPlaytime,
+    applyEquippedDiscCosmetics,
+    playGoalAnimation,
+    shopCommand,
+    inventoryCommand,
+    equipCommand,
+} = createEconomy({
+    room,
+    state,
+    authArray,
+    db,
+    items: shopItems,
+    Team,
+    State,
+    HaxNotification,
+    announcementColor,
+    errorColor,
+    formatCoins,
+});
+
+const PLAYTIME_TICK_INTERVAL_SECONDS = 60;
+setInterval(() => tickPlaytime(PLAYTIME_TICK_INTERVAL_SECONDS), PLAYTIME_TICK_INTERVAL_SECONDS * 1000);
 
 /* ANNOUNCEMENTS */
 
@@ -627,6 +660,15 @@ async function endGame(winner) {
         console.error('[endGame] updateStats failed:', err);
         discordBot.sendLog(`⚠️ Не удалось сохранить статистику: ${err.message}`);
     }
+    // Unlike updateStats() (quals-only, full house required — see
+    // roomStats.js), coins are paid out for every match regardless of team
+    // size, so this runs independent of that gate.
+    try {
+        await awardMatchCoins(winner);
+    } catch (err) {
+        console.error('[endGame] awardMatchCoins failed:', err);
+        discordBot.sendLog(`⚠️ Не удалось начислить монеты: ${err.message}`);
+    }
 }
 
 /* CHOOSING FUNCTIONS */
@@ -1017,6 +1059,9 @@ const commands = createCommands({
     playersListCommand,
     passwordCommand,
     teamChat,
+    shopCommand,
+    inventoryCommand,
+    equipCommand,
 });
 
 stadiumCommand(emptyPlayer, "!training");
@@ -1052,6 +1097,7 @@ Object.assign(room, wrapEventHandlers(createMovementEvents({
     maxPlayers,
     welcomeColor,
     getDate,
+    applyEquippedDiscCosmetics,
     checkCaptainLeave,
     checkOverflowPassword,
     getRole,
@@ -1116,6 +1162,7 @@ Object.assign(room, wrapEventHandlers(createGameManagementEvents({
     mentionPlayersUnpause,
     redColor,
     teamSize,
+    applyEquippedDiscCosmetics,
     calculateStadiumVariables,
     deactivateChooseMode,
     endGame,
@@ -1127,6 +1174,7 @@ Object.assign(room, wrapEventHandlers(createGameManagementEvents({
     getPlayerComp,
     handleActivityStop,
     handlePlayersStop,
+    playGoalAnimation,
     updateTeams,
 })));
 

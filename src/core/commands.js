@@ -31,6 +31,9 @@ module.exports = function createCommands({
     playersListCommand,
     passwordCommand,
     teamChat,
+    shopCommand,
+    inventoryCommand,
+    equipCommand,
 }) {
     return {
 
@@ -139,6 +142,33 @@ module.exports = function createCommands({
         Эта команда отправляет сообщение только вашей команде (работает так же, как обычный командный чат — набрать "t <сообщение>").
     Пример: !x привет отправит "привет" только вашей команде.`,
         function: teamChat,
+    },
+    shop: {
+        aliases: [],
+        roles: Role.PLAYER,
+        desc: `
+        Без аргументов показывает магазин и ваш баланс монеток.
+    Она принимает 1 аргумент (опционально):
+    Аргумент 1: <id> id товара для покупки (посмотреть можно командой '!shop' без аргументов).
+    Пример: !shop fire купит товар с id "fire".`,
+        function: shopCommand,
+    },
+    inventory: {
+        aliases: ['inv'],
+        roles: Role.PLAYER,
+        desc: `
+        Эта команда показывает купленные вами аксессуары.`,
+        function: inventoryCommand,
+    },
+    equip: {
+        aliases: [],
+        roles: Role.PLAYER,
+        desc: `
+        Эта команда надевает (или заменяет) купленный аксессуар.
+    Она принимает 1 аргумент:
+    Аргумент 1: <id> id аксессуара (посмотреть можно командой '!inventory').
+    Пример: !equip fire наденет аксессуар с id "fire".`,
+        function: equipCommand,
     },
     training: {
         aliases: ['tr'],

@@ -32,6 +32,13 @@ const BRIDGED_METHODS = [
     'linkDiscordId',
     'getSetting',
     'setSetting',
+    'addCoins',
+    'getBalance',
+    'getOwnedItemIds',
+    'ownsItem',
+    'buyItem',
+    'setEquipped',
+    'getEquipped',
 ];
 
 function createBridgedDb() {

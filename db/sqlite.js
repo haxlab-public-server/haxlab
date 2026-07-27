@@ -13,6 +13,9 @@ function createSqliteDatabase(filePath = path.join(__dirname, 'haxchill.sqlite')
     // takes the other connection's transaction to commit.
     database.exec('PRAGMA busy_timeout = 5000');
 
+    // balance/equipped_form/equipped_goal_animation are economy fields (see
+    // addCoins/buyItem/setEquipped below) — added via the same idempotent
+    // ALTER TABLE pattern as auth_bans.expires_at for DBs that predate them.
     const initStatement = database.prepare(`
         CREATE TABLE IF NOT EXISTS player_stats (
             auth TEXT PRIMARY KEY,
@@ -24,7 +27,10 @@ function createSqliteDatabase(filePath = path.join(__dirname, 'haxchill.sqlite')
             own_goals INTEGER NOT NULL DEFAULT 0,
             clean_sheets INTEGER NOT NULL DEFAULT 0,
             playtime INTEGER NOT NULL DEFAULT 0,
-            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            balance INTEGER NOT NULL DEFAULT 0,
+            equipped_form TEXT,
+            equipped_goal_animation TEXT
         );
     `);
 
@@ -106,15 +112,27 @@ function createSqliteDatabase(filePath = path.join(__dirname, 'haxchill.sqlite')
         );
     `);
 
-    // SQLite has no "ADD COLUMN IF NOT EXISTS" — a DB created before the
-    // mandatory-duration ban feature already has an auth_bans table with no
-    // expires_at column, and CREATE TABLE IF NOT EXISTS above is a no-op
-    // against an existing table. Catching the "duplicate column" error is
-    // the standard way to make this idempotent across both fresh and
-    // pre-existing databases.
-    function addExpiresAtColumnIfMissing() {
+    // Which shop items (see core/shopItems.js) a player owns — separate from
+    // which one is currently equipped (player_stats.equipped_form/
+    // equipped_goal_animation), so buying something doesn't have to also
+    // wear it, and switching back to a previously-bought item never re-charges.
+    const playerItemsStatement = database.prepare(`
+        CREATE TABLE IF NOT EXISTS player_items (
+            auth TEXT NOT NULL,
+            item_id TEXT NOT NULL,
+            purchased_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (auth, item_id)
+        );
+    `);
+
+    // SQLite has no "ADD COLUMN IF NOT EXISTS" — a DB created before a given
+    // feature already has the table without that column, and CREATE TABLE IF
+    // NOT EXISTS above is a no-op against an existing table. Catching the
+    // "duplicate column" error is the standard way to make this idempotent
+    // across both fresh and pre-existing databases.
+    function addColumnIfMissing(table, columnDefinition) {
         try {
-            database.exec('ALTER TABLE auth_bans ADD COLUMN expires_at TEXT');
+            database.exec(`ALTER TABLE ${table} ADD COLUMN ${columnDefinition}`);
         } catch (err) {
             if (!/duplicate column/i.test(err.message)) throw err;
         }
@@ -129,8 +147,13 @@ function createSqliteDatabase(filePath = path.join(__dirname, 'haxchill.sqlite')
         vipsStatement.run();
         discordLinksStatement.run();
         authBansStatement.run();
-        addExpiresAtColumnIfMissing();
+        addColumnIfMissing('auth_bans', 'expires_at TEXT');
         settingsStatement.run();
+        playerItemsStatement.run();
+        addColumnIfMissing('player_stats', 'balance INTEGER NOT NULL DEFAULT 0');
+        addColumnIfMissing('player_stats', 'equipped_form TEXT');
+        addColumnIfMissing('player_stats', 'equipped_goal_animation TEXT');
+        addColumnIfMissing('player_stats', 'equipped_size TEXT');
         return true;
     }
 
@@ -365,6 +388,78 @@ function createSqliteDatabase(filePath = path.join(__dirname, 'haxchill.sqlite')
             .all();
     }
 
+    // Upserts so a player who has never finished a quals game (and so has no
+    // player_stats row yet — see roomStats.js's full-house gate) still gets
+    // a row the first time they ever earn coins, instead of needing one to
+    // already exist. Only touches auth/player_name/balance — untouched by
+    // savePlayerStats's own upsert (and vice versa), so the two can never
+    // clobber each other.
+    function addCoins(auth, playerName, amount) {
+        database
+            .prepare(
+                `INSERT INTO player_stats (auth, player_name, balance)
+                 VALUES (@auth, @playerName, @amount)
+                 ON CONFLICT(auth) DO UPDATE SET balance = balance + @amount`
+            )
+            .run({ auth, playerName: playerName ?? '', amount });
+    }
+
+    function getBalance(auth) {
+        const row = database.prepare('SELECT balance FROM player_stats WHERE auth = ?').get(auth);
+        return row ? row.balance : 0;
+    }
+
+    function getOwnedItemIds(auth) {
+        return database
+            .prepare('SELECT item_id FROM player_items WHERE auth = ?')
+            .all(auth)
+            .map((row) => row.item_id);
+    }
+
+    function ownsItem(auth, itemId) {
+        return database.prepare('SELECT 1 FROM player_items WHERE auth = ? AND item_id = ?').get(auth, itemId) != null;
+    }
+
+    // Atomic in practice: node:sqlite's DatabaseSync executes every call
+    // synchronously, so nothing else in this process can interleave between
+    // the balance check and the deduction — no explicit transaction needed.
+    // Returns false (no charge, no purchase) on insufficient funds or an
+    // already-owned item, so the caller can't double-charge by retrying.
+    function buyItem(auth, playerName, itemId, price) {
+        if (ownsItem(auth, itemId)) return false;
+        if (getBalance(auth) < price) return false;
+        database
+            .prepare(
+                `INSERT INTO player_stats (auth, player_name, balance)
+                 VALUES (@auth, @playerName, -@price)
+                 ON CONFLICT(auth) DO UPDATE SET balance = balance - @price`
+            )
+            .run({ auth, playerName: playerName ?? '', price });
+        database.prepare('INSERT INTO player_items (auth, item_id) VALUES (?, ?)').run(auth, itemId);
+        return true;
+    }
+
+    // slot is 'form', 'goalAnimation' or 'size' — validated by the caller
+    // (core/economy.js), which is also the only place that knows the shop
+    // catalog and can check ownership before calling this.
+    const EQUIPPED_SLOT_COLUMNS = {
+        form: 'equipped_form',
+        goalAnimation: 'equipped_goal_animation',
+        size: 'equipped_size',
+    };
+
+    function setEquipped(auth, slot, itemId) {
+        const column = EQUIPPED_SLOT_COLUMNS[slot];
+        database.prepare(`UPDATE player_stats SET ${column} = ? WHERE auth = ?`).run(itemId, auth);
+    }
+
+    function getEquipped(auth) {
+        const row = database
+            .prepare('SELECT equipped_form AS form, equipped_goal_animation AS goalAnimation, equipped_size AS size FROM player_stats WHERE auth = ?')
+            .get(auth);
+        return row ? row : { form: null, goalAnimation: null, size: null };
+    }
+
     // VACUUM INTO takes a consistent, atomic snapshot even while the DB is
     // open and being written to (unlike copying the .sqlite file directly,
     // which risks grabbing it mid-write since it's in WAL mode). destPath is
@@ -412,6 +507,13 @@ function createSqliteDatabase(filePath = path.join(__dirname, 'haxchill.sqlite')
         getSetting,
         setSetting,
         saveGameReport,
+        addCoins,
+        getBalance,
+        getOwnedItemIds,
+        ownsItem,
+        buyItem,
+        setEquipped,
+        getEquipped,
         close,
     };
 }

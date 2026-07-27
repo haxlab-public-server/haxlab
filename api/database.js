@@ -76,6 +76,27 @@ function createDatabaseApi(options = {}) {
         saveGameReport(report) {
             return sqlite.saveGameReport(report);
         },
+        addCoins(auth, playerName, amount) {
+            return sqlite.addCoins(auth, playerName, amount);
+        },
+        getBalance(auth) {
+            return sqlite.getBalance(auth);
+        },
+        getOwnedItemIds(auth) {
+            return sqlite.getOwnedItemIds(auth);
+        },
+        ownsItem(auth, itemId) {
+            return sqlite.ownsItem(auth, itemId);
+        },
+        buyItem(auth, playerName, itemId, price) {
+            return sqlite.buyItem(auth, playerName, itemId, price);
+        },
+        setEquipped(auth, slot, itemId) {
+            return sqlite.setEquipped(auth, slot, itemId);
+        },
+        getEquipped(auth) {
+            return sqlite.getEquipped(auth);
+        },
         close() {
             return sqlite.close();
         },

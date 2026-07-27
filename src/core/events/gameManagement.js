@@ -20,6 +20,7 @@ module.exports = function createGameManagementEvents({
     mentionPlayersUnpause,
     redColor,
     teamSize,
+    applyEquippedDiscCosmetics,
     calculateStadiumVariables,
     deactivateChooseMode,
     endGame,
@@ -31,6 +32,7 @@ module.exports = function createGameManagementEvents({
     getPlayerComp,
     handleActivityStop,
     handlePlayersStop,
+    playGoalAnimation,
     updateTeams,
 }) {
     function onGameStart(byPlayer) {
@@ -52,6 +54,14 @@ module.exports = function createGameManagementEvents({
                 state.teamRedStats.push(state.teamRed[i]);
                 state.teamBlueStats.push(state.teamBlue[i]);
             }
+        }
+        // Defensive re-apply: HaxBall can reset a disc's custom properties
+        // (color, radius) across a stadium change/restart, independent of
+        // any team-change event — a fresh match start is the other moment
+        // (alongside movement.js's onPlayerTeamChange) a worn form/size
+        // could otherwise silently fall off.
+        for (const player of [...state.teamRed, ...state.teamBlue]) {
+            applyEquippedDiscCosmetics(player).catch((err) => console.error('[economy] applyEquippedDiscCosmetics failed:', err));
         }
         calculateStadiumVariables();
     }
@@ -163,6 +173,15 @@ module.exports = function createGameManagementEvents({
             HaxNotification.CHAT
         );
         discordBot.sendLog(`[${getDate()}] ${goalString}`);
+        // The scorer.team === team check excludes own goals — on an own
+        // goal, lastTouches[0] is the player who caused it, on the OPPOSING
+        // side from the team that benefits (see goalAttribution.js's own
+        // team-mismatch branch) — so this only ever fires for a genuine,
+        // deliberate goal.
+        const scorer = state.lastTouches[0]?.player;
+        if (scorer != null && scorer.team === team) {
+            playGoalAnimation(scorer).catch((err) => console.error('[economy] playGoalAnimation failed:', err));
+        }
         if ((scores.scoreLimit != 0 && (scores.red == scores.scoreLimit || scores.blue == scores.scoreLimit)) || state.goldenGoal) {
             endGame(team);
             state.goldenGoal = false;

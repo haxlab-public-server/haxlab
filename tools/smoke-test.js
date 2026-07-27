@@ -440,6 +440,40 @@ console.log('\n--- db + roomStats.js/player.js: player data actually round-trips
     db.removeVip('AUTH_DONOR');
     check('removeVip clears it', db.getVips(), []);
 
+    // Economy: balance/ownership/equip all live on player_stats/player_items
+    // (see db/sqlite.js) — addCoins must work even for a brand new auth with
+    // no player_stats row yet (nobody's finished a quals game), not just for
+    // existing players.
+    check('getBalance is 0 for an auth never seen before', db.getBalance('AUTH_NEWBIE'), 0);
+    db.addCoins('AUTH_NEWBIE', 'Newbie', 50);
+    check('addCoins creates a row and credits it for a brand new auth', db.getBalance('AUTH_NEWBIE'), 50);
+    db.addCoins('AUTH_NEWBIE', 'Newbie', 25);
+    check('addCoins accumulates rather than overwriting', db.getBalance('AUTH_NEWBIE'), 75);
+
+    check('getOwnedItemIds starts empty', db.getOwnedItemIds('AUTH_NEWBIE'), []);
+    check('ownsItem is false before any purchase', db.ownsItem('AUTH_NEWBIE', 'fire'), false);
+
+    check('buyItem fails when the price exceeds the balance', db.buyItem('AUTH_NEWBIE', 'Newbie', 'expensive', 1000), false);
+    check('a failed purchase does not touch the balance', db.getBalance('AUTH_NEWBIE'), 75);
+
+    check('buyItem succeeds and deducts the price', db.buyItem('AUTH_NEWBIE', 'Newbie', 'fire', 50), true);
+    check('the price was deducted', db.getBalance('AUTH_NEWBIE'), 25);
+    check('the item is now owned', db.ownsItem('AUTH_NEWBIE', 'fire'), true);
+    check('getOwnedItemIds lists it', db.getOwnedItemIds('AUTH_NEWBIE'), ['fire']);
+
+    check('buyItem refuses to sell the same item twice', db.buyItem('AUTH_NEWBIE', 'Newbie', 'fire', 50), false);
+    check('a rejected duplicate purchase does not double-charge', db.getBalance('AUTH_NEWBIE'), 25);
+
+    check('getEquipped starts with all three slots empty', db.getEquipped('AUTH_NEWBIE'), { form: null, goalAnimation: null, size: null });
+    db.setEquipped('AUTH_NEWBIE', 'goalAnimation', 'fire');
+    check('setEquipped fills only the targeted slot', db.getEquipped('AUTH_NEWBIE'), { form: null, goalAnimation: 'fire', size: null });
+    db.buyItem('AUTH_NEWBIE', 'Newbie', 'gold', 0);
+    db.setEquipped('AUTH_NEWBIE', 'form', 'gold');
+    check('setEquipped on a second slot leaves the first untouched', db.getEquipped('AUTH_NEWBIE'), { form: 'gold', goalAnimation: 'fire', size: null });
+    db.buyItem('AUTH_NEWBIE', 'Newbie', 'small', 0);
+    db.setEquipped('AUTH_NEWBIE', 'size', 'small');
+    check('setEquipped on the size slot leaves the other two untouched', db.getEquipped('AUTH_NEWBIE'), { form: 'gold', goalAnimation: 'fire', size: 'small' });
+
     // backup() must take a consistent, queryable snapshot (VACUUM INTO) even
     // though the source db here is a live, still-open :memory: database.
     {
@@ -1263,6 +1297,189 @@ console.log('\n--- core/announcements.js: an empty message list never fires (and
         check('nothing is sent when the message list is empty', sentLocal, []);
     }, 100);
 }
+
+console.log('\n--- core/economy.js: coin awards, playtime ticker, shop/inventory/equip ---');
+(async () => {
+    const { formatCoins } = require(path.join(CORE, 'utils'));
+    const Team = { RED: 1, BLUE: 2, SPECTATORS: 0 };
+    const State = { PLAY: 0, PAUSE: 1, STOP: 2 };
+    const HaxNotificationMock = { CHAT: 1 };
+    const testItems = [
+        { id: 'fire', type: 'goalAnimation', name: 'Огонь', price: 100, avatar: '🔥' },
+        { id: 'gold', type: 'form', name: 'Золотой', price: 200, color: 0xffd700 },
+        { id: 'small', type: 'size', name: 'Малыш', price: 50, radius: 12 },
+    ];
+
+    // Minimal in-memory stand-in for the real db, shaped exactly like the
+    // bridged version (see dbBridgeClient.js) — every method returns a
+    // Promise, since economy.js awaits all of them either way.
+    function makeDbMock() {
+        const balances = new Map();
+        const owned = new Map();
+        const equipped = new Map();
+        return {
+            addCoins: (auth, name, amount) => { balances.set(auth, (balances.get(auth) ?? 0) + amount); return Promise.resolve(); },
+            getBalance: (auth) => Promise.resolve(balances.get(auth) ?? 0),
+            getOwnedItemIds: (auth) => Promise.resolve([...(owned.get(auth) ?? [])]),
+            ownsItem: (auth, itemId) => Promise.resolve((owned.get(auth) ?? new Set()).has(itemId)),
+            buyItem: (auth, name, itemId, price) => {
+                const ownedSet = owned.get(auth) ?? new Set();
+                if (ownedSet.has(itemId)) return Promise.resolve(false);
+                if ((balances.get(auth) ?? 0) < price) return Promise.resolve(false);
+                balances.set(auth, (balances.get(auth) ?? 0) - price);
+                ownedSet.add(itemId);
+                owned.set(auth, ownedSet);
+                return Promise.resolve(true);
+            },
+            setEquipped: (auth, slot, itemId) => {
+                const current = equipped.get(auth) ?? { form: null, goalAnimation: null, size: null };
+                current[slot] = itemId;
+                equipped.set(auth, current);
+                return Promise.resolve();
+            },
+            getEquipped: (auth) => Promise.resolve(equipped.get(auth) ?? { form: null, goalAnimation: null, size: null }),
+            _balances: balances,
+        };
+    }
+
+    const roomCallsLocal = [];
+    const sentLocal = [];
+    const roomMock = {
+        setPlayerDiscProperties: (id, props) => roomCallsLocal.push(`setPlayerDiscProperties:${id}:${JSON.stringify(props)}`),
+        setPlayerAvatar: (id, avatar) => roomCallsLocal.push(`setPlayerAvatar:${id}:${avatar}`),
+        sendAnnouncement: (msg, id) => sentLocal.push({ msg, id }),
+    };
+    const authArray = [];
+    authArray[1] = ['AUTH_RED1'];
+    authArray[2] = ['AUTH_BLUE1'];
+    authArray[3] = ['AUTH_EMPTY'];
+    const state = {
+        gameState: State.PLAY,
+        teamRed: [{ id: 1, name: 'Red1' }],
+        teamBlue: [{ id: 2, name: 'Blue1' }],
+        playersAll: [{ id: 1, name: 'Red1' }, { id: 2, name: 'Blue1' }],
+    };
+
+    const db = makeDbMock();
+    const economy = require(path.join(CORE, 'economy'))({
+        room: roomMock, state, authArray, db, items: testItems,
+        Team, State, HaxNotification: HaxNotificationMock,
+        announcementColor: 1, errorColor: 2, formatCoins,
+    });
+
+    await economy.awardMatchCoins(Team.RED);
+    check('a win pays the winning team 50', await db.getBalance('AUTH_RED1'), 50);
+    check('a win pays the losing team 25', await db.getBalance('AUTH_BLUE1'), 25);
+
+    await economy.awardMatchCoins(Team.SPECTATORS);
+    check('a draw pays everyone the loss rate, not the win rate', await db.getBalance('AUTH_RED1'), 75);
+    check('a draw pays the other side the same loss rate', await db.getBalance('AUTH_BLUE1'), 50);
+
+    // Playtime: 60s/tick, 10 minutes (600s) needed for a payout — both teams
+    // are on the field for these ticks, so both accrue it, not just red.
+    for (let i = 0; i < 9; i++) economy.tickPlaytime(60);
+    check('playtime does not pay out before 10 minutes', await db.getBalance('AUTH_RED1'), 75);
+    economy.tickPlaytime(60);
+    check('playtime pays out once 10 minutes accumulate', await db.getBalance('AUTH_RED1'), 85);
+    check('playtime pays out to every active player, not just one side', await db.getBalance('AUTH_BLUE1'), 60);
+
+    state.gameState = State.STOP;
+    economy.tickPlaytime(600);
+    check('playtime never accrues while the game is not actually playing', await db.getBalance('AUTH_RED1'), 85);
+    state.gameState = State.PLAY;
+
+    // Shop: list, buy failures, a real purchase. Balance topped up to a
+    // known round number here so these checks don't depend on the exact
+    // arithmetic of every award/playtime step above.
+    await db.addCoins('AUTH_BLUE1', 'Blue1', 40);
+    check('balance topped up for the shop tests', await db.getBalance('AUTH_BLUE1'), 100);
+
+    sentLocal.length = 0;
+    await economy.shopCommand({ id: 2, name: 'Blue1' }, '!shop');
+    check('!shop with no args lists the catalog and balance', /Магазин \(баланс: 100 монеток\)/.test(sentLocal[0].msg), true);
+
+    sentLocal.length = 0;
+    await economy.shopCommand({ id: 2, name: 'Blue1' }, '!shop nope');
+    check('!shop <unknown id> reports no such item', /Нет такого товара/.test(sentLocal[0].msg), true);
+
+    sentLocal.length = 0;
+    await economy.shopCommand({ id: 2, name: 'Blue1' }, '!shop gold');
+    check('!shop <id> too expensive for the current balance is rejected', /Недостаточно монет/.test(sentLocal[0].msg), true);
+
+    sentLocal.length = 0;
+    await economy.shopCommand({ id: 2, name: 'Blue1' }, '!shop fire');
+    check('!shop <id> within budget succeeds', /Куплено: Огонь/.test(sentLocal[0].msg), true);
+    check('the price was actually deducted', await db.getBalance('AUTH_BLUE1'), 0);
+
+    sentLocal.length = 0;
+    await economy.shopCommand({ id: 2, name: 'Blue1' }, '!shop fire');
+    check('!shop <already-owned id> is rejected without charging again', /уже есть/.test(sentLocal[0].msg), true);
+
+    // Inventory.
+    sentLocal.length = 0;
+    await economy.inventoryCommand({ id: 1, name: 'Red1' }, '!inventory');
+    check('!inventory is empty for someone who owns nothing', /пока нет/.test(sentLocal[0].msg), true);
+
+    sentLocal.length = 0;
+    await economy.inventoryCommand({ id: 2, name: 'Blue1' }, '!inventory');
+    check('!inventory lists an owned item', /fire — Огонь/.test(sentLocal[0].msg), true);
+
+    // Equip.
+    sentLocal.length = 0;
+    await economy.equipCommand({ id: 2, name: 'Blue1' }, '!equip');
+    check('!equip with no id shows usage', /Использование/.test(sentLocal[0].msg), true);
+
+    sentLocal.length = 0;
+    await economy.equipCommand({ id: 2, name: 'Blue1' }, '!equip gold');
+    check('!equip <not owned> is rejected', /еще не купили/.test(sentLocal[0].msg), true);
+
+    roomCallsLocal.length = 0;
+    sentLocal.length = 0;
+    await economy.equipCommand({ id: 2, name: 'Blue1' }, '!equip fire');
+    check('!equip <owned goalAnimation> confirms', /Надето: Огонь/.test(sentLocal[0].msg), true);
+    check('equipping a goalAnimation never touches the disc', roomCallsLocal, []);
+    check('equipping a goalAnimation records it in that slot', await db.getEquipped('AUTH_BLUE1'), { form: null, goalAnimation: 'fire', size: null });
+
+    // Equipping a 'size' item goes through applyEquippedDiscCosmetics too
+    // (same as 'form'), unlike goalAnimation above.
+    await db.buyItem('AUTH_BLUE1', 'Blue1', 'small', 0);
+    roomCallsLocal.length = 0;
+    sentLocal.length = 0;
+    await economy.equipCommand({ id: 2, name: 'Blue1' }, '!equip small');
+    check('!equip <owned size> confirms', /Надето: Малыш/.test(sentLocal[0].msg), true);
+    check('equipping a size item applies it to the disc immediately', roomCallsLocal, [`setPlayerDiscProperties:2:${JSON.stringify({ radius: 12 })}`]);
+
+    // applyEquippedDiscCosmetics / playGoalAnimation, called directly (as
+    // gameManagement.js/movement.js would on join/team-change/goal).
+    await db.buyItem('AUTH_RED1', 'Red1', 'gold', 0);
+    await db.setEquipped('AUTH_RED1', 'form', 'gold');
+    roomCallsLocal.length = 0;
+    await economy.applyEquippedDiscCosmetics({ id: 1, name: 'Red1' });
+    check('applyEquippedDiscCosmetics applies the equipped disc color', roomCallsLocal, [`setPlayerDiscProperties:1:${JSON.stringify({ color: 0xffd700 })}`]);
+
+    // Blue1 has BOTH a form (none equipped) and a size (small) at this
+    // point — only size should show up in the applied properties.
+    roomCallsLocal.length = 0;
+    await economy.applyEquippedDiscCosmetics({ id: 2, name: 'Blue1' });
+    check('applyEquippedDiscCosmetics applies only the slots that are actually equipped', roomCallsLocal, [`setPlayerDiscProperties:2:${JSON.stringify({ radius: 12 })}`]);
+
+    await db.setEquipped('AUTH_RED1', 'size', 'small');
+    roomCallsLocal.length = 0;
+    await economy.applyEquippedDiscCosmetics({ id: 1, name: 'Red1' });
+    check('applyEquippedDiscCosmetics combines form + size into one call', roomCallsLocal, [`setPlayerDiscProperties:1:${JSON.stringify({ color: 0xffd700, radius: 12 })}`]);
+
+    roomCallsLocal.length = 0;
+    await economy.applyEquippedDiscCosmetics({ id: 3, name: 'Empty' });
+    check('applyEquippedDiscCosmetics is a no-op with nothing equipped in either slot', roomCallsLocal, []);
+
+    roomCallsLocal.length = 0;
+    await economy.playGoalAnimation({ id: 2, name: 'Blue1' });
+    check('playGoalAnimation flashes the equipped avatar', roomCallsLocal, ['setPlayerAvatar:2:🔥']);
+
+    roomCallsLocal.length = 0;
+    await economy.playGoalAnimation({ id: 1, name: 'Red1' });
+    check('playGoalAnimation is a no-op with nothing equipped', roomCallsLocal, []);
+})();
 
 // The movement.js leave broadcast fires from inside a 10ms setTimeout, the
 // overflowPassword rotation check above waits 150ms for real interval
