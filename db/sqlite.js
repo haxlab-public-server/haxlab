@@ -2,7 +2,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { DatabaseSync } = require('node:sqlite');
 
-function createSqliteDatabase(filePath = path.join(__dirname, 'haxchill.sqlite')) {
+function createSqliteDatabase(filePath = path.join(__dirname, 'haxlab.sqlite')) {
     const database = new DatabaseSync(filePath);
     database.exec('PRAGMA journal_mode = WAL');
     database.exec('PRAGMA foreign_keys = ON');
