@@ -7,7 +7,7 @@
 module.exports = function createPrintStats({
     getTimeStats,
 }) {
-    // haxchill policy: play without obligations or a race for goals/wins/etc —
+    // haxlab policy: play without obligations or a race for goals/wins/etc —
     // so only playtime is shown here. Everything else keeps being counted in
     // the database (see roomStats.js/playerStats.js), just not displayed.
     // Commented out rather than deleted, in case that policy changes:

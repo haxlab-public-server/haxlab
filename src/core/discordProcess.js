@@ -158,7 +158,7 @@ const maxBackups = 28; // 1 week of history at the 6h cadence
 function runDatabaseBackup() {
     try {
         const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-        db.backup(path.join(backupDir, `haxchill-${stamp}.sqlite`));
+        db.backup(path.join(backupDir, `haxlab-${stamp}.sqlite`));
         const backups = fs.existsSync(backupDir)
             ? fs.readdirSync(backupDir).filter((f) => f.endsWith('.sqlite')).sort()
             : [];

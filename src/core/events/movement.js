@@ -62,7 +62,7 @@ module.exports = function createMovementEvents({
             null
         );
         room.sendAnnouncement(
-            `👋 Добро пожаловать ${player.name} !\n Следите за новостями в Discord: dsc.gg/haxchill`,
+            `👋 Добро пожаловать ${player.name} !\n Следите за новостями в Discord: dsc.gg/haxlab`,
             player.id,
             welcomeColor,
             'bold',

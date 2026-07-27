@@ -148,13 +148,13 @@ module.exports = function createEconomy({
 
     // room.setTeamColors(team, angle, textColor, colors) sets a whole side's
     // jersey in one call — no need to touch individual players' discs at
-    // all. Fallen back to whenever a side has no form active, so a side
-    // never keeps wearing a stale color from before its last form-owner
-    // left/switched (setTeamColors doesn't auto-revert on its own).
-    const DEFAULT_TEAM_ANGLE = 0;
-    const DEFAULT_TEAM_TEXT_COLOR = 0xffffff;
-    const DEFAULT_RED_COLORS = [0xe56e56];
-    const DEFAULT_BLUE_COLORS = [0x6a8ef5];
+    // all. A "kit" is exactly setTeamColors' own (colors, textColor, angle)
+    // triple, so an item's home/away (see shopItems.js) can be passed
+    // straight through. Fallen back to whenever a side has no form active,
+    // so a side never keeps wearing a stale kit from before its last
+    // form-owner left/switched (setTeamColors doesn't auto-revert on its own).
+    const DEFAULT_RED_KIT = { colors: [0xe56e56], textColor: 0xffffff, angle: 0 };
+    const DEFAULT_BLUE_KIT = { colors: [0x6a8ef5], textColor: 0xffffff, angle: 0 };
 
     // Recomputes and re-applies BOTH sides' colors — call this on any roster
     // change to either team (a new captain, a teammate joining/leaving that
@@ -168,16 +168,18 @@ module.exports = function createEconomy({
             determineSideForm(state.teamBlue),
         ]);
 
-        let redColor = red ? red.item.homeColor : null;
-        let blueColor = blue ? blue.item.homeColor : null;
-        // Same form on both sides would mean identical colors — red keeps
+        let redKit = red ? red.item.home : null;
+        let blueKit = blue ? blue.item.home : null;
+        // Same form on both sides would mean identical kits — red keeps
         // home, blue switches to its away variant so they're never twinning.
         if (red && blue && red.item.id === blue.item.id) {
-            blueColor = blue.item.awayColor;
+            blueKit = blue.item.away;
         }
+        redKit ??= DEFAULT_RED_KIT;
+        blueKit ??= DEFAULT_BLUE_KIT;
 
-        room.setTeamColors(Team.RED, DEFAULT_TEAM_ANGLE, DEFAULT_TEAM_TEXT_COLOR, redColor != null ? [redColor] : DEFAULT_RED_COLORS);
-        room.setTeamColors(Team.BLUE, DEFAULT_TEAM_ANGLE, DEFAULT_TEAM_TEXT_COLOR, blueColor != null ? [blueColor] : DEFAULT_BLUE_COLORS);
+        room.setTeamColors(Team.RED, redKit.angle, redKit.textColor, redKit.colors);
+        room.setTeamColors(Team.BLUE, blueKit.angle, blueKit.textColor, blueKit.colors);
 
         return { red, blue };
     }

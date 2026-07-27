@@ -288,7 +288,7 @@ module.exports = function createDiscordBot({
         const payload = {
             embeds: [
                 new EmbedBuilder()
-                    .setTitle('HaxChill')
+                    .setTitle('HaxLab')
                     .setDescription(`Игроков в комнате: **${playerCount}/${maxPlayers}**`)
                     .setColor(0x62cbff),
             ],

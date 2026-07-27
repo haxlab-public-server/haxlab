@@ -93,7 +93,7 @@ module.exports = function createCommands({
     Пример: !discord 123456789012345678 связывает ваш аккаунт Discord.`,
         function: linkDiscordCommand,
     },
-    // haxchill policy: play without obligations or a race for goals/wins/etc —
+    // haxlab policy: play without obligations or a race for goals/wins/etc —
     // these leaderboards are disabled (not deleted) so only !playtime remains.
     // games: {
     //     aliases: [],

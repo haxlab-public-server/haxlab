@@ -41,7 +41,7 @@ const room = {
     getPlayerList: () => [],
 };
 
-console.log('--- stats/print.js: only playtime is shown, per haxchill\'s no-stat-race policy ---');
+console.log('--- stats/print.js: only playtime is shown, per haxlab\'s no-stat-race policy ---');
 {
     const createPrintStats = require(path.join(CORE, 'stats', 'print'));
     const printStats = createPrintStats({ getTimeStats: (seconds) => `${Math.floor(seconds / 60)}m` });
@@ -478,7 +478,7 @@ console.log('\n--- db + roomStats.js/player.js: player data actually round-trips
     // though the source db here is a live, still-open :memory: database.
     {
         const os = require('os');
-        const backupPath = path.join(os.tmpdir(), `haxchill-smoke-backup-${Date.now()}.sqlite`);
+        const backupPath = path.join(os.tmpdir(), `haxlab-smoke-backup-${Date.now()}.sqlite`);
         db.addMaster('AUTH_BACKUP_CHECK');
         db.backup(backupPath);
         const restored = createSqliteDatabase(backupPath);
@@ -1645,8 +1645,16 @@ console.log('\n--- core/economy.js: coin awards, playtime ticker, shop/inventory
     const HaxNotificationMock = { CHAT: 1 };
     const testItems = [
         { id: 'fire', type: 'goalAnimation', name: 'Огонь', price: 100, avatar: '🔥' },
-        { id: 'gold', type: 'form', name: 'Золотой', price: 200, homeColor: 0xffd700, awayColor: 0x1a1a1a },
-        { id: 'violet', type: 'form', name: 'Фиолетовый', price: 200, homeColor: 0x8a2be2, awayColor: 0xffffff },
+        {
+            id: 'gold', type: 'form', name: 'Золотой', price: 200,
+            home: { colors: [0xffd700], textColor: 0x1a1a1a, angle: 0 },
+            away: { colors: [0x1a1a1a], textColor: 0xffd700, angle: 0 },
+        },
+        {
+            id: 'violet', type: 'form', name: 'Фиолетовый', price: 200,
+            home: { colors: [0x8a2be2], textColor: 0xffffff, angle: 0 },
+            away: { colors: [0xffffff], textColor: 0x1a1a1a, angle: 0 },
+        },
         { id: 'small', type: 'size', name: 'Малыш', price: 50, radius: 12 },
     ];
 

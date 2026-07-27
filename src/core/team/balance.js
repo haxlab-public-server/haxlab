@@ -314,7 +314,21 @@ module.exports = function createTeamBalance({
         if (byPlayer == null && state.endGameVariable) {
             if (state.chooseMode) {
                 if (state.players.length == 2 * teamSize) {
-                    state.chooseMode = false;
+                    // endGame() activates choose mode defensively on EVERY
+                    // win with a full-or-bigger house, before it's known
+                    // whether there are actually any extra spectators to
+                    // pick from. Landing here means there weren't (exactly
+                    // 2*teamSize total) — nothing to choose, so skip
+                    // straight to a random fill. Must go through
+                    // deactivateChooseMode(), not a bare assignment: it also
+                    // resets slowMode back down (otherwise chat stays on the
+                    // slower captain-picking rate) and clears
+                    // redCaptainChoice/blueCaptainChoice (otherwise a stale
+                    // 'top'/'random'/'bottom' from this round leaks into the
+                    // NEXT real choose-mode session, silently auto-picking
+                    // for whichever captain sits down next without ever
+                    // asking them).
+                    deactivateChooseMode();
                     // A full 4v4 needs the big map — classic (1v1/2v2-sized)
                     // is too small and would otherwise stay active if the
                     // room simply grew into this from a smaller match.

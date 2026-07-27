@@ -1,5 +1,5 @@
 {
-  "name": "haxchill",
+  "name": "haxlab",
   "private": true,
   "version": "0.1.0",
   "description": "Public HaxBall room bot — real headless Chromium via Puppeteer, room logic bundled and injected into the page",
