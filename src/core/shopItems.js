@@ -35,23 +35,23 @@
 module.exports = [
     {
         id: 'crimson', type: 'form', name: 'Багровый', price: 150,
-        home: { colors: [0xD60000, 0x8F1410, 0x750000], textColor: 0xffffff, angle: 0 },
-        away: { colors: [0x4F1C1C, 0x361010, 0x2E0F0F], textColor: 0xFF0000, angle: 0 },
+        home: { colors: [0xD60000, 0x8F1410, 0x750000], textColor: 0xffffff, angle: 60 },
+        away: { colors: [0x4F1C1C, 0x361010, 0x2E0F0F], textColor: 0xFF0000, angle: 60 },
     },
     {
         id: 'gold', type: 'form', name: 'Золотой', price: 300,
-        home: { colors: [0xFFD700, 0xD9CA05, 0xCCB802], textColor: 0x000000, angle: 0 },
-        away: { colors: [0x786500, 0x7D7403, 0x695E01], textColor: 0xFFE600, angle: 0 },
+        home: { colors: [0xFFD700, 0xD9CA05, 0xCCB802], textColor: 0x000000, angle: 60 },
+        away: { colors: [0x786500, 0x7D7403, 0x695E01], textColor: 0xFFE600, angle: 60 },
     },
     {
         id: 'emerald', type: 'form', name: 'Изумрудный', price: 300,
-        home: { colors: [0x50c878, 0x45AD68, 0x3D995C], textColor: 0xffffff, angle: 0 },
-        away: { colors: [0x29663D, 0x235734, 0x194026], textColor: 0x50c878, angle: 0 },
+        home: { colors: [0x50c878, 0x45AD68, 0x3D995C], textColor: 0xffffff, angle: 60 },
+        away: { colors: [0x29663D, 0x235734, 0x194026], textColor: 0x50c878, angle: 60 },
     },
     {
         id: 'violet', type: 'form', name: 'Фиолетовый', price: 450,
-        home: { colors: [0x8a2be2, 0x7524BF, 0x561B8C], textColor: 0xffffff, angle: 0 },
-        away: { colors: [0x4E1980, 0x3E1366, 0x310F4F], textColor: 0x9930FA, angle: 0 },
+        home: { colors: [0x8a2be2, 0x7524BF, 0x561B8C], textColor: 0xffffff, angle: 60 },
+        away: { colors: [0x4E1980, 0x3E1366, 0x310F4F], textColor: 0x9930FA, angle: 60 },
     },
 
     { id: 'small', type: 'size', name: 'Малыш', price: 200, radius: 8 },
