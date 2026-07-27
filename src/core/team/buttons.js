@@ -41,7 +41,17 @@ module.exports = function createButtonHelpers({
                     // to 3v4 instead of 4v4, one waiting spectator ignored).
                     room.setPlayerTeam(state.teamSpec[0].id, Team.RED);
                     setTimeout(() => {
-                        room.setPlayerTeam(state.teamSpec[0].id, Team.BLUE);
+                        // Something else (another topButton()/randomButton()
+                        // call, a balanceTeams() run triggered by a join
+                        // landing in this same 5ms gap, etc.) can drain the
+                        // last waiting spectator before this fires — without
+                        // this guard, state.teamSpec[0] is undefined and
+                        // .id throws, aborting whatever the rest of this
+                        // rebuild sequence still had queued and leaving the
+                        // teams wherever they happened to land mid-refill.
+                        if (state.teamSpec.length > 0) {
+                            room.setPlayerTeam(state.teamSpec[0].id, Team.BLUE);
+                        }
                     }, 5);
                 }
             } else if (state.teamRed.length < state.teamBlue.length)
@@ -69,7 +79,13 @@ module.exports = function createButtonHelpers({
                     // (already-moved) player, or otherwise misjudge who's left.
                     room.setPlayerTeam(state.teamSpec[getRandomInt(state.teamSpec.length)].id, Team.RED);
                     setTimeout(() => {
-                        room.setPlayerTeam(state.teamSpec[getRandomInt(state.teamSpec.length)].id, Team.BLUE);
+                        // See topButton()'s identical guard: something else
+                        // can drain the last waiting spectator during this
+                        // 5ms gap, and indexing into an empty teamSpec would
+                        // throw and abort the rest of this rebuild sequence.
+                        if (state.teamSpec.length > 0) {
+                            room.setPlayerTeam(state.teamSpec[getRandomInt(state.teamSpec.length)].id, Team.BLUE);
+                        }
                     }, 5);
                 }
             } else if (state.teamRed.length < state.teamBlue.length)
@@ -132,21 +148,23 @@ module.exports = function createButtonHelpers({
         }
     }
 
-    // Unlike the three functions above, these for...of loops are already
-    // safe: `for...of arr` grabs arr's iterator once, up front — reassigning
-    // state.teamBlue/state.teamRed to a new array partway through (as
-    // updateTeams() does) doesn't affect an iterator already bound to the
-    // old array object. No snapshot needed here.
+    // Both teams must be snapshotted before EITHER loop runs: moving the
+    // blue players to red first reassigns state.teamRed to include them, so
+    // a second loop reading state.teamRed live would pick up the players
+    // just moved by the first loop (and bounce them straight back to blue)
+    // instead of the original red team.
     function swapButton() {
         clearTimeout(state.removingTimeout);
         state.removingPlayers = true;
         state.removingTimeout = setTimeout(() => {
             state.removingPlayers = false;
         }, 100);
-        for (let player of state.teamBlue) {
+        const wasBlue = [...state.teamBlue];
+        const wasRed = [...state.teamRed];
+        for (let player of wasBlue) {
             room.setPlayerTeam(player.id, Team.RED);
         }
-        for (let player of state.teamRed) {
+        for (let player of wasRed) {
             room.setPlayerTeam(player.id, Team.BLUE);
         }
     }

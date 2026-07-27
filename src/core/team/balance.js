@@ -56,6 +56,20 @@ module.exports = function createTeamBalance({
         }
     }
 
+    // Every staggered spectator-pull below schedules its moves as a fixed
+    // count of setTimeout calls computed once up front from teamSpec's
+    // length at that moment — but a concurrent leave/join (or another
+    // balanceTeams() run) landing in one of those gaps can drain teamSpec
+    // before a later call in the batch fires. Indexing into it empty would
+    // throw and abort whatever's still queued behind it, so every one of
+    // these deferred moves goes through this guard instead of indexing
+    // state.teamSpec directly.
+    function safeMoveNextSpec(team) {
+        if (state.teamSpec.length > 0) {
+            room.setPlayerTeam(state.teamSpec[0].id, team);
+        }
+    }
+
     function balanceTeams() {
         // Self-heal a chooseMode session that's stuck true below the
         // threshold it needs (a full-or-bigger house) — not just here for
@@ -214,7 +228,7 @@ module.exports = function createTeamBalance({
                 // ignored).
                 for (let i = 0; i < 2 * n; i++) {
                     setTimeout(() => {
-                        room.setPlayerTeam(state.teamSpec[0].id, i % 2 === 0 ? Team.RED : Team.BLUE);
+                        safeMoveNextSpec(i % 2 === 0 ? Team.RED : Team.BLUE);
                     }, 5 * i);
                 }
             }
@@ -299,7 +313,7 @@ module.exports = function createTeamBalance({
                         clearTimeout(state.insertingTimeout);
                         state.insertingPlayers = true;
                         setTimeout(() => {
-                            room.setPlayerTeam(state.teamSpec[0].id, Team.BLUE);
+                            safeMoveNextSpec(Team.BLUE);
                         }, 5 * i);
                     }
                     state.insertingTimeout = setTimeout(() => {
@@ -310,7 +324,7 @@ module.exports = function createTeamBalance({
                         clearTimeout(state.insertingTimeout);
                         state.insertingPlayers = true;
                         setTimeout(() => {
-                            room.setPlayerTeam(state.teamSpec[0].id, Team.RED);
+                            safeMoveNextSpec(Team.RED);
                         }, 5 * i);
                     }
                     state.insertingTimeout = setTimeout(() => {
@@ -363,7 +377,7 @@ module.exports = function createTeamBalance({
                         clearTimeout(state.insertingTimeout);
                         state.insertingPlayers = true;
                         setTimeout(() => {
-                            room.setPlayerTeam(state.teamSpec[0].id, Team.BLUE);
+                            safeMoveNextSpec(Team.BLUE);
                         }, 5 * i);
                     }
                     state.insertingTimeout = setTimeout(() => {
@@ -374,7 +388,7 @@ module.exports = function createTeamBalance({
                         clearTimeout(state.insertingTimeout);
                         state.insertingPlayers = true;
                         setTimeout(() => {
-                            room.setPlayerTeam(state.teamSpec[0].id, Team.RED);
+                            safeMoveNextSpec(Team.RED);
                         }, 5 * i);
                     }
                     state.insertingTimeout = setTimeout(() => {

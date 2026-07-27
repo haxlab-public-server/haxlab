@@ -67,6 +67,7 @@ module.exports = function createGameManagementEvents({
         // see playGoalSizeEffect's doc comment in economy.js.
         announceTeamForms().catch((err) => console.error('[economy] announceTeamForms failed:', err));
         calculateStadiumVariables();
+        room.setKickRateLimit(6, 12, 4);
     }
 
     function onGameStop(byPlayer) {

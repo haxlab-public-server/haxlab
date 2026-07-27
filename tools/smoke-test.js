@@ -1029,6 +1029,79 @@ console.log('\n--- team/buttons.js: topButton pairs up two different spectators,
     })();
 }
 
+console.log('\n--- team/buttons.js: swapButton relabels both teams instead of bouncing the second group back ---');
+{
+    // Bug: the second for...of loop read state.teamRed live, AFTER the
+    // first loop had already moved the old blue team onto red — so it
+    // picked up those just-moved players (not the original red team, long
+    // gone) and immediately moved them right back to blue, making the
+    // whole swap a no-op instead of an actual relabel.
+    function makeRealisticRoomMock(state, Team) {
+        return {
+            setPlayerTeam: (id, team) => {
+                const player = state.players.find((p) => p.id === id);
+                player.team = team;
+                state.teamRed = state.players.filter((p) => p.team === Team.RED);
+                state.teamBlue = state.players.filter((p) => p.team === Team.BLUE);
+                state.teamSpec = state.players.filter((p) => p.team === Team.SPECTATORS);
+            },
+        };
+    }
+    const Team = { RED: 1, BLUE: 2, SPECTATORS: 0 };
+    const players = [{ id: 1, team: Team.RED }, { id: 2, team: Team.BLUE }];
+    const state = { players };
+    state.teamRed = players.filter((p) => p.team === Team.RED);
+    state.teamBlue = players.filter((p) => p.team === Team.BLUE);
+    state.teamSpec = [];
+    const { swapButton } = require(path.join(CORE, 'team', 'buttons'))({
+        room: makeRealisticRoomMock(state, Team), state, Team, getRandomInt: () => 0,
+    });
+
+    swapButton();
+    check('swapButton moves the old red player to blue', state.teamBlue.map((p) => p.id), [1]);
+    check('swapButton moves the old blue player to red', state.teamRed.map((p) => p.id), [2]);
+}
+
+console.log('\n--- team/buttons.js: topButton/randomButton survive the last spectator being drained during their 5ms pair gap ---');
+{
+    // Bug: the deferred second half of a pair move (see the tests above)
+    // indexes state.teamSpec[0] again a real tick later. If something else
+    // — another topButton()/randomButton() call, a balanceTeams() run
+    // triggered by a concurrent join/leave — drains the last waiting
+    // spectator in that gap, state.teamSpec[0] is undefined and .id threw,
+    // an uncaught exception in a bare setTimeout callback (not a room event
+    // handler, so safeEventHandlers' try/catch never sees it) that would
+    // have aborted whatever rebuild sequence was still queued behind it —
+    // and, run under plain Node with no global handler like this test, take
+    // the whole process down. Reaching the check() below at all is the win.
+    function makeRealisticRoomMock(state, Team) {
+        return {
+            setPlayerTeam: (id, team) => {
+                const player = state.players.find((p) => p.id === id);
+                if (!player) return;
+                player.team = team;
+                state.teamRed = state.players.filter((p) => p.team === Team.RED);
+                state.teamBlue = state.players.filter((p) => p.team === Team.BLUE);
+                state.teamSpec = state.players.filter((p) => p.team === Team.SPECTATORS);
+            },
+        };
+    }
+    const Team = { RED: 1, BLUE: 2, SPECTATORS: 0 };
+    const players = [{ id: 1, team: Team.SPECTATORS }, { id: 2, team: Team.SPECTATORS }];
+    const state = { players, teamRed: [], teamBlue: [], teamSpec: [...players] };
+    const { topButton } = require(path.join(CORE, 'team', 'buttons'))({ room: makeRealisticRoomMock(state, Team), state, Team, getRandomInt: () => 0 });
+
+    (async () => {
+        topButton();
+        // Simulate a concurrent event draining the second spectator before
+        // topButton()'s own +5ms callback gets to it.
+        state.players.splice(1, 1);
+        state.teamSpec = state.players.filter((p) => p.team === Team.SPECTATORS);
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        check('topButton does not throw when the last spectator vanishes mid-pair', true, true);
+    })();
+}
+
 console.log('\n--- team/buttons.js: a lone spectator is left waiting, not forced onto one side, when teams are already even ---');
 {
     // Bug: callers that loop topButton()/randomButton() once per waiting
