@@ -34,6 +34,7 @@ module.exports = function createCommands({
     shopCommand,
     inventoryCommand,
     equipCommand,
+    addCoinsCommand,
 }) {
     return {
 
@@ -395,6 +396,17 @@ module.exports = function createCommands({
 
     Чтобы удалить пароль комнаты, просто введите '!password'.`,
         function: passwordCommand,
+    },
+    addcoins: {
+        aliases: [],
+        roles: Role.MASTER,
+        desc: `
+    Тестовая команда: начисляет (или списывает) монетки игроку напрямую.
+    Она принимает 2 аргумента:
+    Аргумент 1: #<id> игрока, который сейчас в комнате, ИЛИ его <auth> напрямую.
+    Аргумент 2: <количество> сколько монеток начислить — можно отрицательное число, чтобы списать.
+    Пример: !addcoins #3 500 начислит 500 монет игроку с id 3.`,
+        function: addCoinsCommand,
     },
 
     };

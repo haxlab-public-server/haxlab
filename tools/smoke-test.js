@@ -1479,6 +1479,36 @@ console.log('\n--- core/economy.js: coin awards, playtime ticker, shop/inventory
     roomCallsLocal.length = 0;
     await economy.playGoalAnimation({ id: 1, name: 'Red1' });
     check('playGoalAnimation is a no-op with nothing equipped', roomCallsLocal, []);
+
+    // addCoinsCommand: a testing/support tool, not player-facing (role
+    // gating to Role.MASTER happens at the dispatch layer in commands.js,
+    // same as every other command — nothing to test for that here).
+    const master = { id: 9, name: 'Master' };
+
+    sentLocal.length = 0;
+    await economy.addCoinsCommand(master, '!addcoins');
+    check('!addcoins with no args shows usage', /Использование/.test(sentLocal[0].msg), true);
+
+    sentLocal.length = 0;
+    await economy.addCoinsCommand(master, '!addcoins #1 notanumber');
+    check('!addcoins with a non-numeric amount shows usage', /Использование/.test(sentLocal[0].msg), true);
+
+    sentLocal.length = 0;
+    await economy.addCoinsCommand(master, '!addcoins #999 100');
+    check('!addcoins #<id> not in the room reports so', /нет в комнате/.test(sentLocal[0].msg), true);
+
+    const balanceBeforeAddCoins = await db.getBalance('AUTH_RED1');
+    sentLocal.length = 0;
+    await economy.addCoinsCommand(master, '!addcoins #1 500');
+    check('!addcoins #<id> credits the live player\'s auth', await db.getBalance('AUTH_RED1'), balanceBeforeAddCoins + 500);
+    check('!addcoins confirms with the new balance', sentLocal[0].msg.includes('Red1'), true);
+
+    sentLocal.length = 0;
+    await economy.addCoinsCommand(master, '!addcoins AUTH_OFFLINE_TEST 200');
+    check('!addcoins <raw auth> works for someone not in the room', await db.getBalance('AUTH_OFFLINE_TEST'), 200);
+
+    await economy.addCoinsCommand(master, '!addcoins #1 -100');
+    check('!addcoins accepts a negative amount to deduct', await db.getBalance('AUTH_RED1'), balanceBeforeAddCoins + 400);
 })();
 
 // The movement.js leave broadcast fires from inside a 10ms setTimeout, the

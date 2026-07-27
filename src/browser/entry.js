@@ -240,6 +240,7 @@ const {
     shopCommand,
     inventoryCommand,
     equipCommand,
+    addCoinsCommand,
 } = createEconomy({
     room,
     state,
@@ -1062,6 +1063,7 @@ const commands = createCommands({
     shopCommand,
     inventoryCommand,
     equipCommand,
+    addCoinsCommand,
 });
 
 stadiumCommand(emptyPlayer, "!training");

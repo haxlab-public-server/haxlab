@@ -206,6 +206,47 @@ module.exports = function createEconomy({
         room.sendAnnouncement(`✔️ Надето: ${item.name} !`, player.id, announcementColor, 'bold', HaxNotification.CHAT);
     }
 
+    // Testing/support tool, not a player-facing command — gated to
+    // Role.MASTER in commands.js, same as !banauth/!setadmin/etc. Target
+    // accepts #<id> (online) or a raw auth (offline), same as !banauth.
+    // Amount can be negative too, to test/undo a grant without going
+    // through the DB by hand.
+    async function addCoinsCommand(player, message) {
+        const msgArray = message.split(/ +/).slice(1);
+        const target = msgArray[0];
+        const amount = parseInt(msgArray[1]);
+        if (!target || !Number.isInteger(amount)) {
+            room.sendAnnouncement(`Использование: !addcoins <#id|auth> <количество>`, player.id, errorColor, 'bold', HaxNotification.CHAT);
+            return;
+        }
+
+        let auth, targetName;
+        if (target[0] === '#') {
+            const id = parseInt(target.substring(1));
+            const targetPlayer = state.playersAll.find((p) => p.id === id);
+            if (!targetPlayer) {
+                room.sendAnnouncement(`Игрока с таким ID нет в комнате.`, player.id, errorColor, 'bold', HaxNotification.CHAT);
+                return;
+            }
+            auth = getAuth(targetPlayer);
+            targetName = targetPlayer.name;
+        } else {
+            auth = target;
+            const targetPlayer = state.playersAll.find((p) => getAuth(p) === auth);
+            targetName = targetPlayer ? targetPlayer.name : auth;
+        }
+
+        await db.addCoins(auth, targetName, amount);
+        const newBalance = await db.getBalance(auth);
+        room.sendAnnouncement(
+            `✔️ ${targetName}: ${amount >= 0 ? '+' : ''}${amount} монет. Баланс: ${formatCoins(newBalance)}`,
+            player.id,
+            announcementColor,
+            'bold',
+            HaxNotification.CHAT
+        );
+    }
+
     return {
         awardMatchCoins,
         tickPlaytime,
@@ -214,5 +255,6 @@ module.exports = function createEconomy({
         shopCommand,
         inventoryCommand,
         equipCommand,
+        addCoinsCommand,
     };
 };
