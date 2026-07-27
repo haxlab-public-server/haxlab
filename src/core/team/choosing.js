@@ -110,6 +110,18 @@ module.exports = function createChoosingHelpers({
         }
     }
 
+    // None of the branches below call clearTimeout(state.timeOutCap)
+    // themselves (the numeric-pick branch never did either) — room.setPlayerTeam
+    // fires room.onPlayerTeamChange synchronously, which can recurse straight
+    // back through handlePlayersTeamChange's own captain-choice auto-continue
+    // (redCaptainChoice/blueCaptainChoice) and, if picking hands off to the
+    // OTHER captain mid-cascade, call choosePlayer() for them — which sets a
+    // BRAND NEW state.timeOutCap for their turn. Clearing the timer here,
+    // AFTER setPlayerTeam has already returned from that whole cascade, would
+    // wipe out that new timer instead of the stale one it was meant for.
+    // handlePlayersTeamChange's own branches already clear/reset it correctly
+    // on every path (an outright deactivateChooseMode(), or another
+    // choosePlayer()), so there's nothing left for this function to do.
     function chooseModeFunction(player, message) {
         const msgArray = message.split(/ +/);
         if (player.id == state.teamRed[0].id || player.id == state.teamBlue[0].id) {
@@ -117,7 +129,6 @@ module.exports = function createChoosingHelpers({
                 if (['top', 'auto'].includes(msgArray[0].toLowerCase())) {
                     room.setPlayerTeam(state.teamSpec[0].id, Team.RED);
                     state.redCaptainChoice = 'top';
-                    clearTimeout(state.timeOutCap);
                     room.sendAnnouncement(
                         `${player.name} выбрал Top !`,
                         null,
@@ -129,7 +140,6 @@ module.exports = function createChoosingHelpers({
                     const r = getRandomInt(state.teamSpec.length);
                     room.setPlayerTeam(state.teamSpec[r].id, Team.RED);
                     state.redCaptainChoice = 'random';
-                    clearTimeout(state.timeOutCap);
                     room.sendAnnouncement(
                         `${player.name} выбрал Random !`,
                         null,
@@ -140,7 +150,6 @@ module.exports = function createChoosingHelpers({
                 } else if (['bottom', 'bot'].includes(msgArray[0].toLowerCase())) {
                     room.setPlayerTeam(state.teamSpec[state.teamSpec.length - 1].id, Team.RED);
                     state.redCaptainChoice = 'bottom';
-                    clearTimeout(state.timeOutCap);
                     room.sendAnnouncement(
                         `${player.name} выбрал Bottom !`,
                         null,
@@ -177,7 +186,6 @@ module.exports = function createChoosingHelpers({
                 if (['top', 'auto'].includes(msgArray[0].toLowerCase())) {
                     room.setPlayerTeam(state.teamSpec[0].id, Team.BLUE);
                     state.blueCaptainChoice = 'top';
-                    clearTimeout(state.timeOutCap);
                     room.sendAnnouncement(
                         `${player.name} выбрал Top !`,
                         null,
@@ -191,7 +199,6 @@ module.exports = function createChoosingHelpers({
                         Team.BLUE
                     );
                     state.blueCaptainChoice = 'random';
-                    clearTimeout(state.timeOutCap);
                     room.sendAnnouncement(
                         `${player.name} выбрал Random !`,
                         null,
@@ -202,7 +209,6 @@ module.exports = function createChoosingHelpers({
                 } else if (['bottom', 'bot'].includes(msgArray[0].toLowerCase())) {
                     room.setPlayerTeam(state.teamSpec[state.teamSpec.length - 1].id, Team.BLUE);
                     state.blueCaptainChoice = 'bottom';
-                    clearTimeout(state.timeOutCap);
                     room.sendAnnouncement(
                         `${player.name} выбрал Bottom !`,
                         null,

@@ -58,13 +58,23 @@ module.exports = function createTeamBalance({
                         stadiumCommand(emptyPlayer, `!classic`);
                     }, 5);
                 }
+                // Always index [0], not [i]: room.setPlayerTeam fires
+                // room.onPlayerTeamChange synchronously, which calls
+                // updateTeams() and replaces state.teamSpec with a shorter
+                // array with the just-moved player gone. Indexing by the
+                // loop counter walked past players who'd already shifted
+                // down into the earlier slots — for n>=2 this skipped every
+                // other spectator (leaving them stuck spectating) and then
+                // ran off the end of the shrunk array entirely (a thrown
+                // TypeError on state.teamSpec[i].id, aborting the loop
+                // early with the gap only half-closed).
                 if (state.teamRed.length > state.teamBlue.length) {
                     for (let i = 0; i < n; i++) {
-                        room.setPlayerTeam(state.teamSpec[i].id, Team.BLUE);
+                        room.setPlayerTeam(state.teamSpec[0].id, Team.BLUE);
                     }
                 } else {
                     for (let i = 0; i < n; i++) {
-                        room.setPlayerTeam(state.teamSpec[i].id, Team.RED);
+                        room.setPlayerTeam(state.teamSpec[0].id, Team.RED);
                     }
                 }
             } else if (Math.abs(state.teamRed.length - state.teamBlue.length) > state.teamSpec.length) {
@@ -99,13 +109,16 @@ module.exports = function createTeamBalance({
                 } else {
                     // Not yet a full house — just balance directly and keep
                     // playing (2v2/3v3/etc); the rest wait as spectators.
+                    // Index [0], not [i] — see the identical fix/comment on
+                    // the branch above; the same shrinking-array hazard
+                    // applies here.
                     if (state.teamRed.length > state.teamBlue.length) {
                         for (let i = 0; i < n; i++) {
-                            room.setPlayerTeam(state.teamSpec[i].id, Team.BLUE);
+                            room.setPlayerTeam(state.teamSpec[0].id, Team.BLUE);
                         }
                     } else {
                         for (let i = 0; i < n; i++) {
-                            room.setPlayerTeam(state.teamSpec[i].id, Team.RED);
+                            room.setPlayerTeam(state.teamSpec[0].id, Team.RED);
                         }
                     }
                 }
@@ -122,9 +135,15 @@ module.exports = function createTeamBalance({
                 const stadiumCap = state.currentStadium == 'classic' ? 2 : teamSize;
                 const slotsAvailable = stadiumCap - state.teamRed.length;
                 const n = Math.min(slotsAvailable, Math.floor(state.teamSpec.length / 2));
+                // Both moves index [0], not [2*i]/[2*i+1] — same
+                // shrinking-array hazard as above: the RED move already
+                // shifts whoever was next down into slot 0, so the BLUE
+                // move must re-read [0] too, not the stale [2*i+1] (which
+                // either grabbed the wrong player or ran off the end of the
+                // array once i > 0).
                 for (let i = 0; i < n; i++) {
-                    room.setPlayerTeam(state.teamSpec[2 * i].id, Team.RED);
-                    room.setPlayerTeam(state.teamSpec[2 * i + 1].id, Team.BLUE);
+                    room.setPlayerTeam(state.teamSpec[0].id, Team.RED);
+                    room.setPlayerTeam(state.teamSpec[0].id, Team.BLUE);
                 }
             }
         }
@@ -381,8 +400,20 @@ module.exports = function createTeamBalance({
                     // Same reasoning as the plain 3/5/9+ branch below: one
                     // topButton() call only pulls in a single spectator,
                     // which stranded the rest of a benched bigger team
-                    // instead of refilling properly. Loop once per spectator.
-                    const spectatorsToInsert = state.teamSpec.length;
+                    // instead of refilling properly. Loop once per spectator
+                    // NEEDED — capped at how many actually fit up to
+                    // teamSize per side (2*teamSize total), not
+                    // state.teamSpec.length outright. Whenever there were
+                    // MORE waiting spectators than room for (e.g. a house
+                    // that grew past a full 2*teamSize before the round
+                    // ended), draining every one of them regardless kept
+                    // calling topButton() after both sides already reached
+                    // teamSize — silently growing the match past its
+                    // intended cap (5v5 instead of stopping at 4v4).
+                    const spectatorsToInsert = Math.min(
+                        state.teamSpec.length,
+                        2 * teamSize - state.teamRed.length - state.teamBlue.length
+                    );
                     for (let i = 0; i < spectatorsToInsert; i++) {
                         setTimeout(() => {
                             topButton();
@@ -431,11 +462,18 @@ module.exports = function createTeamBalance({
                     // stranded in spectators instead of playing, settling on
                     // something like 2v1/3v1 instead of the 3v2 those 5
                     // players could actually fill. Looping once per
-                    // spectator (each call only ever needs one more to place,
-                    // since it re-reads the live roster every time) drains
-                    // them all, same "b" pattern the full-house branch above
-                    // uses for randomButton().
-                    const spectatorsToInsert = state.teamSpec.length;
+                    // spectator NEEDED (each call only ever needs one more to
+                    // place, since it re-reads the live roster every time)
+                    // drains them all, same "b" pattern the full-house branch
+                    // above uses for randomButton() — capped at how many
+                    // actually fit up to teamSize per side, same reasoning
+                    // as that branch's identical cap (this one shares the
+                    // same >=2*teamSize+1 condition above, so it's just as
+                    // reachable with more waiting spectators than room for).
+                    const spectatorsToInsert = Math.min(
+                        state.teamSpec.length,
+                        2 * teamSize - state.teamRed.length - state.teamBlue.length
+                    );
                     for (let i = 0; i < spectatorsToInsert; i++) {
                         setTimeout(() => {
                             topButton();

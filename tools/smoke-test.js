@@ -991,6 +991,46 @@ console.log('\n--- team/buttons.js: topButton pairs up two different spectators,
     check('topButton does not assign the same player to both teams', state.teamRed[0].id !== state.teamBlue[0].id, true);
 }
 
+console.log('\n--- team/buttons.js: a lone spectator is left waiting, not forced onto one side, when teams are already even ---');
+{
+    // Bug: callers that loop topButton()/randomButton() once per waiting
+    // spectator (see balance.js's handlePlayersStop) don't recompute
+    // in-between calls — they rely on a call being a safe no-op once the
+    // real pairing work is already done. With teams already even and only
+    // ONE spectator left (nobody to pair them with), the old code fell
+    // through the bare `else` and forced that lone spectator onto blue
+    // regardless — silently turning an already-fair NxN into an unwanted
+    // (N+1)xN (e.g. a fair 1v1 plus one unrelated onlooker settling on 1v2).
+    function makeRealisticRoomMock(state, Team) {
+        return {
+            setPlayerTeam: (id, team) => {
+                const player = state.players.find((p) => p.id === id);
+                player.team = team;
+                state.teamRed = state.players.filter((p) => p.team === Team.RED);
+                state.teamBlue = state.players.filter((p) => p.team === Team.BLUE);
+                state.teamSpec = state.players.filter((p) => p.team === Team.SPECTATORS);
+            },
+        };
+    }
+    const Team = { RED: 1, BLUE: 2, SPECTATORS: 0 };
+    const players = [
+        { id: 1, team: Team.RED }, { id: 2, team: Team.BLUE }, { id: 3, team: Team.SPECTATORS },
+    ];
+    const state = { players };
+    state.teamRed = players.filter((p) => p.team === Team.RED);
+    state.teamBlue = players.filter((p) => p.team === Team.BLUE);
+    state.teamSpec = players.filter((p) => p.team === Team.SPECTATORS);
+    const { topButton, randomButton } = require(path.join(CORE, 'team', 'buttons'))({
+        room: makeRealisticRoomMock(state, Team), state, Team, getRandomInt: () => 0,
+    });
+
+    topButton();
+    check('topButton leaves a fair 1v1 alone when only one spectator is left over', [state.teamRed.length, state.teamBlue.length, state.teamSpec.length], [1, 1, 1]);
+
+    randomButton();
+    check('randomButton leaves a fair 1v1 alone when only one spectator is left over', [state.teamRed.length, state.teamBlue.length, state.teamSpec.length], [1, 1, 1]);
+}
+
 console.log('\n--- team/balance.js: an already-full match never auto-upgrades to a bigger arena ---');
 {
     const State = { PLAY: 0, PAUSE: 1, STOP: 2 };
@@ -1005,8 +1045,31 @@ console.log('\n--- team/balance.js: an already-full match never auto-upgrades to
         players: [{ id: 1 }, { id: 2 }, { id: 3 }, { id: 4 }, { id: 5 }, { id: 6 }],
         currentStadium: 'classic',
     };
+    // A realistic setPlayerTeam, not the shared dumb room's plain recorder:
+    // real HaxBall fires room.onPlayerTeamChange synchronously on every
+    // call, which updateTeams() uses to replace
+    // state.teamRed/teamBlue/teamSpec — several balanceTeams() branches move
+    // MULTIPLE spectators in one call and rely on that live reshuffling
+    // (always re-reading index [0] after each move), so a mock that leaves
+    // the arrays untouched would validate the wrong thing here.
+    const realisticRoom = {
+        ...room,
+        setPlayerTeam: (id, team) => {
+            roomCalls.push(`setPlayerTeam:${id}:${team}`);
+            const removeFrom = (arr) => {
+                const idx = arr.findIndex((p) => p.id === id);
+                if (idx !== -1) arr.splice(idx, 1);
+            };
+            removeFrom(state.teamRed);
+            removeFrom(state.teamBlue);
+            removeFrom(state.teamSpec);
+            if (team === Team.RED) state.teamRed.push({ id });
+            else if (team === Team.BLUE) state.teamBlue.push({ id });
+            else state.teamSpec.push({ id });
+        },
+    };
     const balance = require(path.join(CORE, 'team', 'balance'))({
-        room, state, Team, State, HaxNotification, emptyPlayer: {}, infoColor: 5,
+        room: realisticRoom, state, Team, State, HaxNotification, emptyPlayer: {}, infoColor: 5,
         scoreLimit: 3, teamSize: 4, timeLimit: 5,
         activateChooseMode: noop('activateChooseMode'), blueToSpecButton: noop('blueToSpecButton'),
         choosePlayer: noop('choosePlayer'), deactivateChooseMode: noop('deactivateChooseMode'),
@@ -1066,6 +1129,28 @@ console.log('\n--- team/balance.js: an already-full match never auto-upgrades to
     calls.length = 0;
     balance.balanceTeams();
     check('a running 2v2 on big grows to 3v3', roomCalls, [`setPlayerTeam:5:${Team.RED}`, `setPlayerTeam:6:${Team.BLUE}`]);
+    state.currentStadium = 'classic';
+
+    // Bug: this pair-pulling loop used to index state.teamSpec[2*i]/[2*i+1] —
+    // stale once i > 0, since each setPlayerTeam call synchronously shrinks
+    // state.teamSpec by one (real HaxBall's room.onPlayerTeamChange ->
+    // updateTeams() cascade). Pulling 2+ pairs in one call (a running 1v1 on
+    // big, with 4 spectators waiting) skipped every other spectator and then
+    // read past the end of the shrunk array — a thrown TypeError that
+    // aborted the loop with only half the spectators seated.
+    state.currentStadium = 'big';
+    state.teamRed = [{ id: 1 }];
+    state.teamBlue = [{ id: 2 }];
+    state.teamSpec = [{ id: 3 }, { id: 4 }, { id: 5 }, { id: 6 }];
+    state.players = [{ id: 1 }, { id: 2 }, { id: 3 }, { id: 4 }, { id: 5 }, { id: 6 }];
+    roomCalls.length = 0;
+    calls.length = 0;
+    balance.balanceTeams();
+    check('a running 1v1 on big pulls in BOTH waiting pairs (used to crash/skip past the first)', roomCalls, [
+        `setPlayerTeam:3:${Team.RED}`, `setPlayerTeam:4:${Team.BLUE}`,
+        `setPlayerTeam:5:${Team.RED}`, `setPlayerTeam:6:${Team.BLUE}`,
+    ]);
+    check('all 4 waiting spectators actually landed on a team, nobody stuck spectating', [state.teamRed.length, state.teamBlue.length, state.teamSpec.length], [3, 3, 0]);
     state.currentStadium = 'classic';
 
     // The small-scale auto-selection (1 player -> training, 2 -> classic) is
@@ -1337,17 +1422,18 @@ console.log('\n--- team/balance.js: handlePlayersStop at 5 players ends up with 
     const emptyPlayer = {};
     const noop = () => {};
 
-    function runScenario(redCount, blueCount, winner, chooseMode) {
+    function runScenario(redCount, blueCount, winner, chooseMode, specCount = 0) {
         const players = [];
         for (let i = 0; i < redCount; i++) players.push({ id: players.length + 1, team: Team.RED });
         for (let i = 0; i < blueCount; i++) players.push({ id: players.length + 1, team: Team.BLUE });
+        for (let i = 0; i < specCount; i++) players.push({ id: players.length + 1, team: Team.SPECTATORS });
         const state = {
             players, chooseMode, endGameVariable: true, lastWinner: winner,
             currentStadium: 'classic', gameState: State.STOP,
         };
         state.teamRed = players.filter((p) => p.team === Team.RED);
         state.teamBlue = players.filter((p) => p.team === Team.BLUE);
-        state.teamSpec = [];
+        state.teamSpec = players.filter((p) => p.team === Team.SPECTATORS);
         const roomMock = makeRealisticRoomMock(state, Team);
         const createButtonHelpers = require(path.join(CORE, 'team', 'buttons'));
         const { topButton, randomButton, blueToSpecButton, redToSpecButton, resetButton, swapButton } = createButtonHelpers({
@@ -1387,7 +1473,112 @@ console.log('\n--- team/balance.js: handlePlayersStop at 5 players ends up with 
         await wait(350);
         check('5 players (3v2, still in choose mode — shrunk from a full house): nobody stays stuck in spectators', state3.teamSpec.length, 0);
         check('5 players (3v2, still in choose mode): all 5 are still accounted for', state3.teamRed.length + state3.teamBlue.length, 5);
+
+        // Bug: a full 4v4 (teamSize=4) plus MORE waiting spectators than
+        // room for (3 extra, 11 total) — endGame() activates choose mode
+        // defensively any time players >= 2*teamSize, so this is a mainline
+        // path, not an edge case. spectatorsToInsert used to equal
+        // state.teamSpec.length outright (7, after benching the losing
+        // side) instead of capping at how many actually fit up to teamSize
+        // per side (4) — draining every one of them regardless kept calling
+        // topButton() after both sides already reached teamSize, growing
+        // the match to 5v5 and beyond instead of stopping at a clean 4v4
+        // with the genuine extras left waiting.
+        const state4 = runScenario(4, 4, Team.RED, true, 3);
+        await wait(350);
+        check('11 players (4v4 full + 3 extra spectators): stops at a clean 4v4, does not overgrow', [state4.teamRed.length, state4.teamBlue.length], [4, 4]);
+        check('11 players (4v4 full + 3 extra spectators): the genuine extras are left waiting, not forced in', state4.teamSpec.length, 3);
     })();
+}
+
+console.log('\n--- team/choosing.js: a captain\'s own pick does not wipe out the fresh kick-timer it just triggered ---');
+{
+    // Bug: room.setPlayerTeam fires room.onPlayerTeamChange synchronously,
+    // which cascades straight back through handlePlayersTeamChange — if the
+    // pick doesn't immediately finish choose mode, that cascade calls
+    // choosePlayer() again (re-prompting whoever picks next) BEFORE
+    // chooseModeFunction's own room.setPlayerTeam(...) call even returns.
+    // choosePlayer() sets a brand new state.timeOutCap for that fresh
+    // prompt. chooseModeFunction used to call clearTimeout(state.timeOutCap)
+    // of its own, AFTER setPlayerTeam returns — i.e. AFTER that fresh timer
+    // was already set — silently cancelling the very kick-safety-net that
+    // was just armed for the next prompt, on every pick that didn't
+    // instantly complete choose mode.
+    let nextTimerId = 1;
+    const timerArgs = new Map();
+    const clearedTimerIds = [];
+    const realSetTimeout = global.setTimeout;
+    const realClearTimeout = global.clearTimeout;
+    global.setTimeout = (fn, ms, ...args) => {
+        const id = nextTimerId++;
+        timerArgs.set(id, args);
+        return id;
+    };
+    global.clearTimeout = (id) => {
+        if (id != null) clearedTimerIds.push(id);
+    };
+
+    try {
+        const Team = { RED: 1, BLUE: 2, SPECTATORS: 0 };
+        const HaxNotificationMock = { CHAT: 1, MENTION: 2 };
+        const players = [
+            { id: 1, name: 'RedCap', team: Team.RED },
+            { id: 2, name: 'Blue1', team: Team.BLUE }, { id: 3, name: 'Blue2', team: Team.BLUE }, { id: 4, name: 'Blue3', team: Team.BLUE },
+            { id: 5, name: 'Spec1', team: Team.SPECTATORS }, { id: 6, name: 'Spec2', team: Team.SPECTATORS },
+            { id: 7, name: 'Spec3', team: Team.SPECTATORS }, { id: 8, name: 'Spec4', team: Team.SPECTATORS },
+        ];
+        const state = {
+            chooseMode: true, removingPlayers: false, streak: 0, insertingPlayers: false,
+            redCaptainChoice: '', blueCaptainChoice: '',
+        };
+        state.teamRed = players.filter((p) => p.team === Team.RED);
+        state.teamBlue = players.filter((p) => p.team === Team.BLUE);
+        state.teamSpec = players.filter((p) => p.team === Team.SPECTATORS);
+
+        const noop = () => {};
+        // setPlayerTeam calls back into balance.handlePlayersTeamChange the
+        // same way movement.js's onPlayerTeamChange does in production —
+        // referencing `balance` here only at call time (via closure), so
+        // it's fine that `balance` itself is declared further down, after
+        // this object literal (never actually invoked before then).
+        const realisticRoom = {
+            sendAnnouncement: () => {},
+            kickPlayer: () => {},
+            setPlayerTeam: (id, team) => {
+                const player = players.find((p) => p.id === id);
+                player.team = team;
+                state.teamRed = players.filter((p) => p.team === Team.RED);
+                state.teamBlue = players.filter((p) => p.team === Team.BLUE);
+                state.teamSpec = players.filter((p) => p.team === Team.SPECTATORS);
+                balance.handlePlayersTeamChange(null);
+            },
+        };
+        const balance = require(path.join(CORE, 'team', 'balance'))({
+            room: realisticRoom, state, Team, State: { PLAY: 0, PAUSE: 1, STOP: 2 }, HaxNotification: HaxNotificationMock,
+            emptyPlayer: {}, infoColor: 5, scoreLimit: 3, teamSize: 4, timeLimit: 5,
+            activateChooseMode: noop, blueToSpecButton: noop, choosePlayer: (...a) => choosing.choosePlayer(...a),
+            deactivateChooseMode: (...a) => choosing.deactivateChooseMode(...a), endGame: noop, getRandomInt: () => 0,
+            getSpecList: noop, instantRestart: noop, randomButton: noop, redToSpecButton: noop, resetButton: noop,
+            resumeGame: noop, stadiumCommand: noop, swapButton: noop, topButton: noop,
+        });
+        const choosing = require(path.join(CORE, 'team', 'choosing'))({
+            room: realisticRoom, state, Team, HaxNotification: HaxNotificationMock,
+            announcementColor: 1, errorColor: 2, infoColor: 5, warningColor: 6,
+            chooseModeSlowMode: 1, chooseTime: 15, defaultSlowMode: 0.5, SMSet: new Set(), getRandomInt: () => 0,
+        });
+
+        // Red is captain (1 <= 3) and picks 'top' — this doesn't finish
+        // choose mode (2v3 still uneven), so the cascade re-prompts red via
+        // a fresh choosePlayer() call before chooseModeFunction returns.
+        choosing.chooseModeFunction({ id: 1, name: 'RedCap' }, 'top');
+
+        check('the pick actually went through', state.teamRed.length, 2);
+        check('state.timeOutCap points at a real, uncleared timer (not wiped by the picker\'s own trailing clearTimeout)', clearedTimerIds.includes(state.timeOutCap), false);
+        check('that timer is the fresh one choosePlayer() just armed for the next prompt, not a stale leftover', state.timeOutCap, nextTimerId - 1);
+    } finally {
+        global.setTimeout = realSetTimeout;
+        global.clearTimeout = realClearTimeout;
+    }
 }
 
 console.log('\n--- events/misc.js: nobody keeps an admin badge unless they are MASTER/ADMIN_PERM ---');
@@ -1973,10 +2164,10 @@ console.log('\n--- core/economy.js: coin awards, playtime ticker, shop/inventory
 // overflowPassword rotation check above waits 150ms for real interval
 // ticks, the balance.js stadium-switch checks chain four 20ms steps (up to
 // 80ms), the announcements loop-back check above waits 250ms for interval
-// ticks, and the handlePlayersStop 5-player regression runs three 350ms
-// waits back to back (~1050ms) — give all of them time to run before
-// tallying and exiting.
+// ticks, and the handlePlayersStop regression runs four 350ms waits back to
+// back (~1400ms, the slowest of the bunch) — give all of them time to run
+// before tallying and exiting.
 setTimeout(() => {
     console.log(`\n${pass} passed, ${fail} failed`);
     process.exit(fail ? 1 : 0);
-}, 1200);
+}, 1500);

@@ -12,15 +12,28 @@ module.exports = function createButtonHelpers({
 }) {
     function topButton() {
         if (state.teamSpec.length > 0) {
-            if (state.teamRed.length == state.teamBlue.length && state.teamSpec.length > 1) {
-                // Index 0 both times, not 0 then 1 — room.setPlayerTeam fires
-                // room.onPlayerTeamChange synchronously (updateTeams() replaces
-                // state.teamSpec with a fresh array), so by the second call the
-                // just-moved player is already gone and "index 1" would skip
-                // over whoever's actually next in line, not crash but quietly
-                // picking the wrong (later) spectator every time.
-                room.setPlayerTeam(state.teamSpec[0].id, Team.RED);
-                room.setPlayerTeam(state.teamSpec[0].id, Team.BLUE);
+            if (state.teamRed.length == state.teamBlue.length) {
+                // Only fill an EVEN pair when starting from parity. An odd
+                // one left over (state.teamSpec.length == 1 here) has nobody
+                // to pair with yet and must stay benched — callers that loop
+                // this a fixed number of times (once per waiting spectator)
+                // rely on this being a no-op past the last real pair, since
+                // they don't recompute after each call. Without this guard,
+                // that extra call fell through to the plain `else` below and
+                // forced the lone leftover onto blue regardless, quietly
+                // turning an already-fair NxN split into an unwanted (N+1)xN
+                // (e.g. a fair 1v1 plus one unrelated onlooker settling on
+                // 1v2 once the loop ran one call too many).
+                if (state.teamSpec.length > 1) {
+                    // Index 0 both times, not 0 then 1 — room.setPlayerTeam fires
+                    // room.onPlayerTeamChange synchronously (updateTeams() replaces
+                    // state.teamSpec with a fresh array), so by the second call the
+                    // just-moved player is already gone and "index 1" would skip
+                    // over whoever's actually next in line, not crash but quietly
+                    // picking the wrong (later) spectator every time.
+                    room.setPlayerTeam(state.teamSpec[0].id, Team.RED);
+                    room.setPlayerTeam(state.teamSpec[0].id, Team.BLUE);
+                }
             } else if (state.teamRed.length < state.teamBlue.length)
                 room.setPlayerTeam(state.teamSpec[0].id, Team.RED);
             else room.setPlayerTeam(state.teamSpec[0].id, Team.BLUE);
@@ -29,22 +42,27 @@ module.exports = function createButtonHelpers({
 
     function randomButton() {
         if (state.teamSpec.length > 0) {
-            if (state.teamRed.length == state.teamBlue.length && state.teamSpec.length > 1) {
-                // room.setPlayerTeam fires room.onPlayerTeamChange synchronously,
-                // which calls updateTeams() and replaces state.teamSpec with a
-                // fresh array — the moved player is already gone from it by the
-                // time the next line runs, so just re-reading state.teamSpec
-                // here (instead of manually filtering a stale snapshot by a
-                // now-stale index) is both simpler and correct. The old manual
-                // filter indexed into the ALREADY-updated state.teamSpec using
-                // the pre-move index `r`, which could reference a completely
-                // different (never-moved) spectator or run past the end of the
-                // array — silently dropping someone from the room's pairing for
-                // good (this specific button only ever gets a fixed number of
-                // calls), which is what caused a 4-player room to sometimes
-                // settle on 2v1 instead of 2v2.
-                room.setPlayerTeam(state.teamSpec[getRandomInt(state.teamSpec.length)].id, Team.RED);
-                room.setPlayerTeam(state.teamSpec[getRandomInt(state.teamSpec.length)].id, Team.BLUE);
+            if (state.teamRed.length == state.teamBlue.length) {
+                // Same "only fill an even pair" guard as topButton() above —
+                // see its comment for why a lone leftover spectator must stay
+                // benched instead of being forced onto blue.
+                if (state.teamSpec.length > 1) {
+                    // room.setPlayerTeam fires room.onPlayerTeamChange synchronously,
+                    // which calls updateTeams() and replaces state.teamSpec with a
+                    // fresh array — the moved player is already gone from it by the
+                    // time the next line runs, so just re-reading state.teamSpec
+                    // here (instead of manually filtering a stale snapshot by a
+                    // now-stale index) is both simpler and correct. The old manual
+                    // filter indexed into the ALREADY-updated state.teamSpec using
+                    // the pre-move index `r`, which could reference a completely
+                    // different (never-moved) spectator or run past the end of the
+                    // array — silently dropping someone from the room's pairing for
+                    // good (this specific button only ever gets a fixed number of
+                    // calls), which is what caused a 4-player room to sometimes
+                    // settle on 2v1 instead of 2v2.
+                    room.setPlayerTeam(state.teamSpec[getRandomInt(state.teamSpec.length)].id, Team.RED);
+                    room.setPlayerTeam(state.teamSpec[getRandomInt(state.teamSpec.length)].id, Team.BLUE);
+                }
             } else if (state.teamRed.length < state.teamBlue.length)
                 room.setPlayerTeam(state.teamSpec[getRandomInt(state.teamSpec.length)].id, Team.RED);
             else
