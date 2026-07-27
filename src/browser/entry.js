@@ -1059,6 +1059,7 @@ const commands = createCommands({
     muteCommand,
     unmuteCommand,
     muteListCommand,
+    hideCommand,
     clearbansCommand,
     banListCommand,
     adminListCommand,
@@ -1219,14 +1220,25 @@ Object.assign(room, wrapEventHandlers(createMiscEvents({
     updateTeams,
 })));
 
+// Exposed on the resolved `ready` value (see below) purely for
+// tools/load-check.js to sanity-check the FULL command wiring — a command
+// can be registered in commands.js's own commands object and still have
+// `.function` end up undefined if it's never actually threaded through the
+// createCommands({...}) call above (see !hide's own bug: added everywhere
+// else, forgotten there — the dispatcher called undefined(player, message),
+// which threw and — since nothing after that throw ever reached
+// onPlayerChat's own `return false` — silently fell through to the native
+// chat bubble instead of running the command or showing an error).
+return { commands };
 }
 
-// Resolves with the error (never rejects) rather than just letting the
-// rejection disappear after logging — gives tools/load-check.js an explicit
-// hook to detect a failed init without scraping console output for a
-// string. Meaningless in the browser (nothing reads a bundled entry point's
-// module.exports there), harmless either way — esbuild handles `module`
-// internally for every bundled file regardless of the final output format.
+// Resolves with { commands } on success or the Error itself on failure
+// (never rejects) — gives tools/load-check.js an explicit hook to detect a
+// failed init without scraping console output for a string, and to
+// double-check the command wiring on success. Meaningless in the browser
+// (nothing reads a bundled entry point's module.exports there), harmless
+// either way — esbuild handles `module` internally for every bundled file
+// regardless of the final output format.
 const ready = main().catch((err) => {
     console.error('[FATAL] entry.js failed to initialise:', err);
     return err;

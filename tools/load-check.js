@@ -67,15 +67,38 @@ global.btoa = (str) => Buffer.from(str, 'binary').toString('base64');
 
 const { ready } = require(path.join(__dirname, '..', 'src', 'browser', 'entry.js'));
 
-ready.then((errorOrUndefined) => {
-    if (errorOrUndefined instanceof Error) {
+ready.then((errorOrResult) => {
+    if (errorOrResult instanceof Error) {
         console.log('INITIALISATION FAILED:');
-        console.log(errorOrUndefined.stack || errorOrUndefined);
+        console.log(errorOrResult.stack || errorOrResult);
         process.exit(1);
     }
 
     console.log('initialised without throwing');
     console.log('room API used during init: ' + [...new Set(calls)].sort().join(', '));
     console.log('db bridge methods called during init: ' + [...new Set(dbCalls)].sort().join(', '));
+
+    // Structural check the smoke tests can't do (they exercise individual
+    // command functions in isolation, not the actual createCommands({...})
+    // call in entry.js): a command can be fully wired everywhere else —
+    // its own module, commands.js's factory params, the commands object
+    // entry — and still end up with .function === undefined if it's simply
+    // never threaded through that one final call. Calling an undefined
+    // function throws inside onPlayerChat's try/catch (safeEventHandlers),
+    // which silently falls through to the native chat bubble instead of
+    // running the command OR showing the "command doesn't exist" error —
+    // this is exactly how !hide shipped broken.
+    const commands = errorOrResult && errorOrResult.commands;
+    if (!commands) {
+        console.log('INITIALISATION FAILED: main() did not return a commands object');
+        process.exit(1);
+    }
+    const brokenCommands = Object.keys(commands).filter((name) => typeof commands[name].function !== 'function');
+    if (brokenCommands.length > 0) {
+        console.log('INITIALISATION FAILED: these commands are registered but not wired to a real function:');
+        console.log('  ' + brokenCommands.join(', '));
+        process.exit(1);
+    }
+    console.log(`all ${Object.keys(commands).length} registered commands have a real .function`);
     process.exit(0);
 });
