@@ -7,19 +7,21 @@
  * newly added/changed command.
  */
 const { Client, GatewayIntentBits, Events, EmbedBuilder, AttachmentBuilder, SlashCommandBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
+const { formatBanRemaining } = require('./utils');
 
 const SAY_PREFIX = '!say';
 const STATS_COMMAND_PREFIX = '!stats';
 const PLAYERS_PREFIX = '!players';
 const BANAUTH_PREFIX = '!banauth';
 const UNBANAUTH_PREFIX = '!unbanauth';
+const AUTHBANS_PREFIX = '!authbans';
 const STATUS_MESSAGE_SETTING_KEY = 'statusMessageId';
 
-// !say/`/say` are the only commands admins can use alongside the owner —
-// everything else here (banauth, players, etc.) stays owner-only. A role
-// check is enough (no need to hit the DB/adminList) since it's just gating
-// who's allowed to speak in the room chat from Discord, not a room action.
-function canUseSay(userId, member, discordOwnerId, discordAdminRoleId) {
+// say/banauth/unbanauth/authbans are usable by the owner OR anyone with the
+// configured admin role — every other command here (players, etc.) stays
+// owner-only. A role check is enough (no need to hit the DB/adminList) since
+// it's just gating who's allowed to moderate the room from Discord.
+function isOwnerOrAdmin(userId, member, discordOwnerId, discordAdminRoleId) {
     if (userId === discordOwnerId) return true;
     if (discordAdminRoleId && member && member.roles.cache.has(discordAdminRoleId)) return true;
     return false;
@@ -43,13 +45,17 @@ const slashCommandData = [
         .setDescription('Показать список игроков в комнате вместе с их auth (только для владельца)'),
     new SlashCommandBuilder()
         .setName('banauth')
-        .setDescription('Забанить игрока по auth — работает даже если он не в комнате (только для владельца)')
+        .setDescription('Забанить игрока по auth — работает даже если он не в комнате (владелец и админы)')
         .addStringOption((option) => option.setName('auth').setDescription('Auth игрока').setRequired(true))
+        .addIntegerOption((option) => option.setName('minutes').setDescription('Длительность бана в минутах').setRequired(true).setMinValue(1))
         .addStringOption((option) => option.setName('reason').setDescription('Причина бана').setRequired(false)),
     new SlashCommandBuilder()
         .setName('unbanauth')
-        .setDescription('Снять бан по auth (только для владельца)')
+        .setDescription('Снять бан по auth (владелец и админы)')
         .addStringOption((option) => option.setName('auth').setDescription('Auth забаненного игрока').setRequired(true)),
+    new SlashCommandBuilder()
+        .setName('authbans')
+        .setDescription('Показать список банов по auth (владелец и админы)'),
 ];
 
 // Resolves a typed name to stats. A currently-connected player's live auth
@@ -86,7 +92,7 @@ async function handleIncomingMessage(message, { discordOwnerId, discordAdminRole
     if (message.author.bot) return null;
 
     if (message.content.toLowerCase().startsWith(SAY_PREFIX)) {
-        if (!canUseSay(message.author.id, message.member, discordOwnerId, discordAdminRoleId)) return null;
+        if (!isOwnerOrAdmin(message.author.id, message.member, discordOwnerId, discordAdminRoleId)) return null;
         const text = message.content.slice(SAY_PREFIX.length).trim();
         if (text === '') return 'Использование: !say <message>';
         relayToRoom(message.author.displayName, text);
@@ -99,7 +105,7 @@ async function handleIncomingMessage(message, { discordOwnerId, discordAdminRole
     }
 
     if (message.content.toLowerCase().startsWith(UNBANAUTH_PREFIX)) {
-        if (message.author.id !== discordOwnerId) return null;
+        if (!isOwnerOrAdmin(message.author.id, message.member, discordOwnerId, discordAdminRoleId)) return null;
         const auth = message.content.slice(UNBANAUTH_PREFIX.length).trim();
         if (auth === '') return 'Использование: !unbanauth <auth>';
         const existing = db.getAuthBan(auth);
@@ -108,20 +114,28 @@ async function handleIncomingMessage(message, { discordOwnerId, discordAdminRole
         return `${existing.playerName} разбанен по auth.`;
     }
 
-    // Checked after !unbanauth/!players so "!banauth" doesn't shadow them —
-    // none of these prefixes are substrings of each other, but keeping the
-    // more specific commands first is the safer habit.
+    if (message.content.toLowerCase().startsWith(AUTHBANS_PREFIX)) {
+        if (!isOwnerOrAdmin(message.author.id, message.member, discordOwnerId, discordAdminRoleId)) return null;
+        const bans = db.getAuthBans();
+        if (bans.length === 0) return 'В списке банов по auth никого нет.';
+        return bans.map((ban) => `${ban.playerName} [${ban.auth}] — осталось ${formatBanRemaining(ban.expiresAt)}${ban.reason ? ' (' + ban.reason + ')' : ''}`).join('\n');
+    }
+
+    // Checked after !unbanauth/!authbans/!players so "!banauth" doesn't
+    // shadow them — none of these prefixes are substrings of each other, but
+    // keeping the more specific commands first is the safer habit.
     if (message.content.toLowerCase().startsWith(BANAUTH_PREFIX)) {
-        if (message.author.id !== discordOwnerId) return null;
+        if (!isOwnerOrAdmin(message.author.id, message.member, discordOwnerId, discordAdminRoleId)) return null;
         const rest = message.content.slice(BANAUTH_PREFIX.length).trim().split(/ +/);
         const auth = rest[0];
-        if (!auth) return 'Использование: !banauth <auth> [причина]';
-        const reason = rest.slice(1).join(' ');
+        const minutes = parseInt(rest[1]);
+        if (!auth || !(minutes > 0)) return 'Использование: !banauth <auth> <минуты> [причина]';
+        const reason = rest.slice(2).join(' ');
         const kicked = await kickPlayerByAuth(auth, reason);
-        db.banAuth(auth, kicked ? kicked.name : auth, reason);
+        db.banAuth(auth, kicked ? kicked.name : auth, reason, minutes);
         return kicked
-            ? `${kicked.name} забанен по auth и выгнан из комнаты.`
-            : `${auth} забанен по auth (сейчас не в комнате).`;
+            ? `${kicked.name} забанен по auth на ${minutes} мин. и выгнан из комнаты.`
+            : `${auth} забанен по auth на ${minutes} мин. (сейчас не в комнате).`;
     }
 
     if (message.content.toLowerCase().startsWith(STATS_COMMAND_PREFIX)) {
@@ -152,7 +166,7 @@ function handleGuildMemberAdd(member, { discordAutoRoleId }) {
 }
 
 const OWNER_ONLY_REPLY = { content: 'Только владелец может использовать эту команду.', ephemeral: true };
-const SAY_UNAUTHORIZED_REPLY = { content: 'Только владелец или админ может использовать эту команду.', ephemeral: true };
+const OWNER_OR_ADMIN_ONLY_REPLY = { content: 'Только владелец или админ может использовать эту команду.', ephemeral: true };
 
 // Same separation as handleIncomingMessage: pure decision logic, independently
 // testable without a real discord.js Interaction. Mirrors handleIncomingMessage's
@@ -163,7 +177,7 @@ async function handleSlashCommand(interaction, { discordOwnerId, discordAdminRol
     const { commandName } = interaction;
 
     if (commandName === 'say') {
-        if (!canUseSay(interaction.user.id, interaction.member, discordOwnerId, discordAdminRoleId)) return SAY_UNAUTHORIZED_REPLY;
+        if (!isOwnerOrAdmin(interaction.user.id, interaction.member, discordOwnerId, discordAdminRoleId)) return OWNER_OR_ADMIN_ONLY_REPLY;
         const text = interaction.options.getString('message');
         relayToRoom(interaction.user.displayName, text);
         return { content: `Отправлено: ${text}`, ephemeral: true };
@@ -175,24 +189,33 @@ async function handleSlashCommand(interaction, { discordOwnerId, discordAdminRol
     }
 
     if (commandName === 'banauth') {
-        if (interaction.user.id !== discordOwnerId) return OWNER_ONLY_REPLY;
+        if (!isOwnerOrAdmin(interaction.user.id, interaction.member, discordOwnerId, discordAdminRoleId)) return OWNER_OR_ADMIN_ONLY_REPLY;
         const auth = interaction.options.getString('auth');
+        const minutes = interaction.options.getInteger('minutes');
         const reason = interaction.options.getString('reason') ?? '';
         const kicked = await kickPlayerByAuth(auth, reason);
-        db.banAuth(auth, kicked ? kicked.name : auth, reason);
+        db.banAuth(auth, kicked ? kicked.name : auth, reason, minutes);
         const content = kicked
-            ? `${kicked.name} забанен по auth и выгнан из комнаты.`
-            : `${auth} забанен по auth (сейчас не в комнате).`;
+            ? `${kicked.name} забанен по auth на ${minutes} мин. и выгнан из комнаты.`
+            : `${auth} забанен по auth на ${minutes} мин. (сейчас не в комнате).`;
         return { content, ephemeral: true };
     }
 
     if (commandName === 'unbanauth') {
-        if (interaction.user.id !== discordOwnerId) return OWNER_ONLY_REPLY;
+        if (!isOwnerOrAdmin(interaction.user.id, interaction.member, discordOwnerId, discordAdminRoleId)) return OWNER_OR_ADMIN_ONLY_REPLY;
         const auth = interaction.options.getString('auth');
         const existing = db.getAuthBan(auth);
         if (!existing) return { content: 'Этот auth не забанен.', ephemeral: true };
         db.unbanAuth(auth);
         return { content: `${existing.playerName} разбанен по auth.`, ephemeral: true };
+    }
+
+    if (commandName === 'authbans') {
+        if (!isOwnerOrAdmin(interaction.user.id, interaction.member, discordOwnerId, discordAdminRoleId)) return OWNER_OR_ADMIN_ONLY_REPLY;
+        const bans = db.getAuthBans();
+        if (bans.length === 0) return { content: 'В списке банов по auth никого нет.', ephemeral: true };
+        const content = bans.map((ban) => `${ban.playerName} [${ban.auth}] — осталось ${formatBanRemaining(ban.expiresAt)}${ban.reason ? ' (' + ban.reason + ')' : ''}`).join('\n');
+        return { content, ephemeral: true };
     }
 
     if (commandName === 'stats') {

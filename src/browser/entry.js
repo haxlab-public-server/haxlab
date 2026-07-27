@@ -99,6 +99,7 @@ const {
     getTimeStats,
     findFirstNumberCharString,
     generateRoomPassword,
+    formatBanRemaining,
 } = require('../core/utils');
 const {
     getIdReport,
@@ -499,6 +500,7 @@ const {
     announcementColor,
     errorColor,
     HaxNotification,
+    formatBanRemaining,
 });
 
 /* GAME FUNCTIONS */

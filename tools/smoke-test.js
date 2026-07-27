@@ -144,9 +144,11 @@ console.log('\n--- commands/master.js: writes must land in shared state ---');
     const authArray = [];
     authArray[9] = ['AUTH_CALLER'];
     authArray[5] = ['AUTH_TARGET'];
+    const { formatBanRemaining } = require(path.join(CORE, 'utils'));
     const master = require(path.join(CORE, 'commands', 'master'))({
         room, state, authArray, db, masterList: ['AUTH_CALLER'],
         announcementColor: 1, errorColor: 2, HaxNotification,
+        formatBanRemaining,
     });
     const caller = { id: 9, name: 'Master' };
 
@@ -211,20 +213,38 @@ console.log('\n--- commands/master.js: writes must land in shared state ---');
     master.vipListCommand(caller, '!vips');
     check('vipListCommand reports an empty VIP list', /никого нет/.test(sent[0].msg), true);
 
-    // Auth-ban commands: must work on someone currently in the room (kicked
-    // immediately) as well as an auth that isn't online right now.
+    // Auth-ban commands: must work by #<id> (someone currently in the room,
+    // kicked immediately) as well as by a raw auth string (works even if
+    // they're offline right now) — duration is mandatory for both.
     state.playersAll = [{ id: 5, name: 'Cheater' }];
     roomCalls.length = 0;
     sent.length = 0;
-    await master.banAuthCommand(caller, '!banauth AUTH_TARGET aimbot');
-    check('banAuthCommand records the ban under the live player\'s current name', db.getAuthBan('AUTH_TARGET'), { auth: 'AUTH_TARGET', playerName: 'Cheater', reason: 'aimbot' });
-    check('banAuthCommand kicks the player if they are currently online', roomCalls.includes('kickPlayer:5:Вы забанены: aimbot:false'), true);
+    await master.banAuthCommand(caller, '!banauth');
+    check('banAuthCommand with no target shows usage', /Использование/.test(sent[0].msg), true);
+
+    sent.length = 0;
+    await master.banAuthCommand(caller, '!banauth #5');
+    check('banAuthCommand with no duration shows usage', /Использование/.test(sent[0].msg), true);
+
+    // The same function serves both !banauth and !ban (see commands.js) —
+    // the usage hint must reflect whichever one was actually typed, not
+    // always say "!banauth".
+    sent.length = 0;
+    await master.banAuthCommand(caller, '!ban');
+    check('the usage hint mentions !ban when that\'s what was typed, not !banauth', sent[0].msg.includes('!ban <#id|auth>'), true);
 
     roomCalls.length = 0;
     sent.length = 0;
-    await master.banAuthCommand(caller, '!banauth AUTH_OFFLINE griefing');
-    check('banAuthCommand records an offline auth using the auth itself as the name', db.getAuthBan('AUTH_OFFLINE'), { auth: 'AUTH_OFFLINE', playerName: 'AUTH_OFFLINE', reason: 'griefing' });
-    check('banAuthCommand does not try to kick when nobody with that auth is online', roomCalls.some((c) => c.startsWith('kickPlayer')), false);
+    await master.banAuthCommand(caller, '!banauth #5 60 aimbot');
+    check('banAuthCommand resolves #<id> to the live player\'s auth and current name', db.getAuthBan('AUTH_TARGET').playerName, 'Cheater');
+    check('banAuthCommand kicks the player if targeted by #<id>', roomCalls.includes('kickPlayer:5:Вы забанены на 60 мин.: aimbot:false'), true);
+
+    roomCalls.length = 0;
+    sent.length = 0;
+    await master.banAuthCommand(caller, '!banauth AUTH_OFFLINE 30 griefing');
+    const offlineBan = db.getAuthBan('AUTH_OFFLINE');
+    check('banAuthCommand also accepts a raw auth string directly', { auth: offlineBan.auth, playerName: offlineBan.playerName, reason: offlineBan.reason }, { auth: 'AUTH_OFFLINE', playerName: 'AUTH_OFFLINE', reason: 'griefing' });
+    check('banAuthCommand does not try to kick when targeted by raw auth', roomCalls.some((c) => c.startsWith('kickPlayer')), false);
 
     sent.length = 0;
     await master.unbanAuthCommand(caller, '!unbanauth AUTH_NEVER_BANNED');
@@ -237,6 +257,7 @@ console.log('\n--- commands/master.js: writes must land in shared state ---');
     sent.length = 0;
     await master.authBanListCommand(caller, '!authbans');
     check('authBanListCommand lists the remaining auth ban', /AUTH_OFFLINE/.test(sent[0].msg), true);
+    check('authBanListCommand shows the remaining duration', /осталось \d+ мин\./.test(sent[0].msg), true);
 
     sent.length = 0;
     master.playersListCommand(caller, '!players');
@@ -390,13 +411,22 @@ console.log('\n--- db + roomStats.js/player.js: player data actually round-trips
     check('getAuthByDiscordId returns null for an unknown id', db.getAuthByDiscordId('999999999999999999'), null);
 
     check('getAuthBan returns null when nobody is banned', db.getAuthBan('AUTH_GHOST'), null);
-    db.banAuth('AUTH_CHEATER', 'Cheater', 'aimbot');
-    check('banAuth records the ban', db.getAuthBan('AUTH_CHEATER'), { auth: 'AUTH_CHEATER', playerName: 'Cheater', reason: 'aimbot' });
-    check('getAuthBans lists it', db.getAuthBans(), [{ auth: 'AUTH_CHEATER', playerName: 'Cheater', reason: 'aimbot' }]);
+    db.banAuth('AUTH_CHEATER', 'Cheater', 'aimbot', 60);
+    const cheaterBan = db.getAuthBan('AUTH_CHEATER');
+    check('banAuth records the ban', { auth: cheaterBan.auth, playerName: cheaterBan.playerName, reason: cheaterBan.reason }, { auth: 'AUTH_CHEATER', playerName: 'Cheater', reason: 'aimbot' });
+    check('banAuth records a real future expiry', new Date(cheaterBan.expiresAt).getTime() > Date.now(), true);
+    check('getAuthBans lists it', db.getAuthBans().map((b) => ({ auth: b.auth, playerName: b.playerName, reason: b.reason })), [{ auth: 'AUTH_CHEATER', playerName: 'Cheater', reason: 'aimbot' }]);
 
-    db.banAuth('AUTH_CHEATER', 'Cheater', 'updated reason');
+    db.banAuth('AUTH_CHEATER', 'Cheater', 'updated reason', 30);
     check('banAuth upserts rather than duplicating', db.getAuthBans().length, 1);
     check('banAuth upsert updates the reason', db.getAuthBan('AUTH_CHEATER').reason, 'updated reason');
+
+    // A negative duration is just a convenient way to construct an
+    // already-expired ban for this test — banAuth's real callers always
+    // validate a positive duration before calling in.
+    db.banAuth('AUTH_EXPIRED', 'Expired', 'old ban', -1);
+    check('getAuthBan treats an expired ban as not banned', db.getAuthBan('AUTH_EXPIRED'), null);
+    check('an expired ban is cleaned up, not just filtered', db.getAuthBans().some((b) => b.auth === 'AUTH_EXPIRED'), false);
 
     db.unbanAuth('AUTH_CHEATER');
     check('unbanAuth removes the ban', db.getAuthBan('AUTH_CHEATER'), null);
@@ -510,7 +540,7 @@ console.log('\n--- discord.js: message/interaction-handling logic (no live Disco
         user: { id: userId, displayName: userId },
         member: roleIds ? memberWithRoles(roleIds) : null,
         commandName,
-        options: { getString: (name) => options[name] ?? null },
+        options: { getString: (name) => options[name] ?? null, getInteger: (name) => options[name] ?? null },
     });
 
     relayed.length = 0;
@@ -559,37 +589,64 @@ console.log('\n--- discord.js: message/interaction-handling logic (no live Disco
     check('!players from the owner lists the room', await handleIncomingMessage(msg('OWNER_ID', '!players'), authBanDeps), 'Игроки в комнате:\nNewNick [AUTH_X]');
     check('!players from a non-owner is ignored', await handleIncomingMessage(msg('SOME_OTHER_USER', '!players'), authBanDeps), null);
 
-    check('!banauth with no auth shows usage', await handleIncomingMessage(msg('OWNER_ID', '!banauth'), authBanDeps), 'Использование: !banauth <auth> [причина]');
-    check('!banauth from a non-owner is ignored', await handleIncomingMessage(msg('SOME_OTHER_USER', '!banauth AUTH_X cheating'), authBanDeps), null);
+    check('!banauth with no auth shows usage', await handleIncomingMessage(msg('OWNER_ID', '!banauth'), authBanDeps), 'Использование: !banauth <auth> <минуты> [причина]');
+    check('!banauth with no duration shows usage', await handleIncomingMessage(msg('OWNER_ID', '!banauth AUTH_X cheating'), authBanDeps), 'Использование: !banauth <auth> <минуты> [причина]');
+    check('!banauth from a non-owner is ignored', await handleIncomingMessage(msg('SOME_OTHER_USER', '!banauth AUTH_X 60 cheating'), authBanDeps), null);
 
     kicked.length = 0;
-    const banReply = await handleIncomingMessage(msg('OWNER_ID', '!banauth AUTH_X cheating'), authBanDeps);
+    const banReply = await handleIncomingMessage(msg('OWNER_ID', '!banauth AUTH_X 60 cheating'), authBanDeps);
     check('!banauth on a currently-online auth kicks them', kicked, [{ auth: 'AUTH_X', reason: 'cheating' }]);
-    check('!banauth on a currently-online auth confirms by name', banReply, 'NewNick забанен по auth и выгнан из комнаты.');
-    check('!banauth records the ban in the db', db.getAuthBan('AUTH_X'), { auth: 'AUTH_X', playerName: 'NewNick', reason: 'cheating' });
+    check('!banauth on a currently-online auth confirms by name and duration', banReply, 'NewNick забанен по auth на 60 мин. и выгнан из комнаты.');
+    const authXBan = await db.getAuthBan('AUTH_X');
+    check('!banauth records the ban in the db', { auth: authXBan.auth, playerName: authXBan.playerName, reason: authXBan.reason }, { auth: 'AUTH_X', playerName: 'NewNick', reason: 'cheating' });
 
     kicked.length = 0;
-    const banOfflineReply = await handleIncomingMessage(msg('OWNER_ID', '!banauth AUTH_OFFLINE griefing'), authBanDeps);
+    const banOfflineReply = await handleIncomingMessage(msg('OWNER_ID', '!banauth AUTH_OFFLINE 30 griefing'), authBanDeps);
     check('!banauth on an offline auth does not attempt a kick', kicked, []);
-    check('!banauth on an offline auth confirms without a kick', banOfflineReply, 'AUTH_OFFLINE забанен по auth (сейчас не в комнате).');
+    check('!banauth on an offline auth confirms without a kick', banOfflineReply, 'AUTH_OFFLINE забанен по auth на 30 мин. (сейчас не в комнате).');
 
     check('!unbanauth with no auth shows usage', await handleIncomingMessage(msg('OWNER_ID', '!unbanauth'), authBanDeps), 'Использование: !unbanauth <auth>');
     check('!unbanauth from a non-owner is ignored', await handleIncomingMessage(msg('SOME_OTHER_USER', '!unbanauth AUTH_X'), authBanDeps), null);
     check('!unbanauth on an auth that was never banned reports so', await handleIncomingMessage(msg('OWNER_ID', '!unbanauth AUTH_GHOST'), authBanDeps), 'Этот auth не забанен.');
+
+    // Sorted before comparing: both bans can land in the same
+    // CURRENT_TIMESTAMP second, so their listing order isn't guaranteed.
+    const authbansReply = await handleIncomingMessage(msg('OWNER_ID', '!authbans'), authBanDeps);
+    check('!authbans lists both active bans with remaining time', authbansReply.split('\n').sort(), [
+        'AUTH_OFFLINE [AUTH_OFFLINE] — осталось 30 мин. (griefing)',
+        'NewNick [AUTH_X] — осталось 60 мин. (cheating)',
+    ]);
+    check('!authbans from a non-owner is ignored', await handleIncomingMessage(msg('SOME_OTHER_USER', '!authbans'), authBanDeps), null);
+    const authbansAdminReply = await handleIncomingMessage(msg('ADMIN_USER', '!authbans', false, ['ADMIN_ROLE_ID']), authBanDeps);
+    check('!authbans from a member with the admin role works too', authbansAdminReply.split('\n').sort(), [
+        'AUTH_OFFLINE [AUTH_OFFLINE] — осталось 30 мин. (griefing)',
+        'NewNick [AUTH_X] — осталось 60 мин. (cheating)',
+    ]);
+
     check('!unbanauth clears an existing ban', await handleIncomingMessage(msg('OWNER_ID', '!unbanauth AUTH_X'), authBanDeps), 'NewNick разбанен по auth.');
-    check('!unbanauth actually removed the ban from the db', db.getAuthBan('AUTH_X'), null);
+    check('!unbanauth actually removed the ban from the db', await db.getAuthBan('AUTH_X'), null);
+
+    check('!unbanauth from a member with the admin role also works', await handleIncomingMessage(msg('ADMIN_USER', '!unbanauth AUTH_OFFLINE', false, ['ADMIN_ROLE_ID']), authBanDeps), 'AUTH_OFFLINE разбанен по auth.');
 
     // Same commands again, as slash interactions this time.
     check('/players from the owner lists the room', await handleSlashCommand(interaction('OWNER_ID', 'players', {}), authBanDeps), { content: 'Игроки в комнате:\nNewNick [AUTH_X]', ephemeral: true });
     check('/players from a non-owner is rejected', (await handleSlashCommand(interaction('SOME_OTHER_USER', 'players', {}), authBanDeps)).ephemeral, true);
 
     kicked.length = 0;
-    const slashBanReply = await handleSlashCommand(interaction('OWNER_ID', 'banauth', { auth: 'AUTH_X', reason: 'cheating' }), authBanDeps);
+    const slashBanReply = await handleSlashCommand(interaction('OWNER_ID', 'banauth', { auth: 'AUTH_X', minutes: 45, reason: 'cheating' }), authBanDeps);
     check('/banauth on a currently-online auth kicks them', kicked, [{ auth: 'AUTH_X', reason: 'cheating' }]);
-    check('/banauth on a currently-online auth confirms by name', slashBanReply, { content: 'NewNick забанен по auth и выгнан из комнаты.', ephemeral: true });
+    check('/banauth on a currently-online auth confirms by name and duration', slashBanReply, { content: 'NewNick забанен по auth на 45 мин. и выгнан из комнаты.', ephemeral: true });
+
+    const slashBanReplyAdmin = await handleSlashCommand(interaction('ADMIN_USER', 'banauth', { auth: 'AUTH_GHOST2', minutes: 15, reason: 'spam' }, ['ADMIN_ROLE_ID']), authBanDeps);
+    check('/banauth from a member with the admin role also works', slashBanReplyAdmin, { content: 'AUTH_GHOST2 забанен по auth на 15 мин. (сейчас не в комнате).', ephemeral: true });
+
+    check('/authbans from the owner lists active bans', (await handleSlashCommand(interaction('OWNER_ID', 'authbans', {}), authBanDeps)).content.includes('AUTH_GHOST2'), true);
+    check('/authbans from a non-owner/non-admin is rejected', (await handleSlashCommand(interaction('SOME_OTHER_USER', 'authbans', {}), authBanDeps)).content, 'Только владелец или админ может использовать эту команду.');
+    check('/authbans from a member with the admin role also works', (await handleSlashCommand(interaction('ADMIN_USER', 'authbans', {}, ['ADMIN_ROLE_ID']), authBanDeps)).content.includes('AUTH_GHOST2'), true);
 
     check('/unbanauth clears the ban just placed', await handleSlashCommand(interaction('OWNER_ID', 'unbanauth', { auth: 'AUTH_X' }), authBanDeps), { content: 'NewNick разбанен по auth.', ephemeral: true });
     check('/unbanauth on an auth that was never banned reports so', await handleSlashCommand(interaction('OWNER_ID', 'unbanauth', { auth: 'AUTH_GHOST' }), authBanDeps), { content: 'Этот auth не забанен.', ephemeral: true });
+    check('/unbanauth from a member with the admin role also works', await handleSlashCommand(interaction('ADMIN_USER', 'unbanauth', { auth: 'AUTH_GHOST2' }, ['ADMIN_ROLE_ID']), authBanDeps), { content: 'AUTH_GHOST2 разбанен по auth.', ephemeral: true });
 
     // Auto-role on join: every new Discord member gets the configured role,
     // regardless of whether they've ever linked a HaxBall account.

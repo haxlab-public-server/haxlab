@@ -52,8 +52,8 @@ function createDatabaseApi(options = {}) {
         getAuthByDiscordId(discordId) {
             return sqlite.getAuthByDiscordId(discordId);
         },
-        banAuth(auth, playerName, reason) {
-            return sqlite.banAuth(auth, playerName, reason);
+        banAuth(auth, playerName, reason, durationMinutes) {
+            return sqlite.banAuth(auth, playerName, reason, durationMinutes);
         },
         unbanAuth(auth) {
             return sqlite.unbanAuth(auth);

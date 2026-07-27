@@ -82,12 +82,16 @@ function createSqliteDatabase(filePath = path.join(__dirname, 'haxchill.sqlite')
     // connection with the same auth. This is a second, independent ban list
     // keyed by auth, enforced at room.onPlayerJoin regardless of whether the
     // target is online when the ban is issued.
+    // expires_at is nullable: NULL means a permanent ban (only ever set that
+    // way by data predating the mandatory-duration requirement — every ban
+    // issued through !ban/!banauth/`/banauth` now always sets a real expiry).
     const authBansStatement = database.prepare(`
         CREATE TABLE IF NOT EXISTS auth_bans (
             auth TEXT PRIMARY KEY,
             player_name TEXT NOT NULL,
             reason TEXT NOT NULL DEFAULT '',
-            banned_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            banned_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            expires_at TEXT
         );
     `);
 
@@ -102,6 +106,20 @@ function createSqliteDatabase(filePath = path.join(__dirname, 'haxchill.sqlite')
         );
     `);
 
+    // SQLite has no "ADD COLUMN IF NOT EXISTS" — a DB created before the
+    // mandatory-duration ban feature already has an auth_bans table with no
+    // expires_at column, and CREATE TABLE IF NOT EXISTS above is a no-op
+    // against an existing table. Catching the "duplicate column" error is
+    // the standard way to make this idempotent across both fresh and
+    // pre-existing databases.
+    function addExpiresAtColumnIfMissing() {
+        try {
+            database.exec('ALTER TABLE auth_bans ADD COLUMN expires_at TEXT');
+        } catch (err) {
+            if (!/duplicate column/i.test(err.message)) throw err;
+        }
+    }
+
     function init() {
         fs.mkdirSync(path.dirname(filePath), { recursive: true });
         initStatement.run();
@@ -111,6 +129,7 @@ function createSqliteDatabase(filePath = path.join(__dirname, 'haxchill.sqlite')
         vipsStatement.run();
         discordLinksStatement.run();
         authBansStatement.run();
+        addExpiresAtColumnIfMissing();
         settingsStatement.run();
         return true;
     }
@@ -296,32 +315,53 @@ function createSqliteDatabase(filePath = path.join(__dirname, 'haxchill.sqlite')
         return row ? row.auth : null;
     }
 
-    function banAuth(auth, playerName, reason) {
+    // durationMinutes is required by every current caller (!ban/!banauth/
+    // `/banauth` all validate this themselves before calling in) — a null/0
+    // here only ever happens for data written before the mandatory-duration
+    // change, never as a deliberate "permanent ban" request anymore.
+    function banAuth(auth, playerName, reason, durationMinutes) {
+        const expiresAt = durationMinutes ? new Date(Date.now() + durationMinutes * 60000).toISOString() : null;
         database
             .prepare(
-                `INSERT INTO auth_bans (auth, player_name, reason, banned_at)
-                 VALUES (@auth, @playerName, @reason, CURRENT_TIMESTAMP)
+                `INSERT INTO auth_bans (auth, player_name, reason, banned_at, expires_at)
+                 VALUES (@auth, @playerName, @reason, CURRENT_TIMESTAMP, @expiresAt)
                  ON CONFLICT(auth) DO UPDATE SET
                     player_name = excluded.player_name,
                     reason = excluded.reason,
-                    banned_at = CURRENT_TIMESTAMP`
+                    banned_at = CURRENT_TIMESTAMP,
+                    expires_at = excluded.expires_at`
             )
-            .run({ auth, playerName: playerName ?? '', reason: reason ?? '' });
+            .run({ auth, playerName: playerName ?? '', reason: reason ?? '', expiresAt });
     }
 
     function unbanAuth(auth) {
         database.prepare('DELETE FROM auth_bans WHERE auth = ?').run(auth);
     }
 
+    function isBanExpired(expiresAt) {
+        return expiresAt != null && new Date(expiresAt).getTime() <= Date.now();
+    }
+
+    // A ban past its expiry is functionally identical to no ban at all —
+    // deleting it here (rather than just filtering it out) means it never
+    // needs a separate cleanup job, and getAuthBans()/room.onPlayerJoin both
+    // see the same up-to-date picture without duplicating the expiry check.
     function getAuthBan(auth) {
-        return database
-            .prepare('SELECT auth, player_name AS playerName, reason FROM auth_bans WHERE auth = ?')
-            .get(auth) ?? null;
+        const row = database
+            .prepare('SELECT auth, player_name AS playerName, reason, expires_at AS expiresAt FROM auth_bans WHERE auth = ?')
+            .get(auth);
+        if (!row) return null;
+        if (isBanExpired(row.expiresAt)) {
+            database.prepare('DELETE FROM auth_bans WHERE auth = ?').run(auth);
+            return null;
+        }
+        return row;
     }
 
     function getAuthBans() {
+        database.prepare('DELETE FROM auth_bans WHERE expires_at IS NOT NULL AND expires_at <= ?').run(new Date().toISOString());
         return database
-            .prepare('SELECT auth, player_name AS playerName, reason FROM auth_bans ORDER BY banned_at DESC')
+            .prepare('SELECT auth, player_name AS playerName, reason, expires_at AS expiresAt FROM auth_bans ORDER BY banned_at DESC')
             .all();
     }
 

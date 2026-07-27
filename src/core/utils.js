@@ -75,6 +75,15 @@ function generateRoomPassword() {
     return Math.random().toString(36).slice(2, 10);
 }
 
+// Shared by the room-side (!banauth/!ban/!authbans) and Discord-side
+// (!banauth//banauth//authbans) ban commands so both report remaining time
+// the same way. Rounds up so "1 minute left" never reads as "0 минут".
+function formatBanRemaining(expiresAt) {
+    if (!expiresAt) return 'навсегда';
+    const minutesLeft = Math.max(1, Math.ceil((new Date(expiresAt).getTime() - Date.now()) / 60000));
+    return `${minutesLeft} мин.`;
+}
+
 module.exports = {
     getDate,
     getRandomInt,
@@ -92,4 +101,5 @@ module.exports = {
     getTimeStats,
     findFirstNumberCharString,
     generateRoomPassword,
+    formatBanRemaining,
 };

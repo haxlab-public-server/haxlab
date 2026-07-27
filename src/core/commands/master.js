@@ -13,6 +13,7 @@ module.exports = function createMasterCommands({
     announcementColor,
     errorColor,
     HaxNotification,
+    formatBanRemaining,
 }) {
     function clearbansCommand(player, message) {
         const msgArray = message.split(/ +/).slice(1);
@@ -414,29 +415,67 @@ module.exports = function createMasterCommands({
     // Bans by auth, not by HaxBall's native connection-based ban — works on a
     // player who isn't in the room right now, and survives them reconnecting
     // with a fresh connection under the same auth (see db.getAuthBan(), checked
-    // in room.onPlayerJoin).
+    // in room.onPlayerJoin). Shared by both !banauth (Role.MASTER, unchanged)
+    // and !ban (Role.ADMIN_TEMP, new — see commands.js) — identical behavior,
+    // just a lower role gate on the second entry point.
+    //
+    // Target accepts either #<id> (someone currently in the room, like
+    // !mute/!kick) or a raw auth string (works even if they're offline right
+    // now) — resolved the same way !mute resolves #<id> before this. Duration
+    // is mandatory: there is no more "omit it for a permanent ban" — every
+    // ban issued through here always has a real expiry.
     async function banAuthCommand(player, message) {
+        // Read back from the message itself (rather than hardcoding one
+        // name) since this same function serves both !banauth and !ban —
+        // the usage hint should match whichever one the caller actually typed.
+        const commandUsed = message.split(/ +/)[0];
         const msgArray = message.split(/ +/).slice(1);
-        const auth = msgArray[0];
-        if (!auth) {
-            room.sendAnnouncement(
-                `Неверный auth. Введите "!help banauth" для получения информации.`,
-                player.id,
-                errorColor,
-                'bold',
-                HaxNotification.CHAT
-            );
+        const target = msgArray[0];
+        const usage = () => room.sendAnnouncement(
+            `Использование: ${commandUsed} <#id|auth> <минуты> [причина]. Введите "!help ${commandUsed.slice(1)}" для получения информации.`,
+            player.id,
+            errorColor,
+            'bold',
+            HaxNotification.CHAT
+        );
+        if (!target) {
+            usage();
             return;
         }
-        const reason = msgArray.slice(1).join(' ');
-        const targetIndex = state.playersAll.findIndex((p) => authArray[p.id][0] == auth);
+
+        let auth, targetIndex;
+        if (target[0] == '#') {
+            const id = parseInt(target.substring(1));
+            targetIndex = state.playersAll.findIndex((p) => p.id == id);
+            if (targetIndex == -1) {
+                room.sendAnnouncement(
+                    `Игрока с таким ID нет в комнате. Введите "!help ${commandUsed.slice(1)}" для получения информации.`,
+                    player.id,
+                    errorColor,
+                    'bold',
+                    HaxNotification.CHAT
+                );
+                return;
+            }
+            auth = authArray[state.playersAll[targetIndex].id][0];
+        } else {
+            auth = target;
+            targetIndex = state.playersAll.findIndex((p) => authArray[p.id][0] == auth);
+        }
+
+        const minutes = parseInt(msgArray[1]);
+        if (!(minutes > 0)) {
+            usage();
+            return;
+        }
+        const reason = msgArray.slice(2).join(' ');
         const targetName = targetIndex != -1 ? state.playersAll[targetIndex].name : auth;
-        await db.banAuth(auth, targetName, reason);
+        await db.banAuth(auth, targetName, reason, minutes);
         if (targetIndex != -1) {
-            room.kickPlayer(state.playersAll[targetIndex].id, reason ? `Вы забанены: ${reason}` : 'Вы забанены.', false);
+            room.kickPlayer(state.playersAll[targetIndex].id, reason ? `Вы забанены на ${minutes} мин.: ${reason}` : `Вы забанены на ${minutes} мин.`, false);
         }
         room.sendAnnouncement(
-            `✔️ ${targetName} забанен по auth !`,
+            `✔️ ${targetName} забанен по auth на ${minutes} мин. !`,
             null,
             announcementColor,
             'bold',
@@ -492,7 +531,7 @@ module.exports = function createMasterCommands({
         }
         let cstm = '📢 Список банов по auth : ';
         for (let ban of bans) {
-            cstm += `${ban.playerName} [${ban.auth}]${ban.reason ? ' (' + ban.reason + ')' : ''}, `;
+            cstm += `${ban.playerName} [${ban.auth}] — осталось ${formatBanRemaining(ban.expiresAt)}${ban.reason ? ' (' + ban.reason + ')' : ''}, `;
         }
         cstm = cstm.substring(0, cstm.length - 2) + '.';
         room.sendAnnouncement(
