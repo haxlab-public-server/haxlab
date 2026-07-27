@@ -457,13 +457,19 @@ console.log('\n--- discord.js: message/interaction-handling logic (no live Disco
     const relayed = [];
     const deps = {
         discordOwnerId: 'OWNER_ID',
+        discordAdminRoleId: 'ADMIN_ROLE_ID',
         db,
         state: discordState,
         getAuthArray: () => discordAuthArray,
         getPrintPlayerStats: () => (stats) => `${stats.playerName}: ${stats.goals}G`,
         relayToRoom: (username, content) => relayed.push({ username, content }),
     };
-    const msg = (authorId, content, bot = false) => ({ author: { id: authorId, bot, displayName: authorId }, content });
+    const memberWithRoles = (roleIds) => ({ roles: { cache: { has: (id) => roleIds.includes(id) } } });
+    const msg = (authorId, content, bot = false, roleIds = null) => ({
+        author: { id: authorId, bot, displayName: authorId },
+        content,
+        member: roleIds ? memberWithRoles(roleIds) : null,
+    });
 
     await handleIncomingMessage(msg('OWNER_ID', '!say hello room'), deps);
     check('!say from the owner relays the text (prefix stripped) with the sender name', relayed, [{ username: 'OWNER_ID', content: 'hello room' }]);
@@ -471,6 +477,16 @@ console.log('\n--- discord.js: message/interaction-handling logic (no live Disco
     relayed.length = 0;
     await handleIncomingMessage(msg('SOME_OTHER_USER', '!say hello room'), deps);
     check('!say from a non-owner is ignored', relayed, []);
+
+    relayed.length = 0;
+    await handleIncomingMessage(msg('ADMIN_USER', '!say hello from admin', false, ['ADMIN_ROLE_ID']), deps);
+    check('!say from a member with the admin role is relayed too', relayed, [{ username: 'ADMIN_USER', content: 'hello from admin' }]);
+
+    relayed.length = 0;
+    await handleIncomingMessage(msg('SOME_OTHER_USER', '!say nope', false, ['SOME_UNRELATED_ROLE']), deps);
+    check('!say from a member with an unrelated role is still ignored', relayed, []);
+
+    check('the admin role does NOT unlock other owner-only commands like !players', await handleIncomingMessage(msg('ADMIN_USER', '!players', false, ['ADMIN_ROLE_ID']), deps), null);
 
     relayed.length = 0;
     await handleIncomingMessage(msg('OWNER_ID', 'just chatting, not a command'), deps);
@@ -490,8 +506,9 @@ console.log('\n--- discord.js: message/interaction-handling logic (no live Disco
 
     // Every slash command mirrors its !prefix twin command-for-command, just
     // reading typed options instead of parsing message text.
-    const interaction = (userId, commandName, options = {}) => ({
+    const interaction = (userId, commandName, options = {}, roleIds = null) => ({
         user: { id: userId, displayName: userId },
+        member: roleIds ? memberWithRoles(roleIds) : null,
         commandName,
         options: { getString: (name) => options[name] ?? null },
     });
@@ -505,6 +522,18 @@ console.log('\n--- discord.js: message/interaction-handling logic (no live Disco
     const strangerReply = await handleSlashCommand(interaction('SOME_OTHER_USER', 'say', { message: 'hi from slash' }), deps);
     check('/say from a non-owner is rejected, not relayed', relayed, []);
     check('/say rejection is ephemeral', strangerReply.ephemeral, true);
+
+    relayed.length = 0;
+    const adminReply = await handleSlashCommand(interaction('ADMIN_USER', 'say', { message: 'hi from admin' }, ['ADMIN_ROLE_ID']), deps);
+    check('/say from a member with the admin role relays too', relayed, [{ username: 'ADMIN_USER', content: 'hi from admin' }]);
+    check('/say confirms back to the admin, ephemerally', adminReply, { content: 'Отправлено: hi from admin', ephemeral: true });
+
+    relayed.length = 0;
+    const unrelatedRoleReply = await handleSlashCommand(interaction('SOME_OTHER_USER', 'say', { message: 'nope' }, ['SOME_UNRELATED_ROLE']), deps);
+    check('/say from a member with an unrelated role is still rejected', relayed, []);
+    check('/say rejection mentions both owner and admin', unrelatedRoleReply.content, 'Только владелец или админ может использовать эту команду.');
+
+    check('the admin role does NOT unlock other owner-only slash commands like /players', await handleSlashCommand(interaction('ADMIN_USER', 'players', {}, ['ADMIN_ROLE_ID']), deps), { content: 'Только владелец может использовать эту команду.', ephemeral: true });
 
     check('/stats <name> resolves the same as !stats', await handleSlashCommand(interaction('U1', 'stats', { name: 'Xara' }), deps), { content: 'Xara: 7G' });
     check('/stats with no name, from a linked account, resolves the same as !stats', await handleSlashCommand(interaction('LINKED_USER', 'stats', {}), deps), { content: 'Xara: 7G' });

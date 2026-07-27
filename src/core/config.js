@@ -17,6 +17,7 @@ const discordToken = process.env.DISCORD_TOKEN ?? '';
 const discordLogChannelId = process.env.DISCORD_LOG_CHANNEL_ID ?? ''; // formerly roomWebhook
 const discordReportChannelId = process.env.DISCORD_REPORT_CHANNEL_ID ?? ''; // formerly gameWebhook
 const discordOwnerId = process.env.DISCORD_OWNER_ID ?? '';
+const discordAdminRoleId = process.env.DISCORD_ADMIN_ROLE_ID ?? ''; // members with this role can also use /say, alongside the owner
 const discordAutoRoleId = process.env.DISCORD_AUTO_ROLE_ID ?? ''; // role auto-assigned to every new Discord member
 const discordStatusChannelId = process.env.DISCORD_STATUS_CHANNEL_ID ?? ''; // live "join the room" message with player count
 const discordPasswordChannelId = process.env.DISCORD_PASSWORD_CHANNEL_ID ?? ''; // gets the auto-rotated overflow room password
@@ -29,6 +30,7 @@ module.exports = {
     discordLogChannelId,
     discordReportChannelId,
     discordOwnerId,
+    discordAdminRoleId,
     discordAutoRoleId,
     discordStatusChannelId,
     discordPasswordChannelId,

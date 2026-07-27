@@ -15,10 +15,20 @@ const BANAUTH_PREFIX = '!banauth';
 const UNBANAUTH_PREFIX = '!unbanauth';
 const STATUS_MESSAGE_SETTING_KEY = 'statusMessageId';
 
+// !say/`/say` are the only commands admins can use alongside the owner —
+// everything else here (banauth, players, etc.) stays owner-only. A role
+// check is enough (no need to hit the DB/adminList) since it's just gating
+// who's allowed to speak in the room chat from Discord, not a room action.
+function canUseSay(userId, member, discordOwnerId, discordAdminRoleId) {
+    if (userId === discordOwnerId) return true;
+    if (discordAdminRoleId && member && member.roles.cache.has(discordAdminRoleId)) return true;
+    return false;
+}
+
 const slashCommandData = [
     new SlashCommandBuilder()
         .setName('say')
-        .setDescription('Отправить сообщение в чат комнаты HaxBall (только для владельца)')
+        .setDescription('Отправить сообщение в чат комнаты HaxBall (владелец и админы)')
         .addStringOption((option) =>
             option.setName('message').setDescription('Текст для отправки в комнату').setRequired(true)
         ),
@@ -72,11 +82,11 @@ function listCurrentPlayers(state, getAuthArray) {
 // incoming Discord message, without touching the discord.js Client itself.
 // Async because kickPlayerByAuth crosses to the game process over IPC (see
 // core/discordProcess.js) — it's no longer a same-process function call.
-async function handleIncomingMessage(message, { discordOwnerId, db, state, getAuthArray, getPrintPlayerStats, relayToRoom, kickPlayerByAuth }) {
+async function handleIncomingMessage(message, { discordOwnerId, discordAdminRoleId, db, state, getAuthArray, getPrintPlayerStats, relayToRoom, kickPlayerByAuth }) {
     if (message.author.bot) return null;
 
     if (message.content.toLowerCase().startsWith(SAY_PREFIX)) {
-        if (message.author.id !== discordOwnerId) return null;
+        if (!canUseSay(message.author.id, message.member, discordOwnerId, discordAdminRoleId)) return null;
         const text = message.content.slice(SAY_PREFIX.length).trim();
         if (text === '') return 'Использование: !say <message>';
         relayToRoom(message.author.displayName, text);
@@ -142,17 +152,18 @@ function handleGuildMemberAdd(member, { discordAutoRoleId }) {
 }
 
 const OWNER_ONLY_REPLY = { content: 'Только владелец может использовать эту команду.', ephemeral: true };
+const SAY_UNAUTHORIZED_REPLY = { content: 'Только владелец или админ может использовать эту команду.', ephemeral: true };
 
 // Same separation as handleIncomingMessage: pure decision logic, independently
 // testable without a real discord.js Interaction. Mirrors handleIncomingMessage's
 // behavior command-for-command, just reading typed slash-command options instead
 // of parsing message text — /stats replies publicly (like !stats) since it's an
 // open lookup, the rest stay ephemeral (owner-only moderation/utility actions).
-async function handleSlashCommand(interaction, { discordOwnerId, db, state, getAuthArray, getPrintPlayerStats, relayToRoom, kickPlayerByAuth }) {
+async function handleSlashCommand(interaction, { discordOwnerId, discordAdminRoleId, db, state, getAuthArray, getPrintPlayerStats, relayToRoom, kickPlayerByAuth }) {
     const { commandName } = interaction;
 
     if (commandName === 'say') {
-        if (interaction.user.id !== discordOwnerId) return OWNER_ONLY_REPLY;
+        if (!canUseSay(interaction.user.id, interaction.member, discordOwnerId, discordAdminRoleId)) return SAY_UNAUTHORIZED_REPLY;
         const text = interaction.options.getString('message');
         relayToRoom(interaction.user.displayName, text);
         return { content: `Отправлено: ${text}`, ephemeral: true };
@@ -208,6 +219,7 @@ module.exports = function createDiscordBot({
     discordLogChannelId,
     discordReportChannelId,
     discordOwnerId,
+    discordAdminRoleId,
     discordAutoRoleId,
     discordStatusChannelId,
     discordPasswordChannelId,
@@ -292,7 +304,7 @@ module.exports = function createDiscordBot({
     });
 
     client.on(Events.MessageCreate, async (message) => {
-        const reply = await handleIncomingMessage(message, { discordOwnerId, db, state, getAuthArray, getPrintPlayerStats, relayToRoom, kickPlayerByAuth });
+        const reply = await handleIncomingMessage(message, { discordOwnerId, discordAdminRoleId, db, state, getAuthArray, getPrintPlayerStats, relayToRoom, kickPlayerByAuth });
         if (reply) message.channel.send(reply).catch((err) => console.error('Discord reply failed:', err));
     });
 
@@ -302,7 +314,7 @@ module.exports = function createDiscordBot({
 
     client.on(Events.InteractionCreate, async (interaction) => {
         if (!interaction.isChatInputCommand()) return;
-        const reply = await handleSlashCommand(interaction, { discordOwnerId, db, state, getAuthArray, getPrintPlayerStats, relayToRoom, kickPlayerByAuth });
+        const reply = await handleSlashCommand(interaction, { discordOwnerId, discordAdminRoleId, db, state, getAuthArray, getPrintPlayerStats, relayToRoom, kickPlayerByAuth });
         if (reply) interaction.reply(reply).catch((err) => console.error('Discord interaction reply failed:', err));
     });
 
