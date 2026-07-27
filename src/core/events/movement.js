@@ -24,7 +24,7 @@ module.exports = function createMovementEvents({
     maxPlayers,
     welcomeColor,
     getDate,
-    applyEquippedDiscCosmetics,
+    applyTeamForms,
     checkCaptainLeave,
     checkOverflowPassword,
     getRole,
@@ -113,15 +113,13 @@ module.exports = function createMovementEvents({
             );
             return;
         }
-        // Landing on an actual team (not spectators) is the other moment
-        // (alongside gameManagement.js's onGameStart) a worn form/size needs
-        // re-applying — a fresh join is balanced onto a team from here, not
-        // from onPlayerJoin itself, and HaxBall gives a disc no custom
-        // color/radius by default.
-        if (changedPlayer.team != Team.SPECTATORS) {
-            applyEquippedDiscCosmetics(changedPlayer).catch((err) => console.error('[economy] applyEquippedDiscCosmetics failed:', err));
-        }
         updateTeams();
+        // After updateTeams(), not before — applyTeamForms() reads
+        // state.teamRed/teamBlue, which only reflect this team change once
+        // updateTeams() has run. Runs regardless of direction (joining OR
+        // leaving a team can change who's captain, or the random-fallback
+        // pool, on either side).
+        applyTeamForms().catch((err) => console.error('[economy] applyTeamForms failed:', err));
         if (state.gameState != State.STOP) {
             if (changedPlayer.team != Team.SPECTATORS && state.game.scores.time <= (3 / 4) * state.game.scores.timeLimit && Math.abs(state.game.scores.blue - state.game.scores.red) < 2) {
                 changedPlayer.team == Team.RED ? state.teamRedStats.push(changedPlayer) : state.teamBlueStats.push(changedPlayer);

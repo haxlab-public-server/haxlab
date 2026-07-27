@@ -801,6 +801,196 @@ console.log('\n--- events/movement.js: auth-bans block a join regardless of conn
     }, 20);
 })();
 
+console.log('\n--- team/buttons.js: randomButton must not strand a spectator across repeated calls ---');
+{
+    // A realistic mock: room.setPlayerTeam here actually mutates the
+    // roster and re-derives teamRed/teamBlue/teamSpec, mirroring how
+    // room.setPlayerTeam synchronously fires room.onPlayerTeamChange in
+    // real HaxBall (movement.js's handler calls updateTeams(), which
+    // replaces state.teamSpec with a fresh array on every single call).
+    // The dumb "just record what was called" room mock used elsewhere in
+    // this file can't catch bugs that depend on that synchronous refresh —
+    // this is exactly the kind of mock needed to catch the bug fixed here
+    // (a stale index into an already-updated state.teamSpec could silently
+    // drop a spectator from the room's pairing for good).
+    function makeRealisticRoomMock(state, Team) {
+        return {
+            setPlayerTeam: (id, team) => {
+                const player = state.players.find((p) => p.id === id);
+                player.team = team;
+                state.teamRed = state.players.filter((p) => p.team === Team.RED);
+                state.teamBlue = state.players.filter((p) => p.team === Team.BLUE);
+                state.teamSpec = state.players.filter((p) => p.team === Team.SPECTATORS);
+            },
+        };
+    }
+
+    const Team = { RED: 1, BLUE: 2, SPECTATORS: 0 };
+    const players = [1, 2, 3, 4].map((id) => ({ id, team: Team.SPECTATORS }));
+    const state = { players, teamRed: [], teamBlue: [], teamSpec: [...players] };
+    const roomMock = makeRealisticRoomMock(state, Team);
+    // A real (not stubbed) getRandomInt — this bug only ever showed up
+    // often enough to notice because the index was sometimes in range,
+    // sometimes not; a real random source across many runs below is the
+    // actual regression guard, not just a single lucky/unlucky roll.
+    const { getRandomInt } = require(path.join(CORE, 'utils'));
+    const { randomButton } = require(path.join(CORE, 'team', 'buttons'))({ room: roomMock, state, Team, getRandomInt });
+
+    let strandedSomeone = false;
+    for (let trial = 0; trial < 200; trial++) {
+        for (const p of players) p.team = Team.SPECTATORS;
+        state.teamRed = [];
+        state.teamBlue = [];
+        state.teamSpec = [...players];
+
+        randomButton();
+        randomButton();
+
+        if (state.teamRed.length !== 2 || state.teamBlue.length !== 2 || state.teamSpec.length !== 0) {
+            strandedSomeone = true;
+            break;
+        }
+    }
+    check('two randomButton() calls from 4 spectators always reach a clean 2v2 (200 trials)', strandedSomeone, false);
+}
+
+console.log('\n--- team/buttons.js: resetButton/blueToSpecButton/redToSpecButton must clear every player, not just most of them ---');
+{
+    // Same realistic mock as above — these three used to loop against
+    // state.teamRed/teamBlue.length re-read live each iteration, which
+    // shrinks as room.setPlayerTeam synchronously benches each player, so
+    // the loop bound shrank along with it and exited one or two players
+    // early.
+    function makeRealisticRoomMock(state, Team) {
+        return {
+            setPlayerTeam: (id, team) => {
+                const player = state.players.find((p) => p.id === id);
+                player.team = team;
+                state.teamRed = state.players.filter((p) => p.team === Team.RED);
+                state.teamBlue = state.players.filter((p) => p.team === Team.BLUE);
+                state.teamSpec = state.players.filter((p) => p.team === Team.SPECTATORS);
+            },
+        };
+    }
+
+    const Team = { RED: 1, BLUE: 2, SPECTATORS: 0 };
+
+    function makeState(redCount, blueCount) {
+        const players = [];
+        for (let i = 0; i < redCount; i++) players.push({ id: players.length + 1, team: Team.RED });
+        for (let i = 0; i < blueCount; i++) players.push({ id: players.length + 1, team: Team.BLUE });
+        const state = { players };
+        state.teamRed = players.filter((p) => p.team === Team.RED);
+        state.teamBlue = players.filter((p) => p.team === Team.BLUE);
+        state.teamSpec = [];
+        return state;
+    }
+
+    // Even split (the exact case that fed a stranded player into
+    // randomButton() and produced the original "4 players -> 2v1" bug).
+    {
+        const state = makeState(2, 2);
+        const { resetButton } = require(path.join(CORE, 'team', 'buttons'))({ room: makeRealisticRoomMock(state, Team), state, Team, getRandomInt: () => 0 });
+        resetButton();
+        check('resetButton on an even 2v2 benches everyone, not just one per side', [state.teamRed.length, state.teamBlue.length, state.teamSpec.length], [0, 0, 4]);
+    }
+
+    // Uneven split — the old max/min juggling was specifically meant to
+    // handle this case, and still needs to.
+    {
+        const state = makeState(3, 2);
+        const { resetButton } = require(path.join(CORE, 'team', 'buttons'))({ room: makeRealisticRoomMock(state, Team), state, Team, getRandomInt: () => 0 });
+        resetButton();
+        check('resetButton on an uneven 3v2 also benches everyone', [state.teamRed.length, state.teamBlue.length, state.teamSpec.length], [0, 0, 5]);
+    }
+
+    // blueToSpecButton/redToSpecButton individually, including an odd size
+    // (3) — an off-by-one here is exactly what would leave one player
+    // stuck on a team that was supposed to be fully benched.
+    {
+        const state = makeState(2, 3);
+        const { blueToSpecButton } = require(path.join(CORE, 'team', 'buttons'))({ room: makeRealisticRoomMock(state, Team), state, Team, getRandomInt: () => 0 });
+        blueToSpecButton();
+        check('blueToSpecButton benches all 3 blue players, not just 2', [state.teamRed.length, state.teamBlue.length, state.teamSpec.length], [2, 0, 3]);
+    }
+    {
+        const state = makeState(3, 2);
+        const { redToSpecButton } = require(path.join(CORE, 'team', 'buttons'))({ room: makeRealisticRoomMock(state, Team), state, Team, getRandomInt: () => 0 });
+        redToSpecButton();
+        check('redToSpecButton benches all 3 red players, not just 2', [state.teamRed.length, state.teamBlue.length, state.teamSpec.length], [0, 2, 3]);
+    }
+}
+
+console.log('\n--- team/buttons.js: the full "start a fresh 2v2" sequence (resetButton then randomButton x2) ---');
+{
+    // End-to-end regression for the actual bug report: 4 players, a round
+    // just ended, handlePlayersStop's 4-player branch calls resetButton()
+    // then randomButton() twice — this must always land on a clean 2v2,
+    // starting from whatever lopsided state the just-finished match left
+    // (not just a pre-cleared 0v0 — that's what the dedicated randomButton
+    // test above already covers in isolation).
+    function makeRealisticRoomMock(state, Team) {
+        return {
+            setPlayerTeam: (id, team) => {
+                const player = state.players.find((p) => p.id === id);
+                player.team = team;
+                state.teamRed = state.players.filter((p) => p.team === Team.RED);
+                state.teamBlue = state.players.filter((p) => p.team === Team.BLUE);
+                state.teamSpec = state.players.filter((p) => p.team === Team.SPECTATORS);
+            },
+        };
+    }
+
+    const Team = { RED: 1, BLUE: 2, SPECTATORS: 0 };
+    const { getRandomInt } = require(path.join(CORE, 'utils'));
+
+    let strandedSomeone = false;
+    for (let trial = 0; trial < 200; trial++) {
+        const players = [
+            { id: 1, team: Team.RED }, { id: 2, team: Team.RED },
+            { id: 3, team: Team.BLUE }, { id: 4, team: Team.BLUE },
+        ];
+        const state = { players };
+        state.teamRed = players.filter((p) => p.team === Team.RED);
+        state.teamBlue = players.filter((p) => p.team === Team.BLUE);
+        state.teamSpec = [];
+        const { resetButton, randomButton } = require(path.join(CORE, 'team', 'buttons'))({ room: makeRealisticRoomMock(state, Team), state, Team, getRandomInt });
+
+        resetButton();
+        randomButton();
+        randomButton();
+
+        if (state.teamRed.length !== 2 || state.teamBlue.length !== 2 || state.teamSpec.length !== 0) {
+            strandedSomeone = true;
+            break;
+        }
+    }
+    check('resetButton + 2x randomButton from a just-finished 2v2 always reaches a clean 2v2 (200 trials)', strandedSomeone, false);
+}
+
+console.log('\n--- team/buttons.js: topButton pairs up two different spectators, not the same one twice ---');
+{
+    function makeRealisticRoomMock(state, Team) {
+        return {
+            setPlayerTeam: (id, team) => {
+                const player = state.players.find((p) => p.id === id);
+                player.team = team;
+                state.teamRed = state.players.filter((p) => p.team === Team.RED);
+                state.teamBlue = state.players.filter((p) => p.team === Team.BLUE);
+                state.teamSpec = state.players.filter((p) => p.team === Team.SPECTATORS);
+            },
+        };
+    }
+    const Team = { RED: 1, BLUE: 2, SPECTATORS: 0 };
+    const players = [{ id: 1, team: Team.SPECTATORS }, { id: 2, team: Team.SPECTATORS }];
+    const state = { players, teamRed: [], teamBlue: [], teamSpec: [...players] };
+    const { topButton } = require(path.join(CORE, 'team', 'buttons'))({ room: makeRealisticRoomMock(state, Team), state, Team, getRandomInt: () => 0 });
+
+    topButton();
+    check('topButton fills both slots from 2 spectators', [state.teamRed.length, state.teamBlue.length, state.teamSpec.length], [1, 1, 0]);
+    check('topButton does not assign the same player to both teams', state.teamRed[0].id !== state.teamBlue[0].id, true);
+}
+
 console.log('\n--- team/balance.js: an already-full match never auto-upgrades to a bigger arena ---');
 {
     const State = { PLAY: 0, PAUSE: 1, STOP: 2 };
@@ -1049,6 +1239,155 @@ console.log('\n--- team/balance.js: an already-full match never auto-upgrades to
             }, 20);
         }, 20);
     }, 20);
+}
+
+console.log('\n--- team/balance.js: handlePlayersTeamChange asserts the big map when choose mode completes ---');
+{
+    // Choose mode completing was resuming play directly (no game stop, so
+    // handlePlayersStop's own stadium-switch logic never ran) without ever
+    // checking the map — a captain-picked full house could stay stuck on
+    // the small classic map indefinitely.
+    const State = { PLAY: 0, PAUSE: 1, STOP: 2 };
+    const calls = [];
+    const stadiumCalls = [];
+    const noop = (name) => () => calls.push(name);
+    const state = {
+        chooseMode: true, removingPlayers: false,
+        teamRed: [{ id: 1 }, { id: 2 }, { id: 3 }],
+        teamBlue: [{ id: 4 }],
+        teamSpec: [{ id: 5 }, { id: 6 }],
+        currentStadium: 'classic',
+    };
+    const balance = require(path.join(CORE, 'team', 'balance'))({
+        room, state, Team, State, HaxNotification, emptyPlayer: {}, infoColor: 5,
+        scoreLimit: 3, teamSize: 4, timeLimit: 5,
+        activateChooseMode: noop('activateChooseMode'), blueToSpecButton: noop('blueToSpecButton'),
+        choosePlayer: noop('choosePlayer'), deactivateChooseMode: noop('deactivateChooseMode'),
+        endGame: noop('endGame'), getRandomInt: () => 0, getSpecList: noop('getSpecList'),
+        instantRestart: noop('instantRestart'), randomButton: noop('randomButton'),
+        redToSpecButton: noop('redToSpecButton'), resetButton: noop('resetButton'),
+        resumeGame: noop('resumeGame'),
+        stadiumCommand: (player, msg) => {
+            calls.push('stadiumCommand');
+            stadiumCalls.push(msg);
+        },
+        swapButton: noop('swapButton'), topButton: noop('topButton'),
+    });
+
+    // abs(3-1)=2 == teamSpec.length(2) -> the "fill the smaller side" completion branch.
+    stadiumCalls.length = 0;
+    balance.handlePlayersTeamChange(null);
+    setTimeout(() => {
+        check('choose mode completing via the "fill the smaller side" branch asserts the big map', stadiumCalls, ['!big']);
+
+        // Already on big: must not needlessly re-switch.
+        state.currentStadium = 'big';
+        state.teamRed = [{ id: 1 }, { id: 2 }, { id: 3 }];
+        state.teamBlue = [{ id: 4 }];
+        state.teamSpec = [{ id: 5 }, { id: 6 }];
+        stadiumCalls.length = 0;
+        balance.handlePlayersTeamChange(null);
+        setTimeout(() => {
+            check('already on the big map, it does not needlessly re-switch', stadiumCalls, []);
+
+            // The other completion branch: both sides already at teamSize.
+            state.currentStadium = 'classic';
+            state.teamRed = [{ id: 1 }, { id: 2 }, { id: 3 }, { id: 4 }];
+            state.teamBlue = [{ id: 5 }, { id: 6 }, { id: 7 }, { id: 8 }];
+            state.teamSpec = [];
+            stadiumCalls.length = 0;
+            balance.handlePlayersTeamChange(null);
+            setTimeout(() => {
+                check('choose mode completing at a full 4v4 (both sides == teamSize) also asserts the big map', stadiumCalls, ['!big']);
+            }, 20);
+        }, 20);
+    }, 20);
+}
+
+console.log('\n--- team/balance.js: handlePlayersStop at 5 players ends up with everyone on a team, not stranded in spectators ---');
+{
+    // End-to-end regression for the reported bug: a 5-player room where the
+    // losing side has more than one player (e.g. 3v2) used to bench the
+    // whole losing team then pull back only ONE of them (a single
+    // topButton() call), settling on something like 3v1 with the rest stuck
+    // in spectators instead of a proper 3v2. A realistic room mock (one that
+    // actually moves players and keeps state.teamRed/teamBlue/teamSpec in
+    // sync, like team/buttons.js's own tests above) is needed to catch this
+    // — the dumb string-logging mock used elsewhere in this file can't.
+    function makeRealisticRoomMock(state, Team) {
+        return {
+            getScores: () => ({ red: 0, blue: 0, scoreLimit: 3, time: 0, timeLimit: 3 }),
+            setScoreLimit: () => {},
+            setTimeLimit: () => {},
+            stopGame: () => {},
+            startGame: () => {},
+            setPlayerTeam: (id, team) => {
+                const player = state.players.find((p) => p.id === id);
+                player.team = team;
+                state.teamRed = state.players.filter((p) => p.team === Team.RED);
+                state.teamBlue = state.players.filter((p) => p.team === Team.BLUE);
+                state.teamSpec = state.players.filter((p) => p.team === Team.SPECTATORS);
+            },
+        };
+    }
+
+    const Team = { RED: 1, BLUE: 2, SPECTATORS: 0 };
+    const State = { PLAY: 0, PAUSE: 1, STOP: 2 };
+    const HaxNotificationMock = { CHAT: 1 };
+    const emptyPlayer = {};
+    const noop = () => {};
+
+    function runScenario(redCount, blueCount, winner, chooseMode) {
+        const players = [];
+        for (let i = 0; i < redCount; i++) players.push({ id: players.length + 1, team: Team.RED });
+        for (let i = 0; i < blueCount; i++) players.push({ id: players.length + 1, team: Team.BLUE });
+        const state = {
+            players, chooseMode, endGameVariable: true, lastWinner: winner,
+            currentStadium: 'classic', gameState: State.STOP,
+        };
+        state.teamRed = players.filter((p) => p.team === Team.RED);
+        state.teamBlue = players.filter((p) => p.team === Team.BLUE);
+        state.teamSpec = [];
+        const roomMock = makeRealisticRoomMock(state, Team);
+        const createButtonHelpers = require(path.join(CORE, 'team', 'buttons'));
+        const { topButton, randomButton, blueToSpecButton, redToSpecButton, resetButton, swapButton } = createButtonHelpers({
+            room: roomMock, state, Team, getRandomInt: (max) => Math.floor(Math.random() * max),
+        });
+        const balance = require(path.join(CORE, 'team', 'balance'))({
+            room: roomMock, state, Team, State, HaxNotification: HaxNotificationMock,
+            emptyPlayer, infoColor: 5, scoreLimit: 3, teamSize: 4, timeLimit: 5,
+            activateChooseMode: noop, blueToSpecButton, choosePlayer: noop,
+            deactivateChooseMode: noop, endGame: noop, getRandomInt: (max) => Math.floor(Math.random() * max),
+            getSpecList: noop, instantRestart: noop, randomButton,
+            redToSpecButton, resetButton, resumeGame: noop,
+            stadiumCommand: noop, swapButton, topButton,
+        });
+        balance.handlePlayersStop(null);
+        return state;
+    }
+
+    const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+    // runScenario() itself only *schedules* the topButton()/etc timeouts
+    // (up to 300ms + a handful of 5ms-staggered calls) — each check has to
+    // wait for those to actually fire before looking at the settled state,
+    // not just wait before calling runScenario() in the first place.
+    (async () => {
+        const state1 = runScenario(3, 2, Team.RED, false);
+        await wait(350);
+        check('5 players (3v2, non-choose-mode): nobody stays stuck in spectators', state1.teamSpec.length, 0);
+        check('5 players (3v2, non-choose-mode): all 5 are still accounted for', state1.teamRed.length + state1.teamBlue.length, 5);
+
+        const state2 = runScenario(2, 3, Team.BLUE, false);
+        await wait(350);
+        check('5 players (2v3, blue wins, non-choose-mode): nobody stays stuck in spectators', state2.teamSpec.length, 0);
+        check('5 players (2v3, blue wins, non-choose-mode): all 5 are still accounted for', state2.teamRed.length + state2.teamBlue.length, 5);
+
+        const state3 = runScenario(3, 2, Team.RED, true);
+        await wait(350);
+        check('5 players (3v2, still in choose mode — shrunk from a full house): nobody stays stuck in spectators', state3.teamSpec.length, 0);
+        check('5 players (3v2, still in choose mode): all 5 are still accounted for', state3.teamRed.length + state3.teamBlue.length, 5);
+    })();
 }
 
 console.log('\n--- events/misc.js: nobody keeps an admin badge unless they are MASTER/ADMIN_PERM ---');
@@ -1306,7 +1645,8 @@ console.log('\n--- core/economy.js: coin awards, playtime ticker, shop/inventory
     const HaxNotificationMock = { CHAT: 1 };
     const testItems = [
         { id: 'fire', type: 'goalAnimation', name: 'Огонь', price: 100, avatar: '🔥' },
-        { id: 'gold', type: 'form', name: 'Золотой', price: 200, color: 0xffd700 },
+        { id: 'gold', type: 'form', name: 'Золотой', price: 200, homeColor: 0xffd700, awayColor: 0x1a1a1a },
+        { id: 'violet', type: 'form', name: 'Фиолетовый', price: 200, homeColor: 0x8a2be2, awayColor: 0xffffff },
         { id: 'small', type: 'size', name: 'Малыш', price: 50, radius: 12 },
     ];
 
@@ -1346,7 +1686,9 @@ console.log('\n--- core/economy.js: coin awards, playtime ticker, shop/inventory
     const sentLocal = [];
     const roomMock = {
         setPlayerDiscProperties: (id, props) => roomCallsLocal.push(`setPlayerDiscProperties:${id}:${JSON.stringify(props)}`),
+        getPlayerDiscProperties: (id) => ({ radius: 15 }),
         setPlayerAvatar: (id, avatar) => roomCallsLocal.push(`setPlayerAvatar:${id}:${avatar}`),
+        setTeamColors: (team, angle, textColor, colors) => roomCallsLocal.push(`setTeamColors:${team}:${JSON.stringify(colors)}`),
         sendAnnouncement: (msg, id) => sentLocal.push({ msg, id }),
     };
     const authArray = [];
@@ -1361,32 +1703,51 @@ console.log('\n--- core/economy.js: coin awards, playtime ticker, shop/inventory
     };
 
     const db = makeDbMock();
+    const { getRandomInt } = require(path.join(CORE, 'utils'));
     const economy = require(path.join(CORE, 'economy'))({
         room: roomMock, state, authArray, db, items: testItems,
         Team, State, HaxNotification: HaxNotificationMock,
-        announcementColor: 1, errorColor: 2, formatCoins,
+        announcementColor: 1, errorColor: 2, formatCoins, getRandomInt,
     });
 
+    sentLocal.length = 0;
     await economy.awardMatchCoins(Team.RED);
     check('a win pays the winning team 50', await db.getBalance('AUTH_RED1'), 50);
     check('a win pays the losing team 25', await db.getBalance('AUTH_BLUE1'), 25);
+    check('the winner gets a private notification, not a broadcast', sentLocal.find((s) => s.id === 1).id, 1);
+    check('the win notification shows new balance + delta in the requested format', sentLocal.find((s) => s.id === 1).msg, '💰 Баланс: 50 (+50 монеток)');
+    check('the loser also gets a private notification', sentLocal.find((s) => s.id === 2).msg, '💰 Баланс: 25 (+25 монеток)');
+    check('coin notifications are never broadcast to the whole room', sentLocal.every((s) => s.id !== null && s.id !== undefined), true);
 
+    sentLocal.length = 0;
     await economy.awardMatchCoins(Team.SPECTATORS);
     check('a draw pays everyone the loss rate, not the win rate', await db.getBalance('AUTH_RED1'), 75);
     check('a draw pays the other side the same loss rate', await db.getBalance('AUTH_BLUE1'), 50);
+    check('a draw still notifies privately with the loss-rate delta', sentLocal.find((s) => s.id === 1).msg, '💰 Баланс: 75 (+25 монеток)');
 
     // Playtime: 60s/tick, 10 minutes (600s) needed for a payout — both teams
     // are on the field for these ticks, so both accrue it, not just red.
     for (let i = 0; i < 9; i++) economy.tickPlaytime(60);
     check('playtime does not pay out before 10 minutes', await db.getBalance('AUTH_RED1'), 75);
+    sentLocal.length = 0;
     economy.tickPlaytime(60);
     check('playtime pays out once 10 minutes accumulate', await db.getBalance('AUTH_RED1'), 85);
     check('playtime pays out to every active player, not just one side', await db.getBalance('AUTH_BLUE1'), 60);
+    // tickPlaytime's payout notification is fire-and-forget (a .then() chain,
+    // not awaited by the caller — real callers are a setInterval tick) —
+    // flush the microtask queue before checking it landed.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    check('a playtime payout also notifies privately', sentLocal.find((s) => s.id === 1).msg, '💰 Баланс: 85 (+10 монеток)');
 
     state.gameState = State.STOP;
     economy.tickPlaytime(600);
     check('playtime never accrues while the game is not actually playing', await db.getBalance('AUTH_RED1'), 85);
     state.gameState = State.PLAY;
+
+    // !balance: a plain, on-demand balance check.
+    sentLocal.length = 0;
+    await economy.balanceCommand({ id: 1, name: 'Red1' }, '!balance');
+    check('!balance reports the current balance privately', sentLocal, [{ msg: '💰 Ваш баланс: 85 монеток', id: 1 }]);
 
     // Shop: list, buy failures, a real purchase. Balance topped up to a
     // known round number here so these checks don't depend on the exact
@@ -1440,37 +1801,115 @@ console.log('\n--- core/economy.js: coin awards, playtime ticker, shop/inventory
     check('equipping a goalAnimation never touches the disc', roomCallsLocal, []);
     check('equipping a goalAnimation records it in that slot', await db.getEquipped('AUTH_BLUE1'), { form: null, goalAnimation: 'fire', size: null });
 
-    // Equipping a 'size' item goes through applyEquippedDiscCosmetics too
-    // (same as 'form'), unlike goalAnimation above.
+    // Equipping a form goes through equipCommand -> applyTeamForms, i.e. one
+    // setTeamColors call per side, not a per-player disc update.
+    await db.buyItem('AUTH_BLUE1', 'Blue1', 'gold', 0);
+    roomCallsLocal.length = 0;
+    sentLocal.length = 0;
+    await economy.equipCommand({ id: 2, name: 'Blue1' }, '!equip gold');
+    check('!equip <owned form> confirms', /Надето: Золотой/.test(sentLocal[0].msg), true);
+    check('equipping a form recomputes both sides via setTeamColors', roomCallsLocal, [
+        `setTeamColors:${Team.RED}:${JSON.stringify([0xe56e56])}`,
+        `setTeamColors:${Team.BLUE}:${JSON.stringify([0xffd700])}`,
+    ]);
+
+    // Equipping a 'size' item has NO immediate effect — it's a post-goal-only
+    // celebration (see playGoalSizeEffect below), never a standing radius
+    // change, so equipping never touches the disc.
     await db.buyItem('AUTH_BLUE1', 'Blue1', 'small', 0);
     roomCallsLocal.length = 0;
     sentLocal.length = 0;
     await economy.equipCommand({ id: 2, name: 'Blue1' }, '!equip small');
     check('!equip <owned size> confirms', /Надето: Малыш/.test(sentLocal[0].msg), true);
-    check('equipping a size item applies it to the disc immediately', roomCallsLocal, [`setPlayerDiscProperties:2:${JSON.stringify({ radius: 12 })}`]);
+    check('equipping a size item never touches the disc', roomCallsLocal, []);
 
-    // applyEquippedDiscCosmetics / playGoalAnimation, called directly (as
-    // gameManagement.js/movement.js would on join/team-change/goal).
+    // applyTeamForms: a side's color comes from its captain (teamRed[0]/
+    // teamBlue[0], per team/choosing.js's own "captain" concept) — with a
+    // single player on each side right now, that player IS the captain.
+    // Applied via one room.setTeamColors(team, ...) call per side, not
+    // touched per player.
+    // Reset Blue1's form from the earlier !equip test above — this block
+    // starts from a clean "only red has a form" baseline.
+    await db.setEquipped('AUTH_BLUE1', 'form', null);
     await db.buyItem('AUTH_RED1', 'Red1', 'gold', 0);
     await db.setEquipped('AUTH_RED1', 'form', 'gold');
     roomCallsLocal.length = 0;
-    await economy.applyEquippedDiscCosmetics({ id: 1, name: 'Red1' });
-    check('applyEquippedDiscCosmetics applies the equipped disc color', roomCallsLocal, [`setPlayerDiscProperties:1:${JSON.stringify({ color: 0xffd700 })}`]);
+    await economy.applyTeamForms();
+    check('applyTeamForms applies the captain\'s form to their whole side via setTeamColors', roomCallsLocal, [
+        `setTeamColors:${Team.RED}:${JSON.stringify([0xffd700])}`,
+        `setTeamColors:${Team.BLUE}:${JSON.stringify([0x6a8ef5])}`,
+    ]);
 
-    // Blue1 has BOTH a form (none equipped) and a size (small) at this
-    // point — only size should show up in the applied properties.
+    // Same form on both sides -> red keeps home, blue switches to away
+    // instead of wearing an identical color.
+    await db.buyItem('AUTH_BLUE1', 'Blue1', 'gold', 0);
+    await db.setEquipped('AUTH_BLUE1', 'form', 'gold');
     roomCallsLocal.length = 0;
-    await economy.applyEquippedDiscCosmetics({ id: 2, name: 'Blue1' });
-    check('applyEquippedDiscCosmetics applies only the slots that are actually equipped', roomCallsLocal, [`setPlayerDiscProperties:2:${JSON.stringify({ radius: 12 })}`]);
+    await economy.applyTeamForms();
+    check('applyTeamForms gives red the home color when both sides pick the same form', roomCallsLocal.includes(`setTeamColors:${Team.RED}:${JSON.stringify([0xffd700])}`), true);
+    check('applyTeamForms switches blue to the away color to avoid twinning', roomCallsLocal.includes(`setTeamColors:${Team.BLUE}:${JSON.stringify([0x1a1a1a])}`), true);
 
-    await db.setEquipped('AUTH_RED1', 'size', 'small');
+    // Different forms on each side -> both wear their own home color, no clash.
+    await db.setEquipped('AUTH_BLUE1', 'form', 'violet');
     roomCallsLocal.length = 0;
-    await economy.applyEquippedDiscCosmetics({ id: 1, name: 'Red1' });
-    check('applyEquippedDiscCosmetics combines form + size into one call', roomCallsLocal, [`setPlayerDiscProperties:1:${JSON.stringify({ color: 0xffd700, radius: 12 })}`]);
+    await economy.applyTeamForms();
+    check('applyTeamForms lets each side wear its own home color when the forms differ', roomCallsLocal, [
+        `setTeamColors:${Team.RED}:${JSON.stringify([0xffd700])}`,
+        `setTeamColors:${Team.BLUE}:${JSON.stringify([0x8a2be2])}`,
+    ]);
 
+    // Captain has no form equipped -> falls back to a random teammate who
+    // does, not just "no form for the side".
+    state.teamRed = [{ id: 4, name: 'Captain' }, { id: 1, name: 'Red1' }];
+    authArray[4] = ['AUTH_CAPTAIN'];
     roomCallsLocal.length = 0;
-    await economy.applyEquippedDiscCosmetics({ id: 3, name: 'Empty' });
-    check('applyEquippedDiscCosmetics is a no-op with nothing equipped in either slot', roomCallsLocal, []);
+    await economy.applyTeamForms();
+    check('applyTeamForms falls back to a teammate\'s form when the captain has none equipped', roomCallsLocal.includes(`setTeamColors:${Team.RED}:${JSON.stringify([0xffd700])}`), true);
+    state.teamRed = [{ id: 1, name: 'Red1' }];
+
+    // Nobody on a side has any form equipped -> falls back to the default
+    // team colors, clearing any stale color from before rather than
+    // silently leaving it in place (setTeamColors doesn't auto-revert).
+    await db.setEquipped('AUTH_RED1', 'form', null);
+    roomCallsLocal.length = 0;
+    await economy.applyTeamForms();
+    check('applyTeamForms falls back to the default red color when nobody on it has a form', roomCallsLocal.includes(`setTeamColors:${Team.RED}:${JSON.stringify([0xe56e56])}`), true);
+
+    // announceTeamForms: match-start-only, credits whoever the form actually
+    // came from, and says nothing at all if neither side has a custom form.
+    await db.setEquipped('AUTH_BLUE1', 'form', null);
+    sentLocal.length = 0;
+    await economy.announceTeamForms();
+    check('announceTeamForms says nothing when neither side has a custom form', sentLocal, []);
+
+    await db.setEquipped('AUTH_RED1', 'form', 'gold');
+    await db.setEquipped('AUTH_BLUE1', 'form', 'violet');
+    sentLocal.length = 0;
+    await economy.announceTeamForms();
+    check('announceTeamForms announces both sides, crediting who has the form', sentLocal, [
+        { msg: 'Форма красных: Золотой (Red1), синих: Фиолетовый (Blue1)', id: null },
+    ]);
+
+    await db.setEquipped('AUTH_BLUE1', 'form', null);
+    sentLocal.length = 0;
+    await economy.announceTeamForms();
+    check('announceTeamForms only mentions the side that actually has a form', sentLocal, [
+        { msg: 'Форма красных: Золотой (Red1)', id: null },
+    ]);
+
+    // Captain has no form, falls back to a teammate — the announcement must
+    // credit the teammate who actually owns it, not the captain.
+    await db.setEquipped('AUTH_RED1', 'form', null);
+    await db.setEquipped('AUTH_CAPTAIN', 'form', null);
+    state.teamRed = [{ id: 4, name: 'Captain' }, { id: 1, name: 'Red1' }];
+    await db.setEquipped('AUTH_RED1', 'form', 'gold');
+    sentLocal.length = 0;
+    await economy.announceTeamForms();
+    check('announceTeamForms credits the teammate the form fell back to, not the captain', sentLocal, [
+        { msg: 'Форма красных: Золотой (Red1)', id: null },
+    ]);
+    state.teamRed = [{ id: 1, name: 'Red1' }];
+    await db.setEquipped('AUTH_RED1', 'form', null);
 
     roomCallsLocal.length = 0;
     await economy.playGoalAnimation({ id: 2, name: 'Blue1' });
@@ -1479,6 +1918,17 @@ console.log('\n--- core/economy.js: coin awards, playtime ticker, shop/inventory
     roomCallsLocal.length = 0;
     await economy.playGoalAnimation({ id: 1, name: 'Red1' });
     check('playGoalAnimation is a no-op with nothing equipped', roomCallsLocal, []);
+
+    // playGoalSizeEffect: Blue1 has 'small' equipped (from the !equip test
+    // above) — briefly swaps the radius in, captured from the disc's own
+    // CURRENT properties (mocked at radius 15 here), not a hardcoded default.
+    roomCallsLocal.length = 0;
+    await economy.playGoalSizeEffect({ id: 2, name: 'Blue1' });
+    check('playGoalSizeEffect applies the equipped radius', roomCallsLocal, [`setPlayerDiscProperties:2:${JSON.stringify({ radius: 12 })}`]);
+
+    roomCallsLocal.length = 0;
+    await economy.playGoalSizeEffect({ id: 1, name: 'Red1' });
+    check('playGoalSizeEffect is a no-op with nothing equipped', roomCallsLocal, []);
 
     // addCoinsCommand: a testing/support tool, not player-facing (role
     // gating to Role.MASTER happens at the dispatch layer in commands.js,
@@ -1514,9 +1964,11 @@ console.log('\n--- core/economy.js: coin awards, playtime ticker, shop/inventory
 // The movement.js leave broadcast fires from inside a 10ms setTimeout, the
 // overflowPassword rotation check above waits 150ms for real interval
 // ticks, the balance.js stadium-switch checks chain four 20ms steps (up to
-// 80ms), and the announcements loop-back check above waits 250ms for
-// interval ticks — give all of them time to run before tallying and exiting.
+// 80ms), the announcements loop-back check above waits 250ms for interval
+// ticks, and the handlePlayersStop 5-player regression runs three 350ms
+// waits back to back (~1050ms) — give all of them time to run before
+// tallying and exiting.
 setTimeout(() => {
     console.log(`\n${pass} passed, ${fail} failed`);
     process.exit(fail ? 1 : 0);
-}, 400);
+}, 1200);

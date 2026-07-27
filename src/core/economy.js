@@ -3,12 +3,27 @@
  * (see core/shopItems.js for the catalog) worn via !equip and shown in
  * !inventory.
  *
- * Three independent equip slots — 'form' (a disc color override), 'size' (a
- * disc radius override — also the real physics collision radius, not purely
- * cosmetic) and 'goalAnimation' (a brief avatar flash on scoring, reverted a
- * few seconds later) — so owning/wearing one never touches the others. An
- * item's `type` is always the same string as its slot name, so no mapping
- * table is needed between the two.
+ * Three independent equip slots — 'form', 'size' and 'goalAnimation' — so
+ * owning/wearing one never touches the others. An item's `type` is always
+ * the same string as its slot name, so no mapping table is needed between
+ * the two.
+ *
+ * 'size' and 'goalAnimation' are both personal, per-player, POST-GOAL-ONLY
+ * effects — a radius bump and an avatar flash respectively, triggered on the
+ * scorer at the moment they score and reverted a few seconds later. Neither
+ * is ever applied while a match is actually being played, on purpose: 'size'
+ * changes the real physics collision radius, so making it a standing equip
+ * would mean spending coins to change the game's balance. Confined to the
+ * celebration window, it never affects ongoing play (see playGoalSizeEffect).
+ *
+ * 'form' is NOT personal — it's a whole-SIDE decision, applied with a single
+ * room.setTeamColors(team, angle, textColor, colors) call per side rather
+ * than touching individual players' discs. A side wears whichever form its
+ * captain (state.teamRed[0]/state.teamBlue[0]) has equipped, or a random
+ * pick among teammates who have one if the captain doesn't (see
+ * determineSideForm). If both sides land on the same form, red wears its
+ * home color and blue switches to its away color so they're never identical
+ * (see applyTeamForms).
  *
  * Mutable room state is reached through `state`, never captured by value.
  */
@@ -24,18 +39,32 @@ module.exports = function createEconomy({
     announcementColor,
     errorColor,
     formatCoins,
+    getRandomInt,
 }) {
     const WIN_COINS = 50;
     const LOSS_COINS = 25;
     const PLAYTIME_INTERVAL_SECONDS = 10 * 60;
     const PLAYTIME_COINS = 10;
-    const GOAL_ANIMATION_DURATION_MS = 3000;
+    const GOAL_CELEBRATION_DURATION_MS = 3000;
 
     const itemsById = new Map(items.map((item) => [item.id, item]));
     const CATEGORY_LABELS = { form: 'Формы', size: 'Размер', goalAnimation: 'Анимации гола' };
 
     function getAuth(player) {
         return authArray[player.id][0];
+    }
+
+    // Private to the player only (id, not null) — nobody else needs to see
+    // every payout scroll past in the room chat. "Баланс: X (+Y монеток)"
+    // per the requested format: new total first, the just-earned delta after.
+    function notifyCoinsEarned(player, amount, newBalance) {
+        room.sendAnnouncement(
+            `💰 Баланс: ${newBalance} (+${formatCoins(amount)})`,
+            player.id,
+            announcementColor,
+            'bold',
+            HaxNotification.CHAT
+        );
     }
 
     /* COIN AWARDS */
@@ -46,17 +75,21 @@ module.exports = function createEconomy({
     // meant to reward any play. A draw (Team.SPECTATORS) pays everyone the
     // loss rate — nobody "won", so nobody gets the win rate either.
     async function awardMatchCoins(winner) {
+        async function payAndNotify(player, amount) {
+            const auth = getAuth(player);
+            await db.addCoins(auth, player.name, amount);
+            const newBalance = await db.getBalance(auth);
+            notifyCoinsEarned(player, amount, newBalance);
+        }
         if (winner === Team.SPECTATORS) {
-            await Promise.all(
-                [...state.teamRed, ...state.teamBlue].map((player) => db.addCoins(getAuth(player), player.name, LOSS_COINS))
-            );
+            await Promise.all([...state.teamRed, ...state.teamBlue].map((player) => payAndNotify(player, LOSS_COINS)));
             return;
         }
         const winners = winner === Team.RED ? state.teamRed : state.teamBlue;
         const losers = winner === Team.RED ? state.teamBlue : state.teamRed;
         await Promise.all([
-            ...winners.map((player) => db.addCoins(getAuth(player), player.name, WIN_COINS)),
-            ...losers.map((player) => db.addCoins(getAuth(player), player.name, LOSS_COINS)),
+            ...winners.map((player) => payAndNotify(player, WIN_COINS)),
+            ...losers.map((player) => payAndNotify(player, LOSS_COINS)),
         ]);
     }
 
@@ -74,7 +107,10 @@ module.exports = function createEconomy({
             const auth = getAuth(player);
             const accumulated = (playtimeSecondsSinceLastPayout.get(auth) ?? 0) + elapsedSeconds;
             if (accumulated >= PLAYTIME_INTERVAL_SECONDS) {
-                db.addCoins(auth, player.name, PLAYTIME_COINS).catch((err) => console.error('[economy] addCoins (playtime) failed:', err));
+                db.addCoins(auth, player.name, PLAYTIME_COINS)
+                    .then(() => db.getBalance(auth))
+                    .then((newBalance) => notifyCoinsEarned(player, PLAYTIME_COINS, newBalance))
+                    .catch((err) => console.error('[economy] addCoins (playtime) failed:', err));
                 playtimeSecondsSinceLastPayout.set(auth, accumulated - PLAYTIME_INTERVAL_SECONDS);
             } else {
                 playtimeSecondsSinceLastPayout.set(auth, accumulated);
@@ -84,20 +120,80 @@ module.exports = function createEconomy({
 
     /* COSMETIC APPLICATION */
 
-    // Covers both disc-property slots (form's color, size's radius) in one
-    // call — HaxBall resets a disc's custom properties on stadium changes/
-    // restarts, so this needs re-calling whenever a player actually lands on
-    // a team (join-then-balanced, mid-game swap, a fresh match), not just once.
-    async function applyEquippedDiscCosmetics(player) {
-        const equipped = await db.getEquipped(getAuth(player));
-        const discProperties = {};
-        const formItem = equipped.form && itemsById.get(equipped.form);
-        if (formItem) discProperties.color = formItem.color;
-        const sizeItem = equipped.size && itemsById.get(equipped.size);
-        if (sizeItem) discProperties.radius = sizeItem.radius;
-        if (Object.keys(discProperties).length > 0) {
-            room.setPlayerDiscProperties(player.id, discProperties);
+    // A side's form isn't a personal choice — it's whichever form item its
+    // captain (state.teamRed[0]/state.teamBlue[0], the same "captain" concept
+    // team/choosing.js already uses for picking) has equipped, or — if the
+    // captain hasn't equipped one — a random pick among teammates who have.
+    // Returns { item, sourcePlayer } (not just a color) — the caller still
+    // needs to decide home/away, and announceTeamForms below needs to credit
+    // whoever the form actually came from.
+    async function determineSideForm(teamPlayers) {
+        if (teamPlayers.length === 0) return null;
+        const captain = teamPlayers[0];
+        const captainEquipped = await db.getEquipped(getAuth(captain));
+        if (captainEquipped.form) {
+            const item = itemsById.get(captainEquipped.form);
+            return item ? { item, sourcePlayer: captain } : null;
         }
+
+        const equippedList = await Promise.all(teamPlayers.map((p) => db.getEquipped(getAuth(p))));
+        const candidates = teamPlayers
+            .map((player, i) => ({ player, formId: equippedList[i].form }))
+            .filter((c) => c.formId);
+        if (candidates.length === 0) return null;
+        const chosen = candidates[getRandomInt(candidates.length)];
+        const item = itemsById.get(chosen.formId);
+        return item ? { item, sourcePlayer: chosen.player } : null;
+    }
+
+    // room.setTeamColors(team, angle, textColor, colors) sets a whole side's
+    // jersey in one call — no need to touch individual players' discs at
+    // all. Fallen back to whenever a side has no form active, so a side
+    // never keeps wearing a stale color from before its last form-owner
+    // left/switched (setTeamColors doesn't auto-revert on its own).
+    const DEFAULT_TEAM_ANGLE = 0;
+    const DEFAULT_TEAM_TEXT_COLOR = 0xffffff;
+    const DEFAULT_RED_COLORS = [0xe56e56];
+    const DEFAULT_BLUE_COLORS = [0x6a8ef5];
+
+    // Recomputes and re-applies BOTH sides' colors — call this on any roster
+    // change to either team (a new captain, a teammate joining/leaving that
+    // changes the random-fallback pool, etc.), not just for whoever actually
+    // moved, since it also has to re-check whether the two sides now clash.
+    // Returns what it determined for each side (or null) so announceTeamForms
+    // below can reuse the same computation instead of querying the DB again.
+    async function applyTeamForms() {
+        const [red, blue] = await Promise.all([
+            determineSideForm(state.teamRed),
+            determineSideForm(state.teamBlue),
+        ]);
+
+        let redColor = red ? red.item.homeColor : null;
+        let blueColor = blue ? blue.item.homeColor : null;
+        // Same form on both sides would mean identical colors — red keeps
+        // home, blue switches to its away variant so they're never twinning.
+        if (red && blue && red.item.id === blue.item.id) {
+            blueColor = blue.item.awayColor;
+        }
+
+        room.setTeamColors(Team.RED, DEFAULT_TEAM_ANGLE, DEFAULT_TEAM_TEXT_COLOR, redColor != null ? [redColor] : DEFAULT_RED_COLORS);
+        room.setTeamColors(Team.BLUE, DEFAULT_TEAM_ANGLE, DEFAULT_TEAM_TEXT_COLOR, blueColor != null ? [blueColor] : DEFAULT_BLUE_COLORS);
+
+        return { red, blue };
+    }
+
+    // Match-start-only announcement (unlike applyTeamForms, which also runs
+    // silently on every roster change) — credits whoever the form actually
+    // came from (the captain, or the teammate it fell back to), not just
+    // "the side has this form". Says nothing at all if neither side has any
+    // custom form in play.
+    async function announceTeamForms() {
+        const { red, blue } = await applyTeamForms();
+        if (!red && !blue) return;
+        const parts = [];
+        if (red) parts.push(`красных: ${red.item.name} (${red.sourcePlayer.name})`);
+        if (blue) parts.push(`синих: ${blue.item.name} (${blue.sourcePlayer.name})`);
+        room.sendAnnouncement(`Форма ${parts.join(', ')}`, null, announcementColor, 'bold', HaxNotification.CHAT);
     }
 
     // Not a persistent look — briefly swaps the scorer's avatar in, then back
@@ -114,7 +210,29 @@ module.exports = function createEconomy({
             if (state.playersAll.some((p) => p.id === player.id)) {
                 room.setPlayerAvatar(player.id, null);
             }
-        }, GOAL_ANIMATION_DURATION_MS);
+        }, GOAL_CELEBRATION_DURATION_MS);
+    }
+
+    // Same idea as playGoalAnimation, but for the scorer's disc radius —
+    // deliberately never applied at any other time (no re-apply on join/team
+    // change/match start), since 'size' is a real physics collision radius
+    // and this is a coin-shop cosmetic, not a paid gameplay advantage.
+    // Restores the EXACT radius the player had a moment ago (captured live
+    // via getPlayerDiscProperties) rather than some assumed map default, so
+    // it's correct regardless of stadium or any other effect already in play.
+    async function playGoalSizeEffect(player) {
+        const equipped = await db.getEquipped(getAuth(player));
+        if (!equipped.size) return;
+        const item = itemsById.get(equipped.size);
+        if (!item) return;
+        const original = room.getPlayerDiscProperties(player.id);
+        if (!original) return;
+        room.setPlayerDiscProperties(player.id, { radius: item.radius });
+        setTimeout(() => {
+            if (state.playersAll.some((p) => p.id === player.id)) {
+                room.setPlayerDiscProperties(player.id, { radius: original.radius });
+            }
+        }, GOAL_CELEBRATION_DURATION_MS);
     }
 
     /* COMMANDS */
@@ -168,6 +286,11 @@ module.exports = function createEconomy({
         room.sendAnnouncement(`✔️ Куплено: ${item.name} за ${formatCoins(item.price)} !`, player.id, announcementColor, 'bold', HaxNotification.CHAT);
     }
 
+    async function balanceCommand(player, message) {
+        const balance = await db.getBalance(getAuth(player));
+        room.sendAnnouncement(`💰 Ваш баланс: ${formatCoins(balance)}`, player.id, announcementColor, 'bold', HaxNotification.CHAT);
+    }
+
     async function inventoryCommand(player, message) {
         const auth = getAuth(player);
         const owned = await db.getOwnedItemIds(auth);
@@ -202,7 +325,13 @@ module.exports = function createEconomy({
             return;
         }
         await db.setEquipped(auth, item.type, item.id);
-        if (item.type === 'form' || item.type === 'size') await applyEquippedDiscCosmetics(player);
+        // A form is a whole-side decision, not personal — equipping one can
+        // change what the player's ENTIRE team wears (if they're the
+        // captain, or the only form-owner on their side), so this
+        // recomputes both sides rather than just re-applying to `player`.
+        // 'size' has no immediate effect at all — it only ever shows up on
+        // this player's next goal (see playGoalSizeEffect).
+        if (item.type === 'form') await applyTeamForms();
         room.sendAnnouncement(`✔️ Надето: ${item.name} !`, player.id, announcementColor, 'bold', HaxNotification.CHAT);
     }
 
@@ -250,11 +379,14 @@ module.exports = function createEconomy({
     return {
         awardMatchCoins,
         tickPlaytime,
-        applyEquippedDiscCosmetics,
+        applyTeamForms,
+        announceTeamForms,
         playGoalAnimation,
+        playGoalSizeEffect,
         shopCommand,
         inventoryCommand,
         equipCommand,
         addCoinsCommand,
+        balanceCommand,
     };
 };

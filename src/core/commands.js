@@ -35,6 +35,7 @@ module.exports = function createCommands({
     inventoryCommand,
     equipCommand,
     addCoinsCommand,
+    balanceCommand,
 }) {
     return {
 
@@ -160,6 +161,13 @@ module.exports = function createCommands({
         desc: `
         Эта команда показывает купленные вами аксессуары.`,
         function: inventoryCommand,
+    },
+    balance: {
+        aliases: ['bal', 'coins'],
+        roles: Role.PLAYER,
+        desc: `
+        Эта команда показывает ваш баланс монеток.`,
+        function: balanceCommand,
     },
     equip: {
         aliases: [],

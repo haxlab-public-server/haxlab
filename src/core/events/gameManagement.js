@@ -20,7 +20,7 @@ module.exports = function createGameManagementEvents({
     mentionPlayersUnpause,
     redColor,
     teamSize,
-    applyEquippedDiscCosmetics,
+    announceTeamForms,
     calculateStadiumVariables,
     deactivateChooseMode,
     endGame,
@@ -33,6 +33,7 @@ module.exports = function createGameManagementEvents({
     handleActivityStop,
     handlePlayersStop,
     playGoalAnimation,
+    playGoalSizeEffect,
     updateTeams,
 }) {
     function onGameStart(byPlayer) {
@@ -55,14 +56,16 @@ module.exports = function createGameManagementEvents({
                 state.teamBlueStats.push(state.teamBlue[i]);
             }
         }
-        // Defensive re-apply: HaxBall can reset a disc's custom properties
-        // (color, radius) across a stadium change/restart, independent of
-        // any team-change event — a fresh match start is the other moment
-        // (alongside movement.js's onPlayerTeamChange) a worn form/size
-        // could otherwise silently fall off.
-        for (const player of [...state.teamRed, ...state.teamBlue]) {
-            applyEquippedDiscCosmetics(player).catch((err) => console.error('[economy] applyEquippedDiscCosmetics failed:', err));
-        }
+        // Defensive re-apply: HaxBall can reset a disc's custom color across
+        // a stadium change/restart, independent of any team-change event — a
+        // fresh match start is the other moment (alongside movement.js's
+        // onPlayerTeamChange) a worn form could otherwise silently fall off.
+        // announceTeamForms (not the silent applyTeamForms movement.js uses
+        // on every roster change) since a genuine match start is
+        // specifically when players should be told what forms are in play
+        // this round. 'size' has no standing state to re-apply here at all —
+        // see playGoalSizeEffect's doc comment in economy.js.
+        announceTeamForms().catch((err) => console.error('[economy] announceTeamForms failed:', err));
         calculateStadiumVariables();
     }
 
@@ -181,6 +184,7 @@ module.exports = function createGameManagementEvents({
         const scorer = state.lastTouches[0]?.player;
         if (scorer != null && scorer.team === team) {
             playGoalAnimation(scorer).catch((err) => console.error('[economy] playGoalAnimation failed:', err));
+            playGoalSizeEffect(scorer).catch((err) => console.error('[economy] playGoalSizeEffect failed:', err));
         }
         if ((scores.scoreLimit != 0 && (scores.red == scores.scoreLimit || scores.blue == scores.scoreLimit)) || state.goldenGoal) {
             endGame(team);

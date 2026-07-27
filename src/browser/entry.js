@@ -235,12 +235,15 @@ const createEconomy = require('../core/economy');
 const {
     awardMatchCoins,
     tickPlaytime,
-    applyEquippedDiscCosmetics,
+    applyTeamForms,
+    announceTeamForms,
     playGoalAnimation,
+    playGoalSizeEffect,
     shopCommand,
     inventoryCommand,
     equipCommand,
     addCoinsCommand,
+    balanceCommand,
 } = createEconomy({
     room,
     state,
@@ -253,6 +256,7 @@ const {
     announcementColor,
     errorColor,
     formatCoins,
+    getRandomInt,
 });
 
 const PLAYTIME_TICK_INTERVAL_SECONDS = 60;
@@ -1064,6 +1068,7 @@ const commands = createCommands({
     inventoryCommand,
     equipCommand,
     addCoinsCommand,
+    balanceCommand,
 });
 
 stadiumCommand(emptyPlayer, "!training");
@@ -1099,7 +1104,7 @@ Object.assign(room, wrapEventHandlers(createMovementEvents({
     maxPlayers,
     welcomeColor,
     getDate,
-    applyEquippedDiscCosmetics,
+    applyTeamForms,
     checkCaptainLeave,
     checkOverflowPassword,
     getRole,
@@ -1164,7 +1169,7 @@ Object.assign(room, wrapEventHandlers(createGameManagementEvents({
     mentionPlayersUnpause,
     redColor,
     teamSize,
-    applyEquippedDiscCosmetics,
+    announceTeamForms,
     calculateStadiumVariables,
     deactivateChooseMode,
     endGame,
@@ -1177,6 +1182,7 @@ Object.assign(room, wrapEventHandlers(createGameManagementEvents({
     handleActivityStop,
     handlePlayersStop,
     playGoalAnimation,
+    playGoalSizeEffect,
     updateTeams,
 })));
 

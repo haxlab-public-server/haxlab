@@ -4,28 +4,37 @@
  *
  * Each item needs:
  *   id    — short, unique across ALL types (typed in chat: "!shop fire").
- *   type  — 'form' (disc color, applied via room.setPlayerDiscProperties),
- *           'size' (disc radius, same API — see the note below), or
- *           'goalAnimation' (a brief avatar flash on scoring a goal, via
- *           room.setPlayerAvatar — reverted a few seconds later).
+ *   type  — 'form' (a whole SIDE's disc color, not per-player — see below),
+ *           'size' (a brief disc radius bump on the SCORER only, the moment
+ *           they score, via room.setPlayerDiscProperties — never a standing
+ *           effect, see economy.js's playGoalSizeEffect), or 'goalAnimation'
+ *           (a brief avatar flash on scoring a goal, via
+ *           room.setPlayerAvatar). Both 'size' and 'goalAnimation' revert a
+ *           few seconds later.
  *   name  — shown in !shop/!inventory.
  *   price — in coins.
- *   color — required for type: 'form'. A 0xRRGGBB disc color.
- *   radius — required for type: 'size'. HaxBall's default player radius is
- *            15 — keep these within shouting distance of that (this isn't
- *            just cosmetic, it's the real physics collision radius, so a
- *            wildly bigger/smaller disc is a genuine gameplay advantage, not
- *            just a look).
+ *   homeColor/awayColor — required for type: 'form'. 0xRRGGBB disc colors.
+ *            A side's form is whichever item ITS captain (state.teamRed[0]/
+ *            state.teamBlue[0]) has equipped — or, if the captain has none,
+ *            a random pick among teammates who do (see economy.js's
+ *            determineSideForm). Normally a side wears its form's homeColor;
+ *            if red and blue land on the SAME form, red keeps homeColor and
+ *            blue switches to awayColor so they're never wearing an
+ *            identical color.
+ *   radius — required for type: 'size'. Only ever applied for the few-second
+ *            goal celebration window, never during actual play, precisely so
+ *            this can't become a paid gameplay advantage — it's fine for
+ *            these to be dramatic (small/huge) since it's purely a flex.
  *   avatar — required for type: 'goalAnimation'. A short string/emoji.
  */
 module.exports = [
-    { id: 'crimson', type: 'form', name: 'Багровый', price: 150, color: 0xdc143c },
-    { id: 'gold', type: 'form', name: 'Золотой', price: 300, color: 0xffd700 },
-    { id: 'emerald', type: 'form', name: 'Изумрудный', price: 300, color: 0x50c878 },
-    { id: 'violet', type: 'form', name: 'Фиолетовый', price: 450, color: 0x8a2be2 },
+    { id: 'crimson', type: 'form', name: 'Багровый', price: 150, homeColor: 0xdc143c, awayColor: 0xffffff },
+    { id: 'gold', type: 'form', name: 'Золотой', price: 300, homeColor: 0xffd700, awayColor: 0x1a1a1a },
+    { id: 'emerald', type: 'form', name: 'Изумрудный', price: 300, homeColor: 0x50c878, awayColor: 0xffffff },
+    { id: 'violet', type: 'form', name: 'Фиолетовый', price: 450, homeColor: 0x8a2be2, awayColor: 0xffd700 },
 
-    { id: 'small', type: 'size', name: 'Малыш', price: 300, radius: 12 },
-    { id: 'big', type: 'size', name: 'Здоровяк', price: 300, radius: 18 },
+    { id: 'small', type: 'size', name: 'Малыш', price: 200, radius: 8 },
+    { id: 'big', type: 'size', name: 'Здоровяк', price: 200, radius: 20 },
 
     { id: 'fire', type: 'goalAnimation', name: 'Огонь', price: 150, avatar: '🔥' },
     { id: 'star', type: 'goalAnimation', name: 'Звезда', price: 150, avatar: '⭐' },

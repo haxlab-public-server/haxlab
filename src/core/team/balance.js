@@ -233,6 +233,17 @@ module.exports = function createTeamBalance({
             if (Math.abs(state.teamRed.length - state.teamBlue.length) == state.teamSpec.length) {
                 deactivateChooseMode();
                 resumeGame();
+                // Choose mode only ever activates at a full house, so a
+                // completion here is always 3v3-or-bigger territory — needs
+                // the big map same as handlePlayersStop's equivalent full-
+                // house branch does. This path resumes play directly
+                // (no game stop/restart in between), so unlike that branch
+                // nothing else was ever going to catch a stale classic map here.
+                if (state.currentStadium != 'big') {
+                    setTimeout(() => {
+                        stadiumCommand(emptyPlayer, `!big`);
+                    }, 5);
+                }
                 const b = state.teamSpec.length;
                 if (state.teamRed.length > state.teamBlue.length) {
                     for (let i = 0; i < b; i++) {
@@ -264,6 +275,15 @@ module.exports = function createTeamBalance({
             ) {
                 deactivateChooseMode();
                 resumeGame();
+                // Same reasoning as the completion branch above: choose mode
+                // only ever activates at a full house, so this is always
+                // 3v3-or-bigger, and nothing else runs a stop/restart here
+                // to catch a stale classic map on its own.
+                if (state.currentStadium != 'big') {
+                    setTimeout(() => {
+                        stadiumCommand(emptyPlayer, `!big`);
+                    }, 5);
+                }
             } else if (state.teamRed.length <= state.teamBlue.length && state.redCaptainChoice != '') {
                 if (state.redCaptainChoice == 'top') {
                     room.setPlayerTeam(state.teamSpec[0].id, Team.RED);
@@ -318,11 +338,16 @@ module.exports = function createTeamBalance({
                         room.startGame();
                     }, 2000);
                 } else {
-                    // Any other count while choose mode is active (9, 10, ...
-                    // up to whatever's in the room) is still a 4v4-or-bigger
-                    // situation by definition — choose mode only ever turns on
-                    // at a full 4v4 house — so this must be on the big map too.
-                    if (state.currentStadium != 'big') {
+                    // Any other count while choose mode is active isn't only
+                    // ever "bigger than a full house" (9, 10, ...) — choose
+                    // mode stays on as people leave mid-match too, so this
+                    // also covers a shrunk-down count like 5 or 6 (see
+                    // handlePlayersLeave's own `players.length == 5` case
+                    // just above). Only actually switch to the big map for a
+                    // genuinely oversized house; a shrunk-down house keeps
+                    // whatever map it's already on (matching the plain
+                    // 3/5/9+ branch below).
+                    if (state.players.length >= 2 * teamSize + 1 && state.currentStadium != 'big') {
                         setTimeout(() => {
                             stadiumCommand(emptyPlayer, `!big`);
                         }, 5);
@@ -339,12 +364,19 @@ module.exports = function createTeamBalance({
                     }
                     clearTimeout(state.insertingTimeout);
                     state.insertingPlayers = true;
-                    setTimeout(() => {
-                        topButton();
-                    }, 300);
+                    // Same reasoning as the plain 3/5/9+ branch below: one
+                    // topButton() call only pulls in a single spectator,
+                    // which stranded the rest of a benched bigger team
+                    // instead of refilling properly. Loop once per spectator.
+                    const spectatorsToInsert = state.teamSpec.length;
+                    for (let i = 0; i < spectatorsToInsert; i++) {
+                        setTimeout(() => {
+                            topButton();
+                        }, 300 + 5 * i);
+                    }
                     state.insertingTimeout = setTimeout(() => {
                         state.insertingPlayers = false;
-                    }, 300);
+                    }, 300 + 5 * spectatorsToInsert);
                 }
             } else {
                 if (state.players.length == 2) {
@@ -378,12 +410,26 @@ module.exports = function createTeamBalance({
                     }
                     clearTimeout(state.insertingTimeout);
                     state.insertingPlayers = true;
-                    setTimeout(() => {
-                        topButton();
-                    }, 200);
+                    // One topButton() call only ever pulls in a single
+                    // spectator — fine when the losing side had just one
+                    // player to begin with, but benching a bigger losing
+                    // side (e.g. a 3v2 down to 5 total) left the rest
+                    // stranded in spectators instead of playing, settling on
+                    // something like 2v1/3v1 instead of the 3v2 those 5
+                    // players could actually fill. Looping once per
+                    // spectator (each call only ever needs one more to place,
+                    // since it re-reads the live roster every time) drains
+                    // them all, same "b" pattern the full-house branch above
+                    // uses for randomButton().
+                    const spectatorsToInsert = state.teamSpec.length;
+                    for (let i = 0; i < spectatorsToInsert; i++) {
+                        setTimeout(() => {
+                            topButton();
+                        }, 200 + 5 * i);
+                    }
                     state.insertingTimeout = setTimeout(() => {
                         state.insertingPlayers = false;
-                    }, 300);
+                    }, 300 + 5 * spectatorsToInsert);
                     state.startTimeout = setTimeout(() => {
                         room.startGame();
                     }, 2000);
