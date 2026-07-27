@@ -32,6 +32,21 @@ module.exports = function createTeamBalance({
     topButton,
 }) {
     function balanceTeams() {
+        // Self-heal a chooseMode session that's stuck true below the
+        // threshold it needs (a full-or-bigger house) — not just here for
+        // handlePlayersLeave's own leave-triggered version of this same
+        // check, but for EVERY caller of balanceTeams(), including
+        // handlePlayersJoin(). Once chooseMode is stuck, balanceTeams()
+        // itself is a no-op (see the guard right below) for as long as it
+        // stays stuck — so a room that got stuck small via leaves, then
+        // simply had people JOIN back up afterward, would otherwise stay
+        // parked with every new joiner piling into spectators forever:
+        // nothing about a join alone was ever guaranteed to satisfy the
+        // diff/specLen completion checks that would normally clear it.
+        if (state.chooseMode && state.players.length < 2 * teamSize) {
+            deactivateChooseMode();
+            resumeGame();
+        }
         if (!state.chooseMode) {
             if (state.players.length == 0) {
                 room.stopGame();
@@ -135,15 +150,24 @@ module.exports = function createTeamBalance({
                 const stadiumCap = state.currentStadium == 'classic' ? 2 : teamSize;
                 const slotsAvailable = stadiumCap - state.teamRed.length;
                 const n = Math.min(slotsAvailable, Math.floor(state.teamSpec.length / 2));
-                // Both moves index [0], not [2*i]/[2*i+1] — same
-                // shrinking-array hazard as above: the RED move already
-                // shifts whoever was next down into slot 0, so the BLUE
-                // move must re-read [0] too, not the stale [2*i+1] (which
-                // either grabbed the wrong player or ran off the end of the
-                // array once i > 0).
-                for (let i = 0; i < n; i++) {
-                    room.setPlayerTeam(state.teamSpec[0].id, Team.RED);
-                    room.setPlayerTeam(state.teamSpec[0].id, Team.BLUE);
+                // One real tick apart (setTimeout), alternating RED/BLUE,
+                // not n pairs of back-to-back same-tick calls. Always index
+                // [0] — room.setPlayerTeam fires room.onPlayerTeamChange,
+                // which calls updateTeams() and replaces state.teamSpec
+                // with a fresh array, so [0] naturally lands on whoever's
+                // next after each move — but back-to-back calls with zero
+                // gap weren't reliably enough for that replacement to have
+                // actually happened by the very next call in production:
+                // the second call in a pair could still see the SAME
+                // just-moved player at [0] and yank them from RED onto BLUE
+                // instead of picking the next spectator, leaving red short
+                // one and the real next-in-line stuck spectating (a 3v3
+                // growing to 3v4 instead of 4v4, one waiting spectator
+                // ignored).
+                for (let i = 0; i < 2 * n; i++) {
+                    setTimeout(() => {
+                        room.setPlayerTeam(state.teamSpec[0].id, i % 2 === 0 ? Team.RED : Team.BLUE);
+                    }, 5 * i);
                 }
             }
         }
@@ -188,6 +212,29 @@ module.exports = function createTeamBalance({
             }
         }
         if (state.chooseMode) {
+            // Choose mode's whole premise (a full-or-bigger house, letting
+            // captains hand-pick from genuine surplus) no longer holds once
+            // the room has shrunk below that — bail out unconditionally
+            // rather than falling through to the diff/specLen checks below.
+            // Those checks are only guaranteed to eventually fire for
+            // PICKS (each one moves the counts in a tightly self-resolving
+            // way — see determineSideForm's captain-alternation), not for
+            // ordinary LEAVES, which can hit red/blue/spec in any order.
+            // E.g. spectators simply sitting still while active players
+            // keep leaving can walk red/blue/specLen through values where
+            // abs(diff) never lands exactly on specLen and Red never equals
+            // Blue while specLen<2 — chooseMode then stays stuck true
+            // forever. handlePlayersStop has no room.startGame() call for
+            // that stuck (chooseMode true, not a full house) case, so the
+            // room would silently sit parked after the next match ends —
+            // "leave broadcasts fine, kicks are fine, but the room never
+            // starts a new round again" is exactly what that looks like.
+            if (state.players.length < 2 * teamSize) {
+                deactivateChooseMode();
+                resumeGame();
+                balanceTeams();
+                return;
+            }
             if (teamSize > 2 && state.players.length == 5) {
                 setTimeout(() => {
                     stadiumCommand(emptyPlayer, `!classic`);

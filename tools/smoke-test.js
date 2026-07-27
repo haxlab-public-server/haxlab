@@ -835,23 +835,34 @@ console.log('\n--- team/buttons.js: randomButton must not strand a spectator acr
     // actual regression guard, not just a single lucky/unlucky roll.
     const { getRandomInt } = require(path.join(CORE, 'utils'));
     const { randomButton } = require(path.join(CORE, 'team', 'buttons'))({ room: roomMock, state, Team, getRandomInt });
+    const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-    let strandedSomeone = false;
-    for (let trial = 0; trial < 200; trial++) {
-        for (const p of players) p.team = Team.SPECTATORS;
-        state.teamRed = [];
-        state.teamBlue = [];
-        state.teamSpec = [...players];
+    // Each randomButton() call now completes its pair a real tick later
+    // (see buttons.js) — calls must be staggered here too, same as every
+    // production call site already staggers them, or the second call
+    // would fire while the first's own deferred half is still pending.
+    // Fewer trials than before (async waits add up) but still enough to
+    // catch a randomness-dependent regression across many draws.
+    (async () => {
+        let strandedSomeone = false;
+        for (let trial = 0; trial < 50; trial++) {
+            for (const p of players) p.team = Team.SPECTATORS;
+            state.teamRed = [];
+            state.teamBlue = [];
+            state.teamSpec = [...players];
 
-        randomButton();
-        randomButton();
+            randomButton();
+            await wait(10);
+            randomButton();
+            await wait(10);
 
-        if (state.teamRed.length !== 2 || state.teamBlue.length !== 2 || state.teamSpec.length !== 0) {
-            strandedSomeone = true;
-            break;
+            if (state.teamRed.length !== 2 || state.teamBlue.length !== 2 || state.teamSpec.length !== 0) {
+                strandedSomeone = true;
+                break;
+            }
         }
-    }
-    check('two randomButton() calls from 4 spectators always reach a clean 2v2 (200 trials)', strandedSomeone, false);
+        check('two randomButton() calls from 4 spectators always reach a clean 2v2 (50 trials)', strandedSomeone, false);
+    })();
 }
 
 console.log('\n--- team/buttons.js: resetButton/blueToSpecButton/redToSpecButton must clear every player, not just most of them ---');
@@ -943,29 +954,40 @@ console.log('\n--- team/buttons.js: the full "start a fresh 2v2" sequence (reset
 
     const Team = { RED: 1, BLUE: 2, SPECTATORS: 0 };
     const { getRandomInt } = require(path.join(CORE, 'utils'));
+    const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-    let strandedSomeone = false;
-    for (let trial = 0; trial < 200; trial++) {
-        const players = [
-            { id: 1, team: Team.RED }, { id: 2, team: Team.RED },
-            { id: 3, team: Team.BLUE }, { id: 4, team: Team.BLUE },
-        ];
-        const state = { players };
-        state.teamRed = players.filter((p) => p.team === Team.RED);
-        state.teamBlue = players.filter((p) => p.team === Team.BLUE);
-        state.teamSpec = [];
-        const { resetButton, randomButton } = require(path.join(CORE, 'team', 'buttons'))({ room: makeRealisticRoomMock(state, Team), state, Team, getRandomInt });
+    // Same staggering note as the dedicated randomButton() test above:
+    // each call's pair now completes a real tick later, so the two
+    // randomButton() calls (matching handlePlayersStop's own 500ms-apart
+    // staggering in production) must be spaced out here too. Fewer trials
+    // than before (async waits add up) but still enough to catch a
+    // randomness-dependent regression across many draws.
+    (async () => {
+        let strandedSomeone = false;
+        for (let trial = 0; trial < 50; trial++) {
+            const players = [
+                { id: 1, team: Team.RED }, { id: 2, team: Team.RED },
+                { id: 3, team: Team.BLUE }, { id: 4, team: Team.BLUE },
+            ];
+            const state = { players };
+            state.teamRed = players.filter((p) => p.team === Team.RED);
+            state.teamBlue = players.filter((p) => p.team === Team.BLUE);
+            state.teamSpec = [];
+            const { resetButton, randomButton } = require(path.join(CORE, 'team', 'buttons'))({ room: makeRealisticRoomMock(state, Team), state, Team, getRandomInt });
 
-        resetButton();
-        randomButton();
-        randomButton();
+            resetButton();
+            randomButton();
+            await wait(10);
+            randomButton();
+            await wait(10);
 
-        if (state.teamRed.length !== 2 || state.teamBlue.length !== 2 || state.teamSpec.length !== 0) {
-            strandedSomeone = true;
-            break;
+            if (state.teamRed.length !== 2 || state.teamBlue.length !== 2 || state.teamSpec.length !== 0) {
+                strandedSomeone = true;
+                break;
+            }
         }
-    }
-    check('resetButton + 2x randomButton from a just-finished 2v2 always reaches a clean 2v2 (200 trials)', strandedSomeone, false);
+        check('resetButton + 2x randomButton from a just-finished 2v2 always reaches a clean 2v2 (50 trials)', strandedSomeone, false);
+    })();
 }
 
 console.log('\n--- team/buttons.js: topButton pairs up two different spectators, not the same one twice ---');
@@ -986,9 +1008,14 @@ console.log('\n--- team/buttons.js: topButton pairs up two different spectators,
     const state = { players, teamRed: [], teamBlue: [], teamSpec: [...players] };
     const { topButton } = require(path.join(CORE, 'team', 'buttons'))({ room: makeRealisticRoomMock(state, Team), state, Team, getRandomInt: () => 0 });
 
-    topButton();
-    check('topButton fills both slots from 2 spectators', [state.teamRed.length, state.teamBlue.length, state.teamSpec.length], [1, 1, 0]);
-    check('topButton does not assign the same player to both teams', state.teamRed[0].id !== state.teamBlue[0].id, true);
+    // topButton()'s pair branch now completes its second half a real tick
+    // later (see buttons.js) — wait for it before inspecting the result.
+    (async () => {
+        topButton();
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        check('topButton fills both slots from 2 spectators', [state.teamRed.length, state.teamBlue.length, state.teamSpec.length], [1, 1, 0]);
+        check('topButton does not assign the same player to both teams', state.teamRed[0].id !== state.teamBlue[0].id, true);
+    })();
 }
 
 console.log('\n--- team/buttons.js: a lone spectator is left waiting, not forced onto one side, when teams are already even ---');
@@ -1045,17 +1072,27 @@ console.log('\n--- team/balance.js: an already-full match never auto-upgrades to
         players: [{ id: 1 }, { id: 2 }, { id: 3 }, { id: 4 }, { id: 5 }, { id: 6 }],
         currentStadium: 'classic',
     };
-    // A realistic setPlayerTeam, not the shared dumb room's plain recorder:
-    // real HaxBall fires room.onPlayerTeamChange synchronously on every
-    // call, which updateTeams() uses to replace
-    // state.teamRed/teamBlue/teamSpec — several balanceTeams() branches move
-    // MULTIPLE spectators in one call and rely on that live reshuffling
-    // (always re-reading index [0] after each move), so a mock that leaves
-    // the arrays untouched would validate the wrong thing here.
+    // A local, self-contained roomCalls — NOT the shared module-level one.
+    // This block's own checks now span several `await wait(...)` gaps (the
+    // growth branch's pairs land a real tick apart — see balance.js), and
+    // plenty of OTHER blocks below run their own room-touching code in
+    // between; sharing the module-level roomCalls/room would let those
+    // interleave into (or steal from) this block's own assertions.
+    const roomCallsLocal = [];
+    // A realistic setPlayerTeam, not a plain recorder: real HaxBall fires
+    // room.onPlayerTeamChange synchronously on every call, which
+    // updateTeams() uses to replace state.teamRed/teamBlue/teamSpec —
+    // several balanceTeams() branches move MULTIPLE spectators in one call
+    // and rely on that live reshuffling (always re-reading index [0] after
+    // each move), so a mock that leaves the arrays untouched would
+    // validate the wrong thing here.
     const realisticRoom = {
-        ...room,
+        pauseGame: (v) => roomCallsLocal.push('pauseGame:' + v),
+        stopGame: () => roomCallsLocal.push('stopGame'),
+        setScoreLimit: (n) => roomCallsLocal.push('setScoreLimit:' + n),
+        setTimeLimit: (n) => roomCallsLocal.push('setTimeLimit:' + n),
         setPlayerTeam: (id, team) => {
-            roomCalls.push(`setPlayerTeam:${id}:${team}`);
+            roomCallsLocal.push(`setPlayerTeam:${id}:${team}`);
             const removeFrom = (arr) => {
                 const idx = arr.findIndex((p) => p.id === id);
                 if (idx !== -1) arr.splice(idx, 1);
@@ -1084,246 +1121,361 @@ console.log('\n--- team/balance.js: an already-full match never auto-upgrades to
         swapButton: noop('swapButton'), topButton: noop('topButton'),
     });
 
-    calls.length = 0;
-    balance.balanceTeams();
-    check('a balanced, already-running 2v2 with 2 spectators waiting does not restart or switch maps', calls, []);
+    const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-    calls.length = 0;
-    balance.handlePlayersJoin();
-    check('handlePlayersJoin does not upgrade the stadium either — the extra players just joined balanceTeams\' no-op path', calls, []);
+    (async () => {
+        calls.length = 0;
+        balance.balanceTeams();
+        check('a balanced, already-running 2v2 with 2 spectators waiting does not restart or switch maps', calls, []);
 
-    // The actual bug this guards against: a running 1v1 on classic (which
-    // supports up to 2v2) with spectators waiting must grow to fill the
-    // CURRENT map instead of leaving them stuck watching until the round
-    // ends — this is growth WITHIN the active stadium's own capacity, not
-    // the cross-stadium auto-upgrade the tests above correctly forbid.
-    state.teamRed = [{ id: 1 }];
-    state.teamBlue = [{ id: 2 }];
-    state.teamSpec = [{ id: 3 }, { id: 4 }, { id: 5 }, { id: 6 }];
-    state.players = [{ id: 1 }, { id: 2 }, { id: 3 }, { id: 4 }, { id: 5 }, { id: 6 }];
-    roomCalls.length = 0;
-    calls.length = 0;
-    balance.balanceTeams();
-    check('a running 1v1 on classic pulls in exactly one pair from spectators to make 2v2', roomCalls, [`setPlayerTeam:3:${Team.RED}`, `setPlayerTeam:4:${Team.BLUE}`]);
-    check('growing within the current map does not restart or switch stadiums', calls, []);
+        calls.length = 0;
+        balance.handlePlayersJoin();
+        check('handlePlayersJoin does not upgrade the stadium either — the extra players just joined balanceTeams\' no-op path', calls, []);
 
-    // Once at classic's 2v2 cap, further spectators keep waiting — this is
-    // exactly the "already-full match" case the very first check in this
-    // block covers, just reached by growth instead of starting there.
-    state.teamRed = [{ id: 1 }, { id: 3 }];
-    state.teamBlue = [{ id: 2 }, { id: 4 }];
-    state.teamSpec = [{ id: 5 }, { id: 6 }];
-    roomCalls.length = 0;
-    calls.length = 0;
-    balance.balanceTeams();
-    check('a 2v2 already at classic\'s cap leaves the rest of the spectators waiting', roomCalls, []);
+        // The actual bug this guards against: a running 1v1 on classic (which
+        // supports up to 2v2) with spectators waiting must grow to fill the
+        // CURRENT map instead of leaving them stuck watching until the round
+        // ends — this is growth WITHIN the active stadium's own capacity, not
+        // the cross-stadium auto-upgrade the tests above correctly forbid.
+        state.teamRed = [{ id: 1 }];
+        state.teamBlue = [{ id: 2 }];
+        state.teamSpec = [{ id: 3 }, { id: 4 }, { id: 5 }, { id: 6 }];
+        state.players = [{ id: 1 }, { id: 2 }, { id: 3 }, { id: 4 }, { id: 5 }, { id: 6 }];
+        roomCallsLocal.length = 0;
+        calls.length = 0;
+        balance.balanceTeams();
+        // Each pair in this growth branch is now a real tick apart (see
+        // balance.js), not both back-to-back in the same call — wait for
+        // the pair to fully land before inspecting roomCallsLocal.
+        await wait(20);
+        check('a running 1v1 on classic pulls in exactly one pair from spectators to make 2v2', roomCallsLocal, [`setPlayerTeam:3:${Team.RED}`, `setPlayerTeam:4:${Team.BLUE}`]);
+        check('growing within the current map does not restart or switch stadiums', calls, []);
 
-    // Big allows growing all the way to a full 4v4 (still short of the
-    // 8-player choose-mode threshold covered separately below).
-    state.currentStadium = 'big';
-    state.teamRed = [{ id: 1 }, { id: 3 }];
-    state.teamBlue = [{ id: 2 }, { id: 4 }];
-    state.teamSpec = [{ id: 5 }, { id: 6 }];
-    state.players = [{ id: 1 }, { id: 2 }, { id: 3 }, { id: 4 }, { id: 5 }, { id: 6 }];
-    roomCalls.length = 0;
-    calls.length = 0;
-    balance.balanceTeams();
-    check('a running 2v2 on big grows to 3v3', roomCalls, [`setPlayerTeam:5:${Team.RED}`, `setPlayerTeam:6:${Team.BLUE}`]);
-    state.currentStadium = 'classic';
+        // Once at classic's 2v2 cap, further spectators keep waiting — this is
+        // exactly the "already-full match" case the very first check in this
+        // block covers, just reached by growth instead of starting there.
+        state.teamRed = [{ id: 1 }, { id: 3 }];
+        state.teamBlue = [{ id: 2 }, { id: 4 }];
+        state.teamSpec = [{ id: 5 }, { id: 6 }];
+        roomCallsLocal.length = 0;
+        calls.length = 0;
+        balance.balanceTeams();
+        check('a 2v2 already at classic\'s cap leaves the rest of the spectators waiting', roomCallsLocal, []);
 
-    // Bug: this pair-pulling loop used to index state.teamSpec[2*i]/[2*i+1] —
-    // stale once i > 0, since each setPlayerTeam call synchronously shrinks
-    // state.teamSpec by one (real HaxBall's room.onPlayerTeamChange ->
-    // updateTeams() cascade). Pulling 2+ pairs in one call (a running 1v1 on
-    // big, with 4 spectators waiting) skipped every other spectator and then
-    // read past the end of the shrunk array — a thrown TypeError that
-    // aborted the loop with only half the spectators seated.
-    state.currentStadium = 'big';
-    state.teamRed = [{ id: 1 }];
-    state.teamBlue = [{ id: 2 }];
-    state.teamSpec = [{ id: 3 }, { id: 4 }, { id: 5 }, { id: 6 }];
-    state.players = [{ id: 1 }, { id: 2 }, { id: 3 }, { id: 4 }, { id: 5 }, { id: 6 }];
-    roomCalls.length = 0;
-    calls.length = 0;
-    balance.balanceTeams();
-    check('a running 1v1 on big pulls in BOTH waiting pairs (used to crash/skip past the first)', roomCalls, [
-        `setPlayerTeam:3:${Team.RED}`, `setPlayerTeam:4:${Team.BLUE}`,
-        `setPlayerTeam:5:${Team.RED}`, `setPlayerTeam:6:${Team.BLUE}`,
-    ]);
-    check('all 4 waiting spectators actually landed on a team, nobody stuck spectating', [state.teamRed.length, state.teamBlue.length, state.teamSpec.length], [3, 3, 0]);
-    state.currentStadium = 'classic';
+        // Big allows growing all the way to a full 4v4 (still short of the
+        // 8-player choose-mode threshold covered separately below).
+        state.currentStadium = 'big';
+        state.teamRed = [{ id: 1 }, { id: 3 }];
+        state.teamBlue = [{ id: 2 }, { id: 4 }];
+        state.teamSpec = [{ id: 5 }, { id: 6 }];
+        state.players = [{ id: 1 }, { id: 2 }, { id: 3 }, { id: 4 }, { id: 5 }, { id: 6 }];
+        roomCallsLocal.length = 0;
+        calls.length = 0;
+        balance.balanceTeams();
+        await wait(20);
+        check('a running 2v2 on big grows to 3v3', roomCallsLocal, [`setPlayerTeam:5:${Team.RED}`, `setPlayerTeam:6:${Team.BLUE}`]);
+        state.currentStadium = 'classic';
 
-    // The small-scale auto-selection (1 player -> training, 2 -> classic) is
-    // untouched by this change — only growth past an already-settled match
-    // was removed.
-    state.players = [{ id: 1 }];
-    state.teamRed = [];
-    state.teamBlue = [];
-    state.teamSpec = [{ id: 1 }];
-    calls.length = 0;
-    balance.balanceTeams();
-    check('a single joining player still auto-starts training (unchanged)', calls.includes('instantRestart'), true);
+        // Bug: this pair-pulling loop used to index state.teamSpec[2*i]/[2*i+1] —
+        // stale once i > 0, since each setPlayerTeam call synchronously shrinks
+        // state.teamSpec by one (real HaxBall's room.onPlayerTeamChange ->
+        // updateTeams() cascade). Pulling 2+ pairs in one call (a running 1v1 on
+        // big, with 4 spectators waiting) skipped every other spectator and then
+        // read past the end of the shrunk array — a thrown TypeError that
+        // aborted the loop with only half the spectators seated.
+        state.currentStadium = 'big';
+        state.teamRed = [{ id: 1 }];
+        state.teamBlue = [{ id: 2 }];
+        state.teamSpec = [{ id: 3 }, { id: 4 }, { id: 5 }, { id: 6 }];
+        state.players = [{ id: 1 }, { id: 2 }, { id: 3 }, { id: 4 }, { id: 5 }, { id: 6 }];
+        roomCallsLocal.length = 0;
+        calls.length = 0;
+        balance.balanceTeams();
+        // Two pairs this time (4 individually-staggered calls) — a longer wait.
+        await wait(40);
+        check('a running 1v1 on big pulls in BOTH waiting pairs (used to crash/skip past the first)', roomCallsLocal, [
+            `setPlayerTeam:3:${Team.RED}`, `setPlayerTeam:4:${Team.BLUE}`,
+            `setPlayerTeam:5:${Team.RED}`, `setPlayerTeam:6:${Team.BLUE}`,
+        ]);
+        check('all 4 waiting spectators actually landed on a team, nobody stuck spectating', [state.teamRed.length, state.teamBlue.length, state.teamSpec.length], [3, 3, 0]);
+        state.currentStadium = 'classic';
 
-    // Matches must be played out even as they shrink — only ending up with
-    // a single player left (no possible opponent) is still allowed to
-    // restart/switch stadium. A match shrinking down to exactly 2 players
-    // (their teammate/opponent left) must NOT restart or switch away from
-    // whatever stadium it's already on.
-    state.currentStadium = 'big';
-    state.teamRed = [{ id: 1 }];
-    state.teamBlue = [];
-    state.teamSpec = [{ id: 2 }];
-    state.players = [{ id: 1 }, { id: 2 }];
-    roomCalls.length = 0;
-    calls.length = 0;
-    balance.balanceTeams();
-    check('a match shrinking down to 2 players does not restart or switch stadium', calls, []);
-    check('the shrunk match still rebalances to 1v1 from the remaining spectator', roomCalls, [`setPlayerTeam:2:${Team.BLUE}`]);
+        // The small-scale auto-selection (1 player -> training, 2 -> classic) is
+        // untouched by this change — only growth past an already-settled match
+        // was removed.
+        state.players = [{ id: 1 }];
+        state.teamRed = [];
+        state.teamBlue = [];
+        state.teamSpec = [{ id: 1 }];
+        calls.length = 0;
+        balance.balanceTeams();
+        check('a single joining player still auto-starts training (unchanged)', calls.includes('instantRestart'), true);
+        // instantRestart() here also schedules a deferred stadiumCommand('!training')
+        // call (setTimeout(5)) — drain it now so it can't leak into a later
+        // stadiumCalls check further down this same block.
+        await wait(10);
 
-    // Same for shrinking down to 5 (more excess on one side than there are
-    // spectators to cover) — the excess used to get benched to spectators to
-    // force parity; the room's policy now is to just keep playing uneven
-    // instead of pulling a player off the field because their opponent quit.
-    state.teamRed = [{ id: 1 }, { id: 2 }, { id: 3 }];
-    state.teamBlue = [{ id: 4 }];
-    state.teamSpec = [{ id: 5 }];
-    state.players = [{ id: 1 }, { id: 2 }, { id: 3 }, { id: 4 }, { id: 5 }];
-    roomCalls.length = 0;
-    calls.length = 0;
-    balance.balanceTeams();
-    check('a match shrinking down to 5 players does not restart or switch stadium', calls, []);
-    check('the excess player is left on the field instead of being benched', roomCalls, []);
+        // Matches must be played out even as they shrink — only ending up with
+        // a single player left (no possible opponent) is still allowed to
+        // restart/switch stadium. A match shrinking down to exactly 2 players
+        // (their teammate/opponent left) must NOT restart or switch away from
+        // whatever stadium it's already on.
+        state.currentStadium = 'big';
+        state.teamRed = [{ id: 1 }];
+        state.teamBlue = [];
+        state.teamSpec = [{ id: 2 }];
+        state.players = [{ id: 1 }, { id: 2 }];
+        roomCallsLocal.length = 0;
+        calls.length = 0;
+        balance.balanceTeams();
+        check('a match shrinking down to 2 players does not restart or switch stadium', calls, []);
+        check('the shrunk match still rebalances to 1v1 from the remaining spectator', roomCallsLocal, [`setPlayerTeam:2:${Team.BLUE}`]);
 
-    // Dropping from a full 4v4 house (8) down to 7 (teamSize*2-1) still
-    // voids qualification-game stat tracking — that's a separate concern
-    // from benching (the match is no longer a full house, so it no longer
-    // counts as a quals game) and stays even though nobody gets benched now.
-    state.teamRed = [{ id: 1 }, { id: 2 }, { id: 3 }, { id: 4 }];
-    state.teamBlue = [{ id: 5 }, { id: 6 }, { id: 7 }];
-    state.teamSpec = [];
-    state.players = [{ id: 1 }, { id: 2 }, { id: 3 }, { id: 4 }, { id: 5 }, { id: 6 }, { id: 7 }];
-    state.teamRedStats = [{ id: 1 }];
-    state.teamBlueStats = [{ id: 5 }];
-    roomCalls.length = 0;
-    balance.balanceTeams();
-    check('dropping to 7 players (teamSize*2-1) does not bench anyone', roomCalls, []);
-    check('dropping to 7 players still voids qualification-game stat tracking', [state.teamRedStats, state.teamBlueStats], [[], []]);
+        // Same for shrinking down to 5 (more excess on one side than there are
+        // spectators to cover) — the excess used to get benched to spectators to
+        // force parity; the room's policy now is to just keep playing uneven
+        // instead of pulling a player off the field because their opponent quit.
+        state.teamRed = [{ id: 1 }, { id: 2 }, { id: 3 }];
+        state.teamBlue = [{ id: 4 }];
+        state.teamSpec = [{ id: 5 }];
+        state.players = [{ id: 1 }, { id: 2 }, { id: 3 }, { id: 4 }, { id: 5 }];
+        roomCallsLocal.length = 0;
+        calls.length = 0;
+        balance.balanceTeams();
+        check('a match shrinking down to 5 players does not restart or switch stadium', calls, []);
+        check('the excess player is left on the field instead of being benched', roomCallsLocal, []);
 
-    // The actual exception: a match shrinking all the way down to a single
-    // remaining player (reached via the "excess beyond spectators" branch
-    // this time, not the fresh-join branch tested above) still restarts to
-    // training — there's no possible opponent left to play out a match with.
-    state.teamRed = [{ id: 1 }];
-    state.teamBlue = [];
-    state.teamSpec = [];
-    state.players = [{ id: 1 }];
-    calls.length = 0;
-    balance.balanceTeams();
-    check('a match shrinking down to a single remaining player still restarts to training', calls.includes('instantRestart'), true);
-    state.currentStadium = 'classic';
+        // Dropping from a full 4v4 house (8) down to 7 (teamSize*2-1) still
+        // voids qualification-game stat tracking — that's a separate concern
+        // from benching (the match is no longer a full house, so it no longer
+        // counts as a quals game) and stays even though nobody gets benched now.
+        state.teamRed = [{ id: 1 }, { id: 2 }, { id: 3 }, { id: 4 }];
+        state.teamBlue = [{ id: 5 }, { id: 6 }, { id: 7 }];
+        state.teamSpec = [];
+        state.players = [{ id: 1 }, { id: 2 }, { id: 3 }, { id: 4 }, { id: 5 }, { id: 6 }, { id: 7 }];
+        state.teamRedStats = [{ id: 1 }];
+        state.teamBlueStats = [{ id: 5 }];
+        roomCallsLocal.length = 0;
+        balance.balanceTeams();
+        check('dropping to 7 players (teamSize*2-1) does not bench anyone', roomCallsLocal, []);
+        check('dropping to 7 players still voids qualification-game stat tracking', [state.teamRedStats, state.teamBlueStats], [[], []]);
 
-    // Captain-choosing mode is reserved for a genuine full 4v4 house (8
-    // players) — below that, an imbalanced team with excess spectators should
-    // just get balanced directly, not send everyone into the pick ritual.
-    state.teamRed = [{ id: 1 }, { id: 2 }];
-    state.teamBlue = [{ id: 3 }];
-    state.teamSpec = [{ id: 5 }, { id: 6 }];
-    state.players = [{ id: 1 }, { id: 2 }, { id: 3 }, { id: 5 }, { id: 6 }];
-    roomCalls.length = 0;
-    calls.length = 0;
-    balance.balanceTeams();
-    check('below a full house, an imbalanced team is balanced directly instead of entering choose mode', calls.includes('activateChooseMode'), false);
-    check('exactly one spectator fills the smaller team, the rest keep waiting', roomCalls, [`setPlayerTeam:5:${Team.BLUE}`]);
+        // The actual exception: a match shrinking all the way down to a single
+        // remaining player (reached via the "excess beyond spectators" branch
+        // this time, not the fresh-join branch tested above) still restarts to
+        // training — there's no possible opponent left to play out a match with.
+        state.teamRed = [{ id: 1 }];
+        state.teamBlue = [];
+        state.teamSpec = [];
+        state.players = [{ id: 1 }];
+        calls.length = 0;
+        balance.balanceTeams();
+        check('a match shrinking down to a single remaining player still restarts to training', calls.includes('instantRestart'), true);
+        // Same drain as above — this instantRestart() also schedules a
+        // deferred stadiumCommand('!training') call.
+        await wait(10);
+        state.currentStadium = 'classic';
 
-    // Same shape, but now with a full 8-player house — choose mode is warranted.
-    state.teamRed = [{ id: 1 }, { id: 2 }, { id: 7 }, { id: 8 }];
-    state.teamBlue = [{ id: 3 }, { id: 9 }, { id: 10 }];
-    state.teamSpec = [{ id: 5 }, { id: 6 }];
-    state.players = new Array(9).fill(0).map((_, i) => ({ id: i }));
-    roomCalls.length = 0;
-    calls.length = 0;
-    balance.balanceTeams();
-    check('with a full house, the same imbalance DOES enter choose mode', calls.includes('activateChooseMode'), true);
+        // Captain-choosing mode is reserved for a genuine full 4v4 house (8
+        // players) — below that, an imbalanced team with excess spectators should
+        // just get balanced directly, not send everyone into the pick ritual.
+        state.teamRed = [{ id: 1 }, { id: 2 }];
+        state.teamBlue = [{ id: 3 }];
+        state.teamSpec = [{ id: 5 }, { id: 6 }];
+        state.players = [{ id: 1 }, { id: 2 }, { id: 3 }, { id: 5 }, { id: 6 }];
+        roomCallsLocal.length = 0;
+        calls.length = 0;
+        balance.balanceTeams();
+        check('below a full house, an imbalanced team is balanced directly instead of entering choose mode', calls.includes('activateChooseMode'), false);
+        check('exactly one spectator fills the smaller team, the rest keep waiting', roomCallsLocal, [`setPlayerTeam:5:${Team.BLUE}`]);
 
-    // handlePlayersStop: 5 players used to enter choose mode directly after a
-    // game ended; now it should behave like the 3-player case instead (loser
-    // benches, topButton pulls someone back in) and stay out of choose mode.
-    state.endGameVariable = true;
-    state.lastWinner = Team.RED;
-    state.players = new Array(5).fill(0).map((_, i) => ({ id: i }));
-    calls.length = 0;
-    balance.handlePlayersStop(null);
-    check('handlePlayersStop at 5 players no longer enters choose mode', calls.includes('activateChooseMode'), false);
-    check('handlePlayersStop at 5 players benches the losing team like the 3-player case does', calls.includes('blueToSpecButton'), true);
+        // Same shape, but now with a full 8-player house — choose mode is warranted.
+        state.teamRed = [{ id: 1 }, { id: 2 }, { id: 7 }, { id: 8 }];
+        state.teamBlue = [{ id: 3 }, { id: 9 }, { id: 10 }];
+        state.teamSpec = [{ id: 5 }, { id: 6 }];
+        state.players = new Array(9).fill(0).map((_, i) => ({ id: i }));
+        roomCallsLocal.length = 0;
+        calls.length = 0;
+        balance.balanceTeams();
+        check('with a full house, the same imbalance DOES enter choose mode', calls.includes('activateChooseMode'), true);
 
-    // Bug fix: 3v3/4v4 must use the big map — it must not stay on classic
-    // just because the room grew into that size without an explicit !big.
-    // Wrapped in an outer setTimeout so any earlier test's own deferred
-    // stadiumCommand call (e.g. the single-player -> training case above,
-    // itself scheduled via setTimeout(5)) has already fired and can't leak
-    // into stadiumCalls; each scenario below is then chained the same way,
-    // only starting once the previous one's check has run.
-    setTimeout(() => {
+        // handlePlayersStop: 5 players used to enter choose mode directly after a
+        // game ended; now it should behave like the 3-player case instead (loser
+        // benches, topButton pulls someone back in) and stay out of choose mode.
+        state.endGameVariable = true;
+        state.lastWinner = Team.RED;
+        state.players = new Array(5).fill(0).map((_, i) => ({ id: i }));
+        calls.length = 0;
+        balance.handlePlayersStop(null);
+        check('handlePlayersStop at 5 players no longer enters choose mode', calls.includes('activateChooseMode'), false);
+        check('handlePlayersStop at 5 players benches the losing team like the 3-player case does', calls.includes('blueToSpecButton'), true);
+
+        // Bug fix: 3v3/4v4 must use the big map — it must not stay on classic
+        // just because the room grew into that size without an explicit !big.
+        // Each scenario below waits for any earlier deferred stadiumCommand
+        // call to fully land before resetting stadiumCalls for the next one.
         state.chooseMode = true;
         state.currentStadium = 'classic';
         state.players = new Array(8).fill(0).map((_, i) => ({ id: i }));
         stadiumCalls.length = 0;
         balance.handlePlayersStop(null);
-        setTimeout(() => {
-            check('a full 4v4 switches to the big map if it was still on classic', stadiumCalls, ['!big']);
+        await wait(20);
+        check('a full 4v4 switches to the big map if it was still on classic', stadiumCalls, ['!big']);
 
-            state.chooseMode = false;
-            state.currentStadium = 'classic';
-            state.players = new Array(6).fill(0).map((_, i) => ({ id: i }));
-            stadiumCalls.length = 0;
-            balance.handlePlayersStop(null);
-            setTimeout(() => {
-                check('a 3v3 switches to the big map if it was still on classic', stadiumCalls, ['!big']);
+        state.chooseMode = false;
+        state.currentStadium = 'classic';
+        state.players = new Array(6).fill(0).map((_, i) => ({ id: i }));
+        stadiumCalls.length = 0;
+        balance.handlePlayersStop(null);
+        await wait(20);
+        check('a 3v3 switches to the big map if it was still on classic', stadiumCalls, ['!big']);
 
-                state.currentStadium = 'big';
-                state.players = new Array(6).fill(0).map((_, i) => ({ id: i }));
-                stadiumCalls.length = 0;
-                balance.handlePlayersStop(null);
-                setTimeout(() => {
-                    check('a 3v3 already on the big map does not needlessly re-switch', stadiumCalls, []);
+        state.currentStadium = 'big';
+        state.players = new Array(6).fill(0).map((_, i) => ({ id: i }));
+        stadiumCalls.length = 0;
+        balance.handlePlayersStop(null);
+        await wait(20);
+        check('a 3v3 already on the big map does not needlessly re-switch', stadiumCalls, []);
 
-                    state.currentStadium = 'big';
-                    state.players = [{ id: 1 }, { id: 2 }, { id: 3 }, { id: 4 }];
-                    stadiumCalls.length = 0;
-                    balance.handlePlayersStop(null);
-                    setTimeout(() => {
-                        check('a 2v2 switches back to classic if it was still on the big map', stadiumCalls, ['!classic']);
+        state.currentStadium = 'big';
+        state.players = [{ id: 1 }, { id: 2 }, { id: 3 }, { id: 4 }];
+        stadiumCalls.length = 0;
+        balance.handlePlayersStop(null);
+        await wait(20);
+        check('a 2v2 switches back to classic if it was still on the big map', stadiumCalls, ['!classic']);
 
-                        // 9+ players: choose mode's "any other count" branch
-                        // (not exactly 2*teamSize) must also assert big — it's
-                        // still a full-house-or-more scenario by definition.
-                        state.chooseMode = true;
-                        state.currentStadium = 'classic';
-                        state.lastWinner = Team.RED;
-                        state.players = new Array(9).fill(0).map((_, i) => ({ id: i }));
-                        stadiumCalls.length = 0;
-                        balance.handlePlayersStop(null);
-                        setTimeout(() => {
-                            check('9 players inside choose mode also asserts the big map', stadiumCalls, ['!big']);
+        // 9+ players: choose mode's "any other count" branch (not exactly
+        // 2*teamSize) must also assert big — it's still a full-house-or-more
+        // scenario by definition.
+        state.chooseMode = true;
+        state.currentStadium = 'classic';
+        state.lastWinner = Team.RED;
+        state.players = new Array(9).fill(0).map((_, i) => ({ id: i }));
+        stadiumCalls.length = 0;
+        balance.handlePlayersStop(null);
+        await wait(20);
+        check('9 players inside choose mode also asserts the big map', stadiumCalls, ['!big']);
 
-                            // Defensive-only: 9+ outside choose mode shouldn't
-                            // normally happen (endGame already turns choose
-                            // mode on by then), but if it did, it must not be
-                            // left on classic either.
-                            state.chooseMode = false;
-                            state.currentStadium = 'classic';
-                            state.players = new Array(9).fill(0).map((_, i) => ({ id: i }));
-                            stadiumCalls.length = 0;
-                            balance.handlePlayersStop(null);
-                            setTimeout(() => {
-                                check('9 players outside choose mode (defensive edge case) also asserts the big map', stadiumCalls, ['!big']);
-                            }, 20);
-                        }, 20);
-                    }, 20);
-                }, 20);
-            }, 20);
-        }, 20);
-    }, 20);
+        // Defensive-only: 9+ outside choose mode shouldn't normally happen
+        // (endGame already turns choose mode on by then), but if it did, it
+        // must not be left on classic either.
+        state.chooseMode = false;
+        state.currentStadium = 'classic';
+        state.players = new Array(9).fill(0).map((_, i) => ({ id: i }));
+        stadiumCalls.length = 0;
+        balance.handlePlayersStop(null);
+        await wait(20);
+        check('9 players outside choose mode (defensive edge case) also asserts the big map', stadiumCalls, ['!big']);
+    })();
+}
+
+console.log('\n--- team/balance.js: choose mode never gets stuck on as the room shrinks below a full house via ordinary leaves ---');
+{
+    // End-to-end regression for the reported bug: a room drops below
+    // 2*teamSize one leave at a time (spectators sitting still while
+    // active players leave) — unlike PICKS (which move counts in a
+    // tightly self-resolving way — see determineSideForm's captain
+    // alternation), ordinary leaves can hit red/blue/spec in any order,
+    // so the old abs(diff)==specLen / (Red==Blue && specLen<2) completion
+    // checks were never guaranteed to fire. Once state.chooseMode got
+    // stuck true below a full house, handlePlayersStop's chooseMode
+    // branch has no room.startGame() call for that (not-a-full-house)
+    // shape — the room would silently sit parked after the next match
+    // ended, never starting a new round.
+    const Team = { RED: 1, BLUE: 2, SPECTATORS: 0 };
+    const State = { PLAY: 0, PAUSE: 1, STOP: 2 };
+    const HaxNotificationMock = { CHAT: 1, MENTION: 2 };
+    const calls = [];
+    const noop = (name) => () => calls.push(name);
+    const state = {
+        chooseMode: true, gameState: State.PLAY,
+        teamRed: [{ id: 1 }, { id: 2 }, { id: 3 }],
+        teamBlue: [{ id: 4 }, { id: 5 }, { id: 6 }],
+        teamSpec: [{ id: 7 }, { id: 8 }],
+        game: { scores: { timeLimit: 5 } },
+    };
+    state.players = [...state.teamRed, ...state.teamBlue, ...state.teamSpec];
+    const balance = require(path.join(CORE, 'team', 'balance'))({
+        room: { ...room, getScores: () => ({ red: 0, blue: 0, time: 0, timeLimit: 5 }) },
+        state, Team, State, HaxNotification: HaxNotificationMock,
+        emptyPlayer: {}, infoColor: 5, scoreLimit: 3, teamSize: 4, timeLimit: 5,
+        activateChooseMode: noop('activateChooseMode'), blueToSpecButton: noop('blueToSpecButton'),
+        choosePlayer: noop('choosePlayer'), deactivateChooseMode: () => { state.chooseMode = false; calls.push('deactivateChooseMode'); },
+        endGame: noop('endGame'), getRandomInt: () => 0, getSpecList: noop('getSpecList'),
+        instantRestart: noop('instantRestart'), randomButton: noop('randomButton'),
+        redToSpecButton: noop('redToSpecButton'), resetButton: noop('resetButton'),
+        resumeGame: noop('resumeGame'), stadiumCommand: noop('stadiumCommand'),
+        swapButton: noop('swapButton'), topButton: noop('topButton'),
+    });
+
+    // One player leaves red (matching updateTeams() having already run,
+    // same order movement.js's onPlayerLeave calls things in) — 8 -> 7,
+    // already below the 2*teamSize=8 a full house needs.
+    state.teamRed = state.teamRed.filter((p) => p.id !== 3);
+    state.players = state.players.filter((p) => p.id !== 3);
+    balance.handlePlayersLeave();
+
+    check('a single leave that drops the room below a full house deactivates choose mode immediately', state.chooseMode, false);
+    check('...via deactivateChooseMode(), not a bare assignment (resets slowMode/captain-choice too)', calls.includes('deactivateChooseMode'), true);
+    check('...and hands off to the normal (non-choose-mode) balancer', calls.includes('resumeGame'), true);
+}
+
+console.log('\n--- team/balance.js: a room stuck in choose mode from BEFORE this fix existed self-heals on the next join too, not just leaves ---');
+{
+    // handlePlayersLeave's own fix (previous block) only reacts to a leave
+    // — it does nothing for a room that's ALREADY stuck (e.g. from before
+    // that fix was deployed, or from any path this session didn't catch)
+    // and then simply has people join it back up. balanceTeams() itself is
+    // a flat no-op while state.chooseMode is true, and handlePlayersJoin()
+    // never deactivates it on its own — so every new joiner would just
+    // pile into spectators forever, looking exactly like the reported "8
+    // people in the room but only e.g. 3v3 is actually playing" symptom.
+    // The fix belongs in balanceTeams() itself so it self-heals from ANY
+    // caller (join OR leave), not just the one path that happened to
+    // trigger it originally.
+    const Team = { RED: 1, BLUE: 2, SPECTATORS: 0 };
+    const State = { PLAY: 0, PAUSE: 1, STOP: 2 };
+    const HaxNotificationMock = { CHAT: 1 };
+    const calls = [];
+    const noop = (name) => () => calls.push(name);
+    // Stuck small (1v1 + 2 spectators, well below 2*teamSize=8) with
+    // chooseMode true from before — nothing in this test ever leaves.
+    const state = {
+        chooseMode: true,
+        teamRed: [{ id: 1 }], teamBlue: [{ id: 2 }],
+        teamSpec: [{ id: 3 }, { id: 4 }],
+        currentStadium: 'classic',
+    };
+    state.players = [...state.teamRed, ...state.teamBlue, ...state.teamSpec];
+    // A local roomCalls, not the shared module-level one — this check's
+    // own balanceTeams() call can now land on the growth branch, whose
+    // pairs complete a real tick later (see balance.js), so this test
+    // has to await before checking; the shared array isn't safe to poll
+    // after an await with other blocks running in between.
+    const roomCallsLocal = [];
+    const roomMock = { setPlayerTeam: (id, team) => roomCallsLocal.push(`setPlayerTeam:${id}:${team}`) };
+    const balance = require(path.join(CORE, 'team', 'balance'))({
+        room: roomMock, state, Team, State, HaxNotification: HaxNotificationMock,
+        emptyPlayer: {}, infoColor: 5, scoreLimit: 3, teamSize: 4, timeLimit: 5,
+        activateChooseMode: noop('activateChooseMode'), blueToSpecButton: noop('blueToSpecButton'),
+        choosePlayer: noop('choosePlayer'), deactivateChooseMode: () => { state.chooseMode = false; calls.push('deactivateChooseMode'); },
+        endGame: noop('endGame'), getRandomInt: () => 0, getSpecList: noop('getSpecList'),
+        instantRestart: noop('instantRestart'), randomButton: noop('randomButton'),
+        redToSpecButton: noop('redToSpecButton'), resetButton: noop('resetButton'),
+        resumeGame: noop('resumeGame'), stadiumCommand: noop('stadiumCommand'),
+        swapButton: noop('swapButton'), topButton: noop('topButton'),
+    });
+
+    // A 5th player joins — no leave involved at all.
+    state.teamSpec = [...state.teamSpec, { id: 5 }];
+    state.players = [...state.players, { id: 5 }];
+    balance.handlePlayersJoin();
+
+    (async () => {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        check('a join alone clears a choose-mode session that was already stuck below a full house', state.chooseMode, false);
+        check('...and actually balances afterward, instead of leaving the new joiner parked in spectators', roomCallsLocal.length > 0, true);
+    })();
 }
 
 console.log('\n--- team/balance.js: handlePlayersTeamChange asserts the big map when choose mode completes ---');

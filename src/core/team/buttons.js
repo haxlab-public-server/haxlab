@@ -26,13 +26,23 @@ module.exports = function createButtonHelpers({
                 // 1v2 once the loop ran one call too many).
                 if (state.teamSpec.length > 1) {
                     // Index 0 both times, not 0 then 1 — room.setPlayerTeam fires
-                    // room.onPlayerTeamChange synchronously (updateTeams() replaces
-                    // state.teamSpec with a fresh array), so by the second call the
-                    // just-moved player is already gone and "index 1" would skip
-                    // over whoever's actually next in line, not crash but quietly
-                    // picking the wrong (later) spectator every time.
+                    // room.onPlayerTeamChange, which calls updateTeams() and
+                    // replaces state.teamSpec with a fresh array, so index 1
+                    // would skip over whoever's actually next in line.
+                    // A real tick apart (setTimeout, not back-to-back in the
+                    // same call), not just index [0] both times: two
+                    // room.setPlayerTeam calls fired back-to-back with zero
+                    // gap wasn't reliably enough for state.teamSpec to have
+                    // actually shrunk by the second call in production — the
+                    // second call could still see the SAME just-moved player
+                    // at index 0 and yank them from RED onto BLUE instead of
+                    // picking the next spectator, leaving red short one and
+                    // the real next-in-line stuck spectating (a 3v3 growing
+                    // to 3v4 instead of 4v4, one waiting spectator ignored).
                     room.setPlayerTeam(state.teamSpec[0].id, Team.RED);
-                    room.setPlayerTeam(state.teamSpec[0].id, Team.BLUE);
+                    setTimeout(() => {
+                        room.setPlayerTeam(state.teamSpec[0].id, Team.BLUE);
+                    }, 5);
                 }
             } else if (state.teamRed.length < state.teamBlue.length)
                 room.setPlayerTeam(state.teamSpec[0].id, Team.RED);
@@ -47,21 +57,20 @@ module.exports = function createButtonHelpers({
                 // see its comment for why a lone leftover spectator must stay
                 // benched instead of being forced onto blue.
                 if (state.teamSpec.length > 1) {
-                    // room.setPlayerTeam fires room.onPlayerTeamChange synchronously,
-                    // which calls updateTeams() and replaces state.teamSpec with a
-                    // fresh array — the moved player is already gone from it by the
-                    // time the next line runs, so just re-reading state.teamSpec
-                    // here (instead of manually filtering a stale snapshot by a
-                    // now-stale index) is both simpler and correct. The old manual
-                    // filter indexed into the ALREADY-updated state.teamSpec using
-                    // the pre-move index `r`, which could reference a completely
-                    // different (never-moved) spectator or run past the end of the
-                    // array — silently dropping someone from the room's pairing for
-                    // good (this specific button only ever gets a fixed number of
-                    // calls), which is what caused a 4-player room to sometimes
-                    // settle on 2v1 instead of 2v2.
+                    // room.setPlayerTeam fires room.onPlayerTeamChange, which calls
+                    // updateTeams() and replaces state.teamSpec with a fresh array —
+                    // re-reading state.teamSpec.length fresh for the second pick
+                    // (instead of a stale pre-move index `r`) is both simpler and
+                    // correct on its own. But see topButton()'s identical comment:
+                    // a real tick (setTimeout) between the two calls, not just
+                    // back-to-back in the same call, since state.teamSpec wasn't
+                    // reliably guaranteed to have shrunk yet by the time the second
+                    // call ran in production — it could still draw from the SAME
+                    // (already-moved) player, or otherwise misjudge who's left.
                     room.setPlayerTeam(state.teamSpec[getRandomInt(state.teamSpec.length)].id, Team.RED);
-                    room.setPlayerTeam(state.teamSpec[getRandomInt(state.teamSpec.length)].id, Team.BLUE);
+                    setTimeout(() => {
+                        room.setPlayerTeam(state.teamSpec[getRandomInt(state.teamSpec.length)].id, Team.BLUE);
+                    }, 5);
                 }
             } else if (state.teamRed.length < state.teamBlue.length)
                 room.setPlayerTeam(state.teamSpec[getRandomInt(state.teamSpec.length)].id, Team.RED);
