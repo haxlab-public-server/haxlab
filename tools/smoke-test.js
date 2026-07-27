@@ -710,11 +710,13 @@ console.log('\n--- events/activity.js: MASTER/ADMIN/VIP get a chat prefix, regul
     // since this test only exercises activity.js's own branching logic.
     const roles = { 1: Role.MASTER, 2: Role.ADMIN_TEMP, 3: Role.VIP, 4: Role.PLAYER };
     const discordLogs = [];
+    const hiddenAdminsSetMock = new Set();
     const activity = require(path.join(CORE, 'events', 'activity'))({
         room, state, authArray, BallTouch: class {}, HaxNotification, Role,
         Situation: {}, State, Team,
         adminChatColor: 'ADMIN_COLOR', masterChatColor: 'MASTER_COLOR', vipChatColor: 'VIP_COLOR',
         commands: {}, discordBot: { sendLog: (m) => discordLogs.push(m) }, errorColor: 2,
+        hiddenAdminsSet: hiddenAdminsSetMock,
         muteArray: { getByAuth: () => null },
         checkGoalKickTouch: () => null, chooseModeFunction: () => false,
         getCommand: () => false, getDate: () => 'DATE', getGoalGame: () => null,
@@ -743,6 +745,15 @@ console.log('\n--- events/activity.js: MASTER/ADMIN/VIP get a chat prefix, regul
     check('a regular player\'s message falls through to the native chat bubble', plainResult, undefined);
 
     check('all four messages were still logged to Discord', discordLogs.length, 4);
+
+    // !hide (commands/admin.js) — suppresses just the MASTER/ADMIN prefix,
+    // native chat bubble takes over same as a regular player would get.
+    hiddenAdminsSetMock.add(1);
+    sent.length = 0;
+    const hiddenMasterResult = activity.onPlayerChat({ id: 1, name: 'Boss', team: Team.SPECTATORS, admin: true }, 'sneaky');
+    check('a hidden MASTER gets no prefix announcement', sent, []);
+    check('a hidden MASTER\'s message falls through to the native chat bubble', hiddenMasterResult, undefined);
+    hiddenAdminsSetMock.delete(1);
 }
 
 console.log('\n--- events/movement.js: auth-bans block a join regardless of connection, small-font auth broadcast on join/leave ---');
@@ -852,9 +863,9 @@ console.log('\n--- team/buttons.js: randomButton must not strand a spectator acr
             state.teamSpec = [...players];
 
             randomButton();
-            await wait(10);
+            await wait(25);
             randomButton();
-            await wait(10);
+            await wait(25);
 
             if (state.teamRed.length !== 2 || state.teamBlue.length !== 2 || state.teamSpec.length !== 0) {
                 strandedSomeone = true;
@@ -977,9 +988,9 @@ console.log('\n--- team/buttons.js: the full "start a fresh 2v2" sequence (reset
 
             resetButton();
             randomButton();
-            await wait(10);
+            await wait(25);
             randomButton();
-            await wait(10);
+            await wait(25);
 
             if (state.teamRed.length !== 2 || state.teamBlue.length !== 2 || state.teamSpec.length !== 0) {
                 strandedSomeone = true;
@@ -1089,6 +1100,7 @@ console.log('\n--- team/balance.js: an already-full match never auto-upgrades to
     const realisticRoom = {
         pauseGame: (v) => roomCallsLocal.push('pauseGame:' + v),
         stopGame: () => roomCallsLocal.push('stopGame'),
+        startGame: () => roomCallsLocal.push('startGame'),
         setScoreLimit: (n) => roomCallsLocal.push('setScoreLimit:' + n),
         setTimeLimit: (n) => roomCallsLocal.push('setTimeLimit:' + n),
         setPlayerTeam: (id, team) => {
@@ -1147,7 +1159,7 @@ console.log('\n--- team/balance.js: an already-full match never auto-upgrades to
         // Each pair in this growth branch is now a real tick apart (see
         // balance.js), not both back-to-back in the same call — wait for
         // the pair to fully land before inspecting roomCallsLocal.
-        await wait(20);
+        await wait(40);
         check('a running 1v1 on classic pulls in exactly one pair from spectators to make 2v2', roomCallsLocal, [`setPlayerTeam:3:${Team.RED}`, `setPlayerTeam:4:${Team.BLUE}`]);
         check('growing within the current map does not restart or switch stadiums', calls, []);
 
@@ -1172,7 +1184,7 @@ console.log('\n--- team/balance.js: an already-full match never auto-upgrades to
         roomCallsLocal.length = 0;
         calls.length = 0;
         balance.balanceTeams();
-        await wait(20);
+        await wait(40);
         check('a running 2v2 on big grows to 3v3', roomCallsLocal, [`setPlayerTeam:5:${Team.RED}`, `setPlayerTeam:6:${Team.BLUE}`]);
         state.currentStadium = 'classic';
 
@@ -1245,6 +1257,30 @@ console.log('\n--- team/balance.js: an already-full match never auto-upgrades to
         check('a match shrinking down to 5 players does not restart or switch stadium', calls, []);
         check('the excess player is left on the field instead of being benched', roomCallsLocal, []);
 
+        // New rule: with ZERO spectators (not just "not enough") to draw
+        // from at all, a lopsided 4v2 no longer stays that way forever —
+        // the last player of the bigger side switches to the smaller side
+        // (keeps playing, doesn't get benched) to reach a clean 3v3.
+        state.teamRed = [{ id: 1 }, { id: 2 }, { id: 3 }, { id: 4 }];
+        state.teamBlue = [{ id: 5 }, { id: 6 }];
+        state.teamSpec = [];
+        state.players = [{ id: 1 }, { id: 2 }, { id: 3 }, { id: 4 }, { id: 5 }, { id: 6 }];
+        roomCallsLocal.length = 0;
+        calls.length = 0;
+        balance.balanceTeams();
+        check('a 4v2 with zero spectators waiting moves the last red player to blue instead of staying lopsided', roomCallsLocal, [`setPlayerTeam:4:${Team.BLUE}`]);
+        check('...reaching a clean 3v3', [state.teamRed.length, state.teamBlue.length], [3, 3]);
+
+        // But a gap of only 1 (e.g. 4v3) is left alone — moving one player
+        // would only flip who has the extra, not actually improve anything.
+        state.teamRed = [{ id: 1 }, { id: 2 }, { id: 3 }, { id: 4 }];
+        state.teamBlue = [{ id: 5 }, { id: 6 }, { id: 7 }];
+        state.teamSpec = [];
+        state.players = [{ id: 1 }, { id: 2 }, { id: 3 }, { id: 4 }, { id: 5 }, { id: 6 }, { id: 7 }];
+        roomCallsLocal.length = 0;
+        balance.balanceTeams();
+        check('a 4v3 with zero spectators is left alone (moving one player would not help)', roomCallsLocal, []);
+
         // Dropping from a full 4v4 house (8) down to 7 (teamSize*2-1) still
         // voids qualification-game stat tracking — that's a separate concern
         // from benching (the match is no longer a full house, so it no longer
@@ -1309,6 +1345,10 @@ console.log('\n--- team/balance.js: an already-full match never auto-upgrades to
         balance.handlePlayersStop(null);
         check('handlePlayersStop at 5 players no longer enters choose mode', calls.includes('activateChooseMode'), false);
         check('handlePlayersStop at 5 players benches the losing team like the 3-player case does', calls.includes('blueToSpecButton'), true);
+        // This branch also schedules a deferred reassertStadium() (see
+        // balance.js) — drain it now so it can't leak a late stadiumCalls
+        // entry into one of the stadium-switch scenarios below.
+        await wait(310);
 
         // Bug fix: 3v3/4v4 must use the big map — it must not stay on classic
         // just because the room grew into that size without an explicit !big.
@@ -1344,16 +1384,44 @@ console.log('\n--- team/balance.js: an already-full match never auto-upgrades to
         await wait(20);
         check('a 2v2 switches back to classic if it was still on the big map', stadiumCalls, ['!classic']);
 
-        // 9+ players: choose mode's "any other count" branch (not exactly
-        // 2*teamSize) must also assert big — it's still a full-house-or-more
-        // scenario by definition.
-        state.chooseMode = true;
-        state.currentStadium = 'classic';
-        state.lastWinner = Team.RED;
-        state.players = new Array(9).fill(0).map((_, i) => ({ id: i }));
+        // Reported bug: a 4v4 that plays all the way down to 1v1 via
+        // ordinary leaves (the room's policy is to keep an uneven/shrunk
+        // match playing rather than interrupt it — see the "keep playing
+        // uneven" branches above) never got its map reassessed mid-match on
+        // purpose (switching stadiums resets/restarts the game). The gap
+        // was that once the match actually DID stop, the players.length==2
+        // branch never checked the map at all — 1v1 could stay parked on
+        // big indefinitely once it finally got a chance to.
+        state.chooseMode = false;
+        state.currentStadium = 'big';
+        state.teamRed = [{ id: 1 }];
+        state.teamBlue = [{ id: 2 }];
+        state.players = [{ id: 1 }, { id: 2 }];
         stadiumCalls.length = 0;
         balance.handlePlayersStop(null);
         await wait(20);
+        check('a 4v4 that shrank all the way to 1v1 switches back to classic once the match actually stops', stadiumCalls, ['!classic']);
+
+        // 9+ players: choose mode's "any other count" branch (not exactly
+        // 2*teamSize) must also assert big — it's still a full-house-or-more
+        // scenario by definition. Explicit teamRed/teamBlue/teamSpec here
+        // (not leftovers from an earlier scenario, unlike before the
+        // 1v1-shrink regression above started overwriting them) — a 4v4
+        // plus one extra spectator, maxSide clearly needs big regardless of
+        // how the loser's bench+refill actually plays out.
+        state.chooseMode = true;
+        state.currentStadium = 'classic';
+        state.lastWinner = Team.RED;
+        state.teamRed = [{ id: 1 }, { id: 2 }, { id: 3 }, { id: 4 }];
+        state.teamBlue = [{ id: 5 }, { id: 6 }, { id: 7 }, { id: 8 }];
+        state.teamSpec = [{ id: 9 }];
+        state.players = new Array(9).fill(0).map((_, i) => ({ id: i }));
+        stadiumCalls.length = 0;
+        balance.handlePlayersStop(null);
+        // This branch's reassertStadium() waits for the refill to settle
+        // (300 + 5*spectatorsToInsert, matching insertingTimeout), not the
+        // flat 20ms every other scenario above needed.
+        await wait(320);
         check('9 players inside choose mode also asserts the big map', stadiumCalls, ['!big']);
 
         // Defensive-only: 9+ outside choose mode shouldn't normally happen
@@ -1361,10 +1429,14 @@ console.log('\n--- team/balance.js: an already-full match never auto-upgrades to
         // must not be left on classic either.
         state.chooseMode = false;
         state.currentStadium = 'classic';
+        state.teamRed = [{ id: 1 }, { id: 2 }, { id: 3 }, { id: 4 }];
+        state.teamBlue = [{ id: 5 }, { id: 6 }, { id: 7 }, { id: 8 }];
+        state.teamSpec = [{ id: 9 }];
         state.players = new Array(9).fill(0).map((_, i) => ({ id: i }));
         stadiumCalls.length = 0;
         balance.handlePlayersStop(null);
-        await wait(20);
+        // Same reasoning as above — this branch also waits for the refill.
+        await wait(320);
         check('9 players outside choose mode (defensive edge case) also asserts the big map', stadiumCalls, ['!big']);
     })();
 }
@@ -1733,13 +1805,62 @@ console.log('\n--- team/choosing.js: a captain\'s own pick does not wipe out the
     }
 }
 
+console.log('\n--- commands/player.js: !afk never fires a no-op room.setPlayerTeam when already a spectator ---');
+{
+    // Bug: room.setPlayerTeam(id, SPECTATORS) used to fire unconditionally
+    // on AFK entry, even though !afk can only ever be invoked while ALREADY
+    // a spectator (state.players.length==1 is the one exception — someone
+    // going AFK while they're literally the only player in the room). That
+    // made the call a genuine no-op reassignment in the common case, but it
+    // still fires room.onPlayerTeamChange in production — if chooseMode
+    // happened to be active (building the next match's roster right after
+    // this one ended), that spurious event cascaded into
+    // handlePlayersTeamChange and could trigger an UNRELATED auto-pick,
+    // stacking with the explicit handlePlayersLeave() call this function
+    // already makes right after — double-processing one AFK toggle as two
+    // separate roster changes (reported as "2 captains" landing on blue
+    // when only one real pick happened, or blue staying empty afterward).
+    const Team = { RED: 1, BLUE: 2, SPECTATORS: 0 };
+    const HaxNotificationMock = { CHAT: 1 };
+    const roomCallsLocal = [];
+    const roomMock = { setPlayerTeam: (id, team) => roomCallsLocal.push(`setPlayerTeam:${id}:${team}`), sendAnnouncement: () => {} };
+    const AFKSetLocal = new Set();
+    const player = require(path.join(CORE, 'commands', 'player'))({
+        room: roomMock, state: { players: [{ id: 1 }, { id: 2 }] }, Team, AFKSet: AFKSetLocal,
+        AFKMinSet: new Set(), AFKCooldownSet: new Set(), minAFKDuration: 5, maxAFKDuration: 30, AFKCooldown: 2,
+        announcementColor: 1, errorColor: 2, HaxNotification: HaxNotificationMock,
+        handlePlayersJoin: () => {}, handlePlayersLeave: () => {}, updateTeams: () => {},
+    });
+
+    roomCallsLocal.length = 0;
+    player.afkCommand({ id: 1, name: 'Already Spec', team: Team.SPECTATORS }, '!afk');
+    check('!afk from someone already spectating never calls room.setPlayerTeam', roomCallsLocal, []);
+    check('...but they are still recorded as AFK', AFKSetLocal.has(1), true);
+
+    // The one real exception: the lone player in an otherwise-empty room,
+    // still on a team, going AFK — this genuinely needs the move.
+    const soloState = { players: [{ id: 3 }] };
+    const soloAFKSet = new Set();
+    const soloPlayer = require(path.join(CORE, 'commands', 'player'))({
+        room: roomMock, state: soloState, Team, AFKSet: soloAFKSet,
+        AFKMinSet: new Set(), AFKCooldownSet: new Set(), minAFKDuration: 5, maxAFKDuration: 30, AFKCooldown: 2,
+        announcementColor: 1, errorColor: 2, HaxNotification: HaxNotificationMock,
+        handlePlayersJoin: () => {}, handlePlayersLeave: () => {}, updateTeams: () => {},
+    });
+    roomCallsLocal.length = 0;
+    soloPlayer.afkCommand({ id: 3, name: 'Solo', team: Team.RED }, '!afk');
+    check('!afk from the lone remaining player, still on a team, does move them to spectators', roomCallsLocal, [`setPlayerTeam:3:${Team.SPECTATORS}`]);
+}
+
 console.log('\n--- events/misc.js: nobody keeps an admin badge unless they are MASTER/ADMIN_PERM ---');
 {
     const Role = { PLAYER: 0, VIP: 1, ADMIN_TEMP: 2, ADMIN_PERM: 3, MASTER: 4 };
     const roles = { 1: Role.PLAYER, 2: Role.ADMIN_PERM, 3: Role.MASTER };
+    const hiddenAdminsSetMock = new Set();
     const misc = require(path.join(CORE, 'events', 'misc'))({
         room, state: {}, HaxNotification, Role,
         discordBot: { sendLog: () => {} }, emptyPlayer: {}, errorColor: 2, infoColor: 5,
+        hiddenAdminsSet: hiddenAdminsSetMock,
         checkTime: () => {}, getDate: () => 'DATE', getGameStats: () => {}, getLastTouchOfTheBall: () => {},
         getRole: (p) => roles[p.id], handleActivity: () => {}, stadiumCommand: () => {}, updateTeams: () => {},
     });
@@ -1763,6 +1884,25 @@ console.log('\n--- events/misc.js: nobody keeps an admin badge unless they are M
     roomCalls.length = 0;
     misc.onPlayerAdminChange({ id: 3, admin: false }, null);
     check('a master who lost the badge gets it restored too', roomCalls, ['setPlayerAdmin:3:true']);
+
+    // !hide (commands/admin.js) sets admin=false for a genuine ADMIN_PERM/
+    // MASTER on purpose — the auto-restore above must not immediately
+    // undo it just because they're still really an admin underneath.
+    hiddenAdminsSetMock.add(2);
+    roomCalls.length = 0;
+    misc.onPlayerAdminChange({ id: 2, admin: false }, null);
+    check('a hidden permanent admin does NOT get the badge auto-restored', roomCalls, []);
+
+    // And if the badge somehow comes back while still marked hidden (e.g.
+    // a stray native re-grant), it gets re-suppressed rather than left on.
+    roomCalls.length = 0;
+    misc.onPlayerAdminChange({ id: 2, admin: true }, null);
+    check('a hidden permanent admin whose badge reappears gets it re-hidden', roomCalls, ['setPlayerAdmin:2:false']);
+
+    hiddenAdminsSetMock.delete(2);
+    roomCalls.length = 0;
+    misc.onPlayerAdminChange({ id: 2, admin: false }, null);
+    check('once no longer hidden, the normal auto-restore applies again', roomCalls, ['setPlayerAdmin:2:true']);
 }
 
 console.log('\n--- commands/admin.js: stadiumCommand applies per-arena score/time limits ---');
@@ -1785,6 +1925,29 @@ console.log('\n--- commands/admin.js: stadiumCommand applies per-arena score/tim
     admin.stadiumCommand({ id: 1 }, '!big');
     check('!big sets the big score limit (5)', roomCalls.includes('setScoreLimit:5'), true);
     check('!big sets the big time limit (5)', roomCalls.includes('setTimeLimit:5'), true);
+}
+
+console.log('\n--- commands/admin.js: !hide toggles the admin badge without touching role/permissions ---');
+{
+    const hiddenAdminsSetLocal = new Set();
+    const admin2 = require(path.join(CORE, 'commands', 'admin'))({
+        room, state: {}, authArray: [], muteArray: {}, muteDuration: 10, MutePlayer: class {},
+        trainingMap: '{}', classicMap: '{}', bigMap: '{}',
+        classicScoreLimit: 3, classicTimeLimit: 3, bigScoreLimit: 5, bigTimeLimit: 5,
+        State: {}, Situation: {}, announcementColor: 1, errorColor: 2, HaxNotification,
+        hiddenAdminsSet: hiddenAdminsSetLocal,
+        instantRestart: () => {}, swapButton: () => {},
+    });
+
+    roomCalls.length = 0;
+    admin2.hideCommand({ id: 7, name: 'Boss' }, '!hide');
+    check('!hide removes the admin badge', roomCalls, ['setPlayerAdmin:7:false']);
+    check('!hide records the player as hidden', hiddenAdminsSetLocal.has(7), true);
+
+    roomCalls.length = 0;
+    admin2.hideCommand({ id: 7, name: 'Boss' }, '!hide');
+    check('!hide again restores the admin badge', roomCalls, ['setPlayerAdmin:7:true']);
+    check('!hide again clears the hidden flag', hiddenAdminsSetLocal.has(7), false);
 }
 
 console.log('\n--- stats/goalAttribution.js: an assist can never be the same player as the scorer ---');
@@ -2316,10 +2479,12 @@ console.log('\n--- core/economy.js: coin awards, playtime ticker, shop/inventory
 // overflowPassword rotation check above waits 150ms for real interval
 // ticks, the balance.js stadium-switch checks chain four 20ms steps (up to
 // 80ms), the announcements loop-back check above waits 250ms for interval
-// ticks, and the handlePlayersStop regression runs four 350ms waits back to
-// back (~1400ms, the slowest of the bunch) — give all of them time to run
-// before tallying and exiting.
+// ticks, the handlePlayersStop regression runs four 350ms waits back to
+// back (~1400ms), and the two 50-trial randomButton() regressions each
+// chain up to 50 * 50ms = 2500ms worst case (the slowest of the bunch,
+// though they run concurrently with each other, not stacked) — give all
+// of them time to run before tallying and exiting.
 setTimeout(() => {
     console.log(`\n${pass} passed, ${fail} failed`);
     process.exit(fail ? 1 : 0);
-}, 1500);
+}, 2800);

@@ -13,6 +13,7 @@ module.exports = function createMiscEvents({
     emptyPlayer,
     errorColor,
     infoColor,
+    hiddenAdminsSet,
     checkTime,
     getDate,
     getGameStats,
@@ -35,6 +36,17 @@ module.exports = function createMiscEvents({
     // room) has it revoked immediately.
     function onPlayerAdminChange(changedPlayer, byPlayer) {
         updateTeams();
+        // !hide (commands/admin.js) deliberately sets admin=false for
+        // someone who's still a genuine ADMIN_PERM/MASTER — without this
+        // check, the branch below would treat that as the badge having
+        // fallen off by accident and immediately restore it, undoing the
+        // hide on the spot. Enforced both ways here (also re-hides if
+        // something else ever re-grants the crown while hiddenAdminsSet
+        // still has them), not just skipped, so !hide actually sticks.
+        if (hiddenAdminsSet.has(changedPlayer.id)) {
+            if (changedPlayer.admin) room.setPlayerAdmin(changedPlayer.id, false);
+            return;
+        }
         if (getRole(changedPlayer) >= Role.ADMIN_PERM) {
             if (!changedPlayer.admin) room.setPlayerAdmin(changedPlayer.id, true);
             return;

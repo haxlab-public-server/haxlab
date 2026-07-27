@@ -23,6 +23,7 @@ module.exports = function createAdminCommands({
     announcementColor,
     errorColor,
     HaxNotification,
+    hiddenAdminsSet,
     instantRestart,
     swapButton,
 }) {
@@ -254,6 +255,37 @@ module.exports = function createAdminCommands({
         }
     }
 
+    // Toggles the room admin crown + chat prefix without touching
+    // adminList/masterList — role/permissions stay exactly as they were,
+    // only the visible indicators change. onPlayerAdminChange (misc.js)
+    // normally auto-restores the crown for ADMIN_PERM/MASTER the instant
+    // it's removed; it checks hiddenAdminsSet first specifically so this
+    // command's own room.setPlayerAdmin(id, false) call actually sticks
+    // instead of being immediately undone.
+    function hideCommand(player, message) {
+        if (hiddenAdminsSet.has(player.id)) {
+            hiddenAdminsSet.delete(player.id);
+            room.setPlayerAdmin(player.id, true);
+            room.sendAnnouncement(
+                `👁️ Скрытность отключена — бейдж и префикс снова видны.`,
+                player.id,
+                announcementColor,
+                'bold',
+                HaxNotification.CHAT
+            );
+        } else {
+            hiddenAdminsSet.add(player.id);
+            room.setPlayerAdmin(player.id, false);
+            room.sendAnnouncement(
+                `🕶️ Скрытность включена — бейдж и префикс скрыты.`,
+                player.id,
+                announcementColor,
+                'bold',
+                HaxNotification.CHAT
+            );
+        }
+    }
+
     function muteListCommand(player, message) {
         if (muteArray.list.length == 0) {
             room.sendAnnouncement(
@@ -288,5 +320,6 @@ module.exports = function createAdminCommands({
         muteCommand,
         unmuteCommand,
         muteListCommand,
+        hideCommand,
     };
 };

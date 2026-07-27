@@ -8,7 +8,7 @@
  * into the page separately as window.__secrets, rather than living here.
  */
 const roomName = '🧪 HaxLab | Добавлена экономика !shop 🧪'; // room name
-const maxPlayers = 14;
+const maxPlayers = 16;
 const roomPublic = true;
 const geo = { code: 'RU', lat: 55.7558, lon: 37.6173 }; // Moscow — shown as the room's flag/location
 

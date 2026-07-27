@@ -222,7 +222,26 @@ module.exports = function createPlayerCommands({
                             player.id
                         );
                     }
-                    room.setPlayerTeam(player.id, Team.SPECTATORS);
+                    // Only a REAL move (the state.players.length==1 edge case
+                    // above, someone going AFK straight off a team) — the
+                    // far more common path (player.team already SPECTATORS)
+                    // would make this a no-op reassignment, but
+                    // room.setPlayerTeam still fires room.onPlayerTeamChange
+                    // regardless of whether the team actually changed. If
+                    // chooseMode happened to be active (building the next
+                    // match's roster right after this one ended), that
+                    // spurious event cascaded into handlePlayersTeamChange
+                    // and could trigger an UNRELATED auto-pick of its own —
+                    // stacking with the explicit handlePlayersLeave() call
+                    // just below (which reacts to this same AFK event
+                    // properly) to double-process a single AFK toggle as two
+                    // separate roster changes. Symptoms: an extra spectator
+                    // silently pulled onto a side mid-pick ("2 captains"
+                    // landing on blue when only one pick happened), or a
+                    // pick sequence left in a state where blue stayed empty.
+                    if (player.team != Team.SPECTATORS) {
+                        room.setPlayerTeam(player.id, Team.SPECTATORS);
+                    }
                     room.sendAnnouncement(
                         `😴 ${player.name} теперь AFK !`,
                         null,

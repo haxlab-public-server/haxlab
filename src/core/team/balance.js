@@ -31,6 +31,31 @@ module.exports = function createTeamBalance({
     swapButton,
     topButton,
 }) {
+    // Single source of truth for "what map should this room be on right
+    // now" — driven by whichever side is currently BIGGER, not raw total
+    // player count. Total count alone can't tell apart shapes that need
+    // different maps: a 4-total room could be a clean 2v2 (fits classic)
+    // or an uneven 3v1 the room kept playing per its own "don't bench"
+    // policy (needs big, since one side still has 3). Never returns
+    // 'training' — that's the one-player bootstrapping stadium, decided
+    // separately by whoever's about to instantRestart() into it.
+    //
+    // Only ever called from genuine "safe to restart" moments (between
+    // rounds, in handlePlayersStop/handlePlayersTeamChange's completion
+    // branches) — never from balanceTeams() itself while a match may still
+    // be live, since switching stadiums reloads the map and would cut off
+    // an in-progress game the room's policy deliberately lets keep playing
+    // uneven/shrunk instead of interrupting.
+    function desiredStadiumFor(maxSide) {
+        return maxSide <= 2 ? 'classic' : 'big';
+    }
+    function reassertStadium() {
+        const desired = desiredStadiumFor(Math.max(state.teamRed.length, state.teamBlue.length));
+        if (state.currentStadium != desired) {
+            stadiumCommand(emptyPlayer, `!${desired}`);
+        }
+    }
+
     function balanceTeams() {
         // Self-heal a chooseMode session that's stuck true below the
         // threshold it needs (a full-or-bigger house) — not just here for
@@ -46,6 +71,9 @@ module.exports = function createTeamBalance({
         if (state.chooseMode && state.players.length < 2 * teamSize) {
             deactivateChooseMode();
             resumeGame();
+            setTimeout(() => {
+                reassertStadium();
+            }, 5);
         }
         if (!state.chooseMode) {
             if (state.players.length == 0) {
@@ -112,6 +140,26 @@ module.exports = function createTeamBalance({
                 if (state.players.length == teamSize * 2 - 1) {
                     state.teamRedStats = [];
                     state.teamBlueStats = [];
+                }
+                // Exception: if there's truly nobody left to draw from (no
+                // non-AFK spectators waiting at all — AFK players are
+                // already excluded from state.teamSpec by updateTeams(), so
+                // this only fires on a genuinely empty bench, not merely a
+                // short one), a lopsided match like 4v2 would otherwise stay
+                // that way indefinitely. Nudge it back toward parity by
+                // moving the last player of the BIGGER side across to the
+                // smaller one — they keep playing, just switch sides,
+                // unlike the old benching behavior above that this
+                // deliberately doesn't bring back. Only when the gap is at
+                // least 2: moving exactly one player changes the gap by
+                // exactly 2 either way, so at a gap of 1 (e.g. 4v3) this
+                // would just flip who has the extra player (4v3 -> 3v4) —
+                // no actual improvement, just churn — whereas a gap of 2+
+                // (4v2 -> 3v3) is always a genuine step toward parity.
+                if (state.teamSpec.length == 0 && Math.abs(state.teamRed.length - state.teamBlue.length) >= 2) {
+                    const biggerTeam = state.teamRed.length > state.teamBlue.length ? state.teamRed : state.teamBlue;
+                    const smallerSide = state.teamRed.length > state.teamBlue.length ? Team.BLUE : Team.RED;
+                    room.setPlayerTeam(biggerTeam[biggerTeam.length - 1].id, smallerSide);
                 }
             } else if (Math.abs(state.teamRed.length - state.teamBlue.length) < state.teamSpec.length && state.teamRed.length != state.teamBlue.length) {
                 const n = Math.abs(state.teamRed.length - state.teamBlue.length);
@@ -233,12 +281,10 @@ module.exports = function createTeamBalance({
                 deactivateChooseMode();
                 resumeGame();
                 balanceTeams();
-                return;
-            }
-            if (teamSize > 2 && state.players.length == 5) {
                 setTimeout(() => {
-                    stadiumCommand(emptyPlayer, `!classic`);
+                    reassertStadium();
                 }, 5);
+                return;
             }
             if (state.teamRed.length == 0 || state.teamBlue.length == 0) {
                 room.setPlayerTeam(state.teamSpec[0].id, state.teamRed.length == 0 ? Team.RED : Team.BLUE);
@@ -299,17 +345,18 @@ module.exports = function createTeamBalance({
             if (Math.abs(state.teamRed.length - state.teamBlue.length) == state.teamSpec.length) {
                 deactivateChooseMode();
                 resumeGame();
-                // Choose mode only ever activates at a full house, so a
-                // completion here is always 3v3-or-bigger territory — needs
-                // the big map same as handlePlayersStop's equivalent full-
-                // house branch does. This path resumes play directly
-                // (no game stop/restart in between), so unlike that branch
-                // nothing else was ever going to catch a stale classic map here.
-                if (state.currentStadium != 'big') {
-                    setTimeout(() => {
-                        stadiumCommand(emptyPlayer, `!big`);
-                    }, 5);
-                }
+                // The b-loop below only tops the SMALLER side up to match
+                // the larger one — the larger side's count right now
+                // already IS the final maxSide, so reassertStadium() is
+                // correct even read before the loop runs. Deferred by a
+                // tick like every other stadium switch in this file (never
+                // called synchronously mid-cascade). This path resumes play
+                // directly (no game stop/restart in between), so unlike
+                // handlePlayersStop nothing else was ever going to catch a
+                // stale map here on its own.
+                setTimeout(() => {
+                    reassertStadium();
+                }, 5);
                 const b = state.teamSpec.length;
                 if (state.teamRed.length > state.teamBlue.length) {
                     for (let i = 0; i < b; i++) {
@@ -341,15 +388,13 @@ module.exports = function createTeamBalance({
             ) {
                 deactivateChooseMode();
                 resumeGame();
-                // Same reasoning as the completion branch above: choose mode
-                // only ever activates at a full house, so this is always
-                // 3v3-or-bigger, and nothing else runs a stop/restart here
-                // to catch a stale classic map on its own.
-                if (state.currentStadium != 'big') {
-                    setTimeout(() => {
-                        stadiumCommand(emptyPlayer, `!big`);
-                    }, 5);
-                }
+                // Both sides are already equal here (either both at
+                // teamSize, or Red==Blue outright) and nothing further
+                // moves anyone in this branch, so the map is already
+                // decided — same deferred-by-a-tick reasoning as above.
+                setTimeout(() => {
+                    reassertStadium();
+                }, 5);
             } else if (state.teamRed.length <= state.teamBlue.length && state.redCaptainChoice != '') {
                 if (state.redCaptainChoice == 'top') {
                     room.setPlayerTeam(state.teamSpec[0].id, Team.RED);
@@ -395,12 +440,18 @@ module.exports = function createTeamBalance({
                     // for whichever captain sits down next without ever
                     // asking them).
                     deactivateChooseMode();
-                    // A full 4v4 needs the big map — classic (1v1/2v2-sized)
-                    // is too small and would otherwise stay active if the
-                    // room simply grew into this from a smaller match.
-                    if (state.currentStadium != 'big') {
+                    // resetButton() + teamSize x randomButton() below always
+                    // rebuilds an even teamSize v teamSize split regardless
+                    // of whatever shape led in here, so the map this needs
+                    // is already known up front — no need to wait and
+                    // observe the rebuilt teams. Switching the stadium
+                    // BEFORE the rebuild (not after) is deliberate: loading
+                    // a stadium resets everyone to spectators, so the
+                    // rebuild has to run against that reset roster, not the
+                    // other way around.
+                    if (state.currentStadium != desiredStadiumFor(teamSize)) {
                         setTimeout(() => {
-                            stadiumCommand(emptyPlayer, `!big`);
+                            stadiumCommand(emptyPlayer, `!${desiredStadiumFor(teamSize)}`);
                         }, 5);
                     }
                     resetButton();
@@ -418,20 +469,6 @@ module.exports = function createTeamBalance({
                         room.startGame();
                     }, 2000);
                 } else {
-                    // Any other count while choose mode is active isn't only
-                    // ever "bigger than a full house" (9, 10, ...) — choose
-                    // mode stays on as people leave mid-match too, so this
-                    // also covers a shrunk-down count like 5 or 6 (see
-                    // handlePlayersLeave's own `players.length == 5` case
-                    // just above). Only actually switch to the big map for a
-                    // genuinely oversized house; a shrunk-down house keeps
-                    // whatever map it's already on (matching the plain
-                    // 3/5/9+ branch below).
-                    if (state.players.length >= 2 * teamSize + 1 && state.currentStadium != 'big') {
-                        setTimeout(() => {
-                            stadiumCommand(emptyPlayer, `!big`);
-                        }, 5);
-                    }
                     if (state.lastWinner == Team.RED) {
                         blueToSpecButton();
                     } else if (state.lastWinner == Team.BLUE) {
@@ -469,12 +506,29 @@ module.exports = function createTeamBalance({
                     state.insertingTimeout = setTimeout(() => {
                         state.insertingPlayers = false;
                     }, 300 + 5 * spectatorsToInsert);
+                    // Unlike the exact-2*teamSize branch above, the shape
+                    // this settles on isn't known in advance (depends on how
+                    // many spectators were actually available to refill
+                    // with) — wait for the refill to finish, then reassert
+                    // off the real result rather than guessing from the
+                    // pre-refill player count.
+                    setTimeout(() => {
+                        reassertStadium();
+                    }, 300 + 5 * spectatorsToInsert);
                 }
             } else {
                 if (state.players.length == 2) {
                     if (state.lastWinner == Team.BLUE) {
                         swapButton();
                     }
+                    // swapButton() only relabels which color the winner
+                    // wears — team SIZES are already final synchronously,
+                    // but still deferred a tick like every other stadium
+                    // switch in this file (never called synchronously
+                    // mid-cascade).
+                    setTimeout(() => {
+                        reassertStadium();
+                    }, 5);
                     state.startTimeout = setTimeout(() => {
                         room.startGame();
                     }, 2000);
@@ -484,14 +538,7 @@ module.exports = function createTeamBalance({
                     // doing that, so 5 (like 3) just keeps playing: the losing
                     // team benches, topButton() pulls someone back in. 9+ here
                     // shouldn't normally happen — endGame() already turns on
-                    // choose mode at a full 4v4 house before this ever runs —
-                    // but if it somehow does, it's still big-map territory,
-                    // unlike the 3/5 cases sharing this branch.
-                    if (state.players.length >= 2 * teamSize + 1 && state.currentStadium != 'big') {
-                        setTimeout(() => {
-                            stadiumCommand(emptyPlayer, `!big`);
-                        }, 5);
-                    }
+                    // choose mode at a full 4v4 house before this ever runs.
                     if (state.lastWinner == Team.RED) {
                         blueToSpecButton();
                     } else {
@@ -529,15 +576,27 @@ module.exports = function createTeamBalance({
                     state.insertingTimeout = setTimeout(() => {
                         state.insertingPlayers = false;
                     }, 300 + 5 * spectatorsToInsert);
+                    // Same reasoning as the chooseMode branch above: the
+                    // resulting shape depends on how many spectators were
+                    // actually available, so wait for the refill to settle
+                    // before reasserting — well before room.startGame()
+                    // fires at 2000ms below.
+                    setTimeout(() => {
+                        reassertStadium();
+                    }, 300 + 5 * spectatorsToInsert);
                     state.startTimeout = setTimeout(() => {
                         room.startGame();
                     }, 2000);
                 } else if (state.players.length == 4) {
-                    // 2v2 belongs on the small classic map — re-assert it in
-                    // case the room just shrank down from a bigger match.
-                    if (state.currentStadium != 'classic') {
+                    // resetButton() + 2x randomButton() below always
+                    // rebuilds an even 2v2 regardless of the shape leading
+                    // in, so (same reasoning as the exact-2*teamSize
+                    // chooseMode branch) the map is already known — switch
+                    // BEFORE the rebuild since loading a stadium resets
+                    // everyone to spectators.
+                    if (state.currentStadium != desiredStadiumFor(2)) {
                         setTimeout(() => {
-                            stadiumCommand(emptyPlayer, `!classic`);
+                            stadiumCommand(emptyPlayer, `!${desiredStadiumFor(2)}`);
                         }, 5);
                     }
                     resetButton();
@@ -556,10 +615,11 @@ module.exports = function createTeamBalance({
                         room.startGame();
                     }, 2000);
                 } else if (state.players.length == 6) {
-                    // 3v3 needs the big map, same reasoning as the 4v4 case above.
-                    if (state.currentStadium != 'big') {
+                    // Same reasoning as the 4-player case above — resetButton()
+                    // + 3x randomButton() always rebuilds an even 3v3.
+                    if (state.currentStadium != desiredStadiumFor(3)) {
                         setTimeout(() => {
-                            stadiumCommand(emptyPlayer, `!big`);
+                            stadiumCommand(emptyPlayer, `!${desiredStadiumFor(3)}`);
                         }, 5);
                     }
                     resetButton();

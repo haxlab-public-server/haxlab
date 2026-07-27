@@ -18,6 +18,7 @@ module.exports = function createActivityEvents({
     commands,
     discordBot,
     errorColor,
+    hiddenAdminsSet,
     masterChatColor,
     muteArray,
     vipChatColor,
@@ -91,14 +92,18 @@ module.exports = function createActivityEvents({
         // default chat bubble can't show one, so it's suppressed (return
         // false) in favor of a custom sendAnnouncement, same trick teamChat/
         // playerChat already use above. Regular players are untouched and
-        // keep the native chat bubble.
+        // keep the native chat bubble. !hide (commands/admin.js) suppresses
+        // just the MASTER/ADMIN prefix — role/permissions are untouched, so
+        // a hidden VIP-flagged admin would still fall through to the VIP
+        // prefix rather than none at all.
         const role = getRole(player);
+        const showAdminPrefix = !hiddenAdminsSet.has(player.id);
         let prefix = null;
         let prefixColor = null;
-        if (role == Role.MASTER) {
+        if (showAdminPrefix && role == Role.MASTER) {
             prefix = '👑 [ВЛАДЕЛЕЦ]';
             prefixColor = masterChatColor;
-        } else if (role >= Role.ADMIN_TEMP) {
+        } else if (showAdminPrefix && role >= Role.ADMIN_TEMP) {
             prefix = '🛡️ [АДМИН]';
             prefixColor = adminChatColor;
         } else if (role == Role.VIP) {

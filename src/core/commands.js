@@ -17,6 +17,7 @@ module.exports = function createCommands({
     muteCommand,
     unmuteCommand,
     muteListCommand,
+    hideCommand,
     clearbansCommand,
     banListCommand,
     adminListCommand,
@@ -272,6 +273,13 @@ module.exports = function createCommands({
         desc: `
         Эта команда показывает список заглушенных игроков.`,
         function: muteListCommand,
+    },
+    hide: {
+        aliases: [],
+        roles: Role.ADMIN_TEMP,
+        desc: `
+        Эта команда скрывает (или снова показывает) ваш бейдж администратора и префикс в чате. Права доступа не меняются, только видимость.`,
+        function: hideCommand,
     },
     clearbans: {
         aliases: [],

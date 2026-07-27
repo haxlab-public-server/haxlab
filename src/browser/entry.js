@@ -397,6 +397,13 @@ const minAFKDuration = 0;
 const maxAFKDuration = 30;
 const AFKCooldown = 0;
 
+// !hide toggle (admins/master only) — suppresses the room admin badge and
+// the chat prefix without touching adminList/masterList, so the underlying
+// role/permissions never change, only the visible indicators. Keyed by
+// player.id like AFKSet above (a per-session toggle, not a persisted
+// preference — reconnecting resets it, same as AFK does).
+const hiddenAdminsSet = new Set();
+
 const muteArray = new MuteList();
 const muteDuration = 5;
 const MutePlayer = createMutePlayerClass({ room, announcementColor, HaxNotification, muteArray });
@@ -489,6 +496,7 @@ const {
     muteCommand,
     unmuteCommand,
     muteListCommand,
+    hideCommand,
 } = createAdminCommands({
     room,
     state,
@@ -508,6 +516,7 @@ const {
     announcementColor,
     errorColor,
     HaxNotification,
+    hiddenAdminsSet,
     instantRestart,
     swapButton,
 });
@@ -1135,6 +1144,7 @@ Object.assign(room, wrapEventHandlers(createActivityEvents({
     commands,
     discordBot,
     errorColor,
+    hiddenAdminsSet,
     masterChatColor,
     muteArray,
     vipChatColor,
@@ -1198,6 +1208,7 @@ Object.assign(room, wrapEventHandlers(createMiscEvents({
     emptyPlayer,
     errorColor,
     infoColor,
+    hiddenAdminsSet,
     checkTime,
     getDate,
     getGameStats,
