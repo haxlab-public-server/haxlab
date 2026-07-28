@@ -58,16 +58,22 @@ module.exports = function createTeamBalance({
 
     // Safety net around room.startGame(): whatever sequence of
     // benches/pulls/pairs led here, if there are up to a full house's worth
-    // of players (<=2*teamSize) and any of them are still sitting in
-    // spectators when the match is about to start, spread them onto
-    // whichever side is smaller instead of kicking off with players parked
-    // who should be on the field. Staggered (not a synchronous loop) —
-    // same reasoning as every other multi-move sequence in this file:
-    // state.teamSpec isn't reliably guaranteed to have shrunk yet by the
-    // very next call in real production.
+    // of players (<=2*teamSize) and the field is uneven, top the smaller
+    // side back up to parity instead of kicking off with a player parked
+    // who should be on the field. Bug this had at first: draining EVERY
+    // waiting spectator regardless of parity — a clean 1v1 with one
+    // genuinely-waiting spectator (nothing wrong with it, no one stranded)
+    // got that spectator force-added right before start, landing on 2v1
+    // instead of leaving them waiting. Reuses computeSpectatorsToInsert()'s
+    // "up to parity, then only genuine pairs beyond that" rule so a real
+    // stranding still gets fixed without also dragging in a legitimate
+    // leftover. Staggered (not a synchronous loop) — same reasoning as
+    // every other multi-move sequence in this file: state.teamSpec isn't
+    // reliably guaranteed to have shrunk yet by the very next call in real
+    // production.
     function ensureFullFieldBeforeStart() {
         if (state.players.length > 2 * teamSize) return;
-        const n = state.teamSpec.length;
+        const n = computeSpectatorsToInsert();
         for (let i = 0; i < n; i++) {
             setTimeout(() => {
                 safeMoveNextSpec(state.teamRed.length <= state.teamBlue.length ? Team.RED : Team.BLUE);
@@ -87,6 +93,27 @@ module.exports = function createTeamBalance({
         if (state.teamSpec.length > 0) {
             room.setPlayerTeam(state.teamSpec[0].id, team);
         }
+    }
+
+    // How many waiting spectators to pull in after a bench, capped by both
+    // how many actually fit (2*teamSize total) and how many are waiting.
+    // Bug: this used to just be that raw cap — filling the smaller side up
+    // to it regardless of whether the LAST pull landed on an even split.
+    // safeMoveNextSpec always fills whichever side is smaller (ties go
+    // red), so once parity was reached mid-drain, the next pull immediately
+    // re-broke it (e.g. a 1v1 with one waiting spectator restored the 1v1
+    // correctly on the first pull, then the loop kept going and dragged
+    // that same spectator in anyway, landing on 2v1). Fill up to parity
+    // with the bigger side, then only continue in genuine PAIRS beyond
+    // that — same principle as topButton()/randomButton()'s own "a lone
+    // leftover stays benched" guard.
+    function computeSpectatorsToInsert() {
+        const diff = Math.abs(state.teamRed.length - state.teamBlue.length);
+        const spaceLeft = 2 * teamSize - state.teamRed.length - state.teamBlue.length;
+        const available = Math.min(state.teamSpec.length, spaceLeft);
+        const towardParity = Math.min(available, diff);
+        const remainingPairs = Math.floor((available - towardParity) / 2);
+        return towardParity + remainingPairs * 2;
     }
 
     // handlePlayersJoin()/handlePlayersLeave() call balanceTeams()
@@ -212,10 +239,34 @@ module.exports = function createTeamBalance({
                 // would just flip who has the extra player (4v3 -> 3v4) —
                 // no actual improvement, just churn — whereas a gap of 2+
                 // (4v2 -> 3v3) is always a genuine step toward parity.
+                // Numeric balance is meant to hold at all times, not just
+                // eventually — a single move here only closes 2 of the gap
+                // (4v0 -> 3v1, still off by 2), and nothing else re-triggers
+                // this branch until the next unrelated join/leave. Loop
+                // enough moves to close the WHOLE gap down to <=1 in one
+                // pass. The first move runs synchronously (matching every
+                // caller that expects to observe it immediately); any
+                // further moves a bigger gap needs are staggered 5ms apart
+                // like every other multi-move sequence in this file. Each
+                // call re-checks the live gap first, both as the natural
+                // stopping condition and as a guard against a concurrent
+                // event closing it in the meantime.
                 if (state.teamSpec.length == 0 && Math.abs(state.teamRed.length - state.teamBlue.length) >= 2) {
-                    const biggerTeam = state.teamRed.length > state.teamBlue.length ? state.teamRed : state.teamBlue;
-                    const smallerSide = state.teamRed.length > state.teamBlue.length ? Team.BLUE : Team.RED;
-                    room.setPlayerTeam(biggerTeam[biggerTeam.length - 1].id, smallerSide);
+                    const movesNeeded = Math.floor(Math.abs(state.teamRed.length - state.teamBlue.length) / 2);
+                    const moveOneAcross = () => {
+                        if (Math.abs(state.teamRed.length - state.teamBlue.length) >= 2) {
+                            const biggerTeam = state.teamRed.length > state.teamBlue.length ? state.teamRed : state.teamBlue;
+                            const smallerSide = state.teamRed.length > state.teamBlue.length ? Team.BLUE : Team.RED;
+                            room.setPlayerTeam(biggerTeam[biggerTeam.length - 1].id, smallerSide);
+                        }
+                    };
+                    for (let i = 0; i < movesNeeded; i++) {
+                        if (i === 0) {
+                            moveOneAcross();
+                            continue;
+                        }
+                        setTimeout(moveOneAcross, 5 * i);
+                    }
                 }
             } else if (Math.abs(state.teamRed.length - state.teamBlue.length) < state.teamSpec.length && state.teamRed.length != state.teamBlue.length) {
                 const n = Math.abs(state.teamRed.length - state.teamBlue.length);
@@ -253,6 +304,18 @@ module.exports = function createTeamBalance({
                 // concern (see the note this replaced).
                 const stadiumCap = state.currentStadium == 'classic' ? 2 : teamSize;
                 const slotsAvailable = stadiumCap - state.teamRed.length;
+                // Tried activating choose mode here once the current
+                // stadium's cap was already full (e.g. 4v4 on big) with
+                // more waiting — turned out wrong: the field here is
+                // already an even, complete match (that's how this branch
+                // is reached at all), so there's genuinely nothing to
+                // "pick" — choosePlayer()'s cascade has no natural stopping
+                // point that respects an ALREADY-full side, and confirmed
+                // in practice it overshot past teamSize (5v5, even 6v6).
+                // A real full house's worth of players waiting for the
+                // NEXT round is endGame()'s job (see entry.js), triggered
+                // once this match actually ends — not something ordinary
+                // joins mid-match should retroactively start picking for.
                 const n = Math.min(slotsAvailable, Math.floor(state.teamSpec.length / 2));
                 // One real tick apart (setTimeout), alternating RED/BLUE,
                 // not n pairs of back-to-back same-tick calls. Always index
@@ -270,9 +333,53 @@ module.exports = function createTeamBalance({
                 // ignored).
                 for (let i = 0; i < 2 * n; i++) {
                     setTimeout(() => {
-                        safeMoveNextSpec(i % 2 === 0 ? Team.RED : Team.BLUE);
+                        // n was computed once, up front, from teamRed/
+                        // teamSpec's length at that moment — but a
+                        // concurrent join/leave (or another balanceTeams()
+                        // run) landing in one of these staggered gaps can
+                        // ALSO see the pre-fill state and schedule its own,
+                        // completely unaware overlapping batch of moves.
+                        // Confirmed in practice: two such batches together
+                        // pulled a side past the stadium's own cap (e.g.
+                        // 5v5, even 6v6, on big, past teamSize). Re-check
+                        // the LIVE cap (re-read fresh, in case the stadium
+                        // itself changed) right before every individual
+                        // move — and specifically for the SIDE this call is
+                        // about to fill, not "either side has room": the
+                        // other side having space doesn't mean THIS one
+                        // does.
+                        const liveCap = state.currentStadium == 'classic' ? 2 : teamSize;
+                        const targetTeam = i % 2 === 0 ? Team.RED : Team.BLUE;
+                        const targetSize = targetTeam === Team.RED ? state.teamRed.length : state.teamBlue.length;
+                        if (targetSize < liveCap) {
+                            safeMoveNextSpec(targetTeam);
+                        }
                     }, 5 * i);
                 }
+            }
+            // Bug: none of the branches above ever reassert the stadium —
+            // by design, since switching mid-play would interrupt a live
+            // match. But that only actually matters while a match is truly
+            // being PLAYed; balanceTeams() runs on every join/leave
+            // regardless, including plenty of moments where nothing is
+            // live yet (gameState == STOP: a room still filling up before
+            // its first kickoff, or between rounds). In exactly those safe
+            // moments, ordinary joins/leaves could grow or shrink the
+            // field (3v3, 4v4, back down to 2v2, ...) without the stadium
+            // ever catching up — confirmed in practice, a room could sit
+            // on 'classic' at a settled 3v3, or stay on 'big' after
+            // shrinking back to 2v2, indefinitely. Re-check state.chooseMode
+            // fresh (not the outer guard's stale read) since a branch above
+            // may have just turned it on — that path handles its own map
+            // once it resolves, this shouldn't race it. Deferred long
+            // enough to cover the slowest branch above (the growth pair
+            // loop, up to teamSize pairs at 5ms apart).
+            if (!state.chooseMode && state.gameState == State.STOP) {
+                setTimeout(() => {
+                    if (!state.chooseMode) {
+                        reassertStadium();
+                    }
+                }, 50);
             }
         }
     }
@@ -452,23 +559,37 @@ module.exports = function createTeamBalance({
                     reassertStadium();
                 }, 5);
             } else if (state.teamRed.length <= state.teamBlue.length && state.redCaptainChoice != '') {
-                if (state.redCaptainChoice == 'top') {
-                    room.setPlayerTeam(state.teamSpec[0].id, Team.RED);
-                } else if (state.redCaptainChoice == 'random') {
-                    const r = getRandomInt(state.teamSpec.length);
-                    room.setPlayerTeam(state.teamSpec[r].id, Team.RED);
-                } else {
-                    room.setPlayerTeam(state.teamSpec[state.teamSpec.length - 1].id, Team.RED);
+                // Bug: none of these three indexed into state.teamSpec
+                // guarded against it already being empty — a captain's
+                // stored 'top'/'random'/'bottom' preference auto-continues
+                // picking on every subsequent room.onPlayerTeamChange
+                // recursion (see the comment above this function), and an
+                // odd leftover (diff still != 0 once teamSpec hits 0) can
+                // reach this branch before the abs(diff)==specLen
+                // completion check above ever catches it, throwing on
+                // state.teamSpec[...].id being undefined.
+                if (state.teamSpec.length > 0) {
+                    if (state.redCaptainChoice == 'top') {
+                        room.setPlayerTeam(state.teamSpec[0].id, Team.RED);
+                    } else if (state.redCaptainChoice == 'random') {
+                        const r = getRandomInt(state.teamSpec.length);
+                        room.setPlayerTeam(state.teamSpec[r].id, Team.RED);
+                    } else {
+                        room.setPlayerTeam(state.teamSpec[state.teamSpec.length - 1].id, Team.RED);
+                    }
                 }
                 return;
             } else if (state.teamBlue.length < state.teamRed.length && state.blueCaptainChoice != '') {
-                if (state.blueCaptainChoice == 'top') {
-                    room.setPlayerTeam(state.teamSpec[0].id, Team.BLUE);
-                } else if (state.blueCaptainChoice == 'random') {
-                    const r = getRandomInt(state.teamSpec.length);
-                    room.setPlayerTeam(state.teamSpec[r].id, Team.BLUE);
-                } else {
-                    room.setPlayerTeam(state.teamSpec[state.teamSpec.length - 1].id, Team.BLUE);
+                // See the identical guard/comment on the red branch above.
+                if (state.teamSpec.length > 0) {
+                    if (state.blueCaptainChoice == 'top') {
+                        room.setPlayerTeam(state.teamSpec[0].id, Team.BLUE);
+                    } else if (state.blueCaptainChoice == 'random') {
+                        const r = getRandomInt(state.teamSpec.length);
+                        room.setPlayerTeam(state.teamSpec[r].id, Team.BLUE);
+                    } else {
+                        room.setPlayerTeam(state.teamSpec[state.teamSpec.length - 1].id, Team.BLUE);
+                    }
                 }
                 return;
             } else {
@@ -566,19 +687,10 @@ module.exports = function createTeamBalance({
                     // topButton() call only pulls in a single spectator,
                     // which stranded the rest of a benched bigger team
                     // instead of refilling properly. Loop once per spectator
-                    // NEEDED — capped at how many actually fit up to
-                    // teamSize per side (2*teamSize total), not
-                    // state.teamSpec.length outright. Whenever there were
-                    // MORE waiting spectators than room for (e.g. a house
-                    // that grew past a full 2*teamSize before the round
-                    // ended), draining every one of them regardless kept
-                    // calling topButton() after both sides already reached
-                    // teamSize — silently growing the match past its
-                    // intended cap (5v5 instead of stopping at 4v4).
-                    const spectatorsToInsert = Math.min(
-                        state.teamSpec.length,
-                        2 * teamSize - state.teamRed.length - state.teamBlue.length
-                    );
+                    // NEEDED — see computeSpectatorsToInsert() for how many
+                    // that actually is (fills to parity, then only genuine
+                    // pairs beyond that).
+                    const spectatorsToInsert = computeSpectatorsToInsert();
                     for (let i = 0; i < spectatorsToInsert; i++) {
                         setTimeout(() => {
                             // spectatorsToInsert counts PLAYERS to insert,
@@ -634,7 +746,19 @@ module.exports = function createTeamBalance({
                             room.startGame();
                         }, 50);
                     }, 2000);
-                } else if (state.players.length == 3 || state.players.length == 5 || state.players.length >= 2 * teamSize + 1) {
+                } else if (state.players.length == 3 || state.players.length == 5 || state.players.length == 7 || state.players.length >= 2 * teamSize + 1) {
+                    // Bug: 7 was missing entirely from this list — every
+                    // OTHER total from 2 up to a full house (2, 3, 4, 5, 6)
+                    // had a branch, plus the exact-full-house and 9+ cases
+                    // above, but a match ending at exactly 7 (e.g. 4v3)
+                    // matched none of them. handlePlayersStop did nothing
+                    // at all: no rebuild, no stadium check, no
+                    // room.startGame() — the room sat frozen with no new
+                    // round ever starting until something else (a join or
+                    // leave changing the total) happened to trigger a
+                    // different path. Folded in here since 7, like 3 and 5,
+                    // is "odd, below a full house" — same bench+refill
+                    // shape applies.
                     // 5 used to also trigger captain-choosing mode here — the
                     // room's policy now is to wait for a full 4v4 house before
                     // doing that, so 5 (like 3) just keeps playing: the losing
@@ -658,18 +782,16 @@ module.exports = function createTeamBalance({
                     // stranded in spectators instead of playing, settling on
                     // something like 2v1/3v1 instead of the 3v2 those 5
                     // players could actually fill. Looping once per
-                    // spectator NEEDED (each call only ever needs one more to
-                    // place, since it re-reads the live roster every time)
-                    // drains them all, same "b" pattern the full-house branch
-                    // above uses for randomButton() — capped at how many
-                    // actually fit up to teamSize per side, same reasoning
-                    // as that branch's identical cap (this one shares the
-                    // same >=2*teamSize+1 condition above, so it's just as
-                    // reachable with more waiting spectators than room for).
-                    const spectatorsToInsert = Math.min(
-                        state.teamSpec.length,
-                        2 * teamSize - state.teamRed.length - state.teamBlue.length
-                    );
+                    // spectator NEEDED — see computeSpectatorsToInsert() for
+                    // how many that actually is: fills to parity with
+                    // whoever's still on the field, then only continues in
+                    // genuine pairs beyond that. Bug this used to have: a
+                    // clean 1v1 with ONE genuinely-waiting spectator (not
+                    // part of the bench) restored the 1v1 correctly on the
+                    // first pull, then kept going and dragged that same
+                    // spectator in anyway, landing on 2v1 instead of leaving
+                    // them waiting.
+                    const spectatorsToInsert = computeSpectatorsToInsert();
                     for (let i = 0; i < spectatorsToInsert; i++) {
                         setTimeout(() => {
                             // See the identical guard/comment on the

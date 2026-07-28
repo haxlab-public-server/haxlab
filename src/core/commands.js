@@ -35,6 +35,7 @@ module.exports = function createCommands({
     shopCommand,
     inventoryCommand,
     equipCommand,
+    unequipCommand,
     addCoinsCommand,
     balanceCommand,
 }) {
@@ -177,6 +178,16 @@ module.exports = function createCommands({
     Аргумент 1: <id> id аксессуара (посмотреть можно командой '!inventory').
     Пример: !equip fire наденет аксессуар с id "fire".`,
         function: equipCommand,
+    },
+    unequip: {
+        aliases: [],
+        roles: Role.PLAYER,
+        desc: `
+        Эта команда снимает надетый аксессуар.
+    Она принимает 1 аргумент:
+    Аргумент 1: <id> id аксессуара (посмотреть можно командой '!inventory').
+    Пример: !unequip fire снимет аксессуар с id "fire", если он сейчас надет.`,
+        function: unequipCommand,
     },
     training: {
         aliases: ['tr'],

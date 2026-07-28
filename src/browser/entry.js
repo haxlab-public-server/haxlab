@@ -242,6 +242,7 @@ const {
     shopCommand,
     inventoryCommand,
     equipCommand,
+    unequipCommand,
     addCoinsCommand,
     balanceCommand,
 } = createEconomy({
@@ -1077,6 +1078,7 @@ const commands = createCommands({
     shopCommand,
     inventoryCommand,
     equipCommand,
+    unequipCommand,
     addCoinsCommand,
     balanceCommand,
 });

@@ -1432,6 +1432,20 @@ console.log('\n--- team/balance.js: an already-full match never auto-upgrades to
         // entry into one of the stadium-switch scenarios below.
         await wait(310);
 
+        // Bug: 7 was missing entirely from handlePlayersStop's condition
+        // list (2, 3, 4, 5, 6, exact-full-house, and 9+ were all covered,
+        // but not 7) — a match ending at exactly 7 total players did
+        // NOTHING: no rebuild, no stadium check, no room.startGame(). The
+        // room sat frozen with no new round starting until an unrelated
+        // join/leave changed the total.
+        state.players = new Array(7).fill(0).map((_, i) => ({ id: i }));
+        calls.length = 0;
+        roomCallsLocal.length = 0;
+        balance.handlePlayersStop(null);
+        check('handlePlayersStop at 7 players does not silently do nothing', calls.includes('blueToSpecButton') || calls.includes('redToSpecButton'), true);
+        await wait(2100);
+        check('handlePlayersStop at 7 players actually starts the next round', roomCallsLocal.includes('startGame'), true);
+
         // Bug fix: 3v3/4v4 must use the big map — it must not stay on classic
         // just because the room grew into that size without an explicit !big.
         // Each scenario below waits for any earlier deferred stadiumCommand
@@ -1523,6 +1537,50 @@ console.log('\n--- team/balance.js: an already-full match never auto-upgrades to
     })();
 }
 
+console.log('\n--- team/balance.js: a bigger gap (4v0) with zero spectators fully closes to parity, not just halfway ---');
+{
+    // Numeric balance holds at all times, not just eventually: a single
+    // cross-move only closes 2 of a bigger gap (4v0 -> 3v1, still off by
+    // 2), and nothing else re-triggers this branch until the next
+    // unrelated join/leave — so a gap of 4 needs a SECOND move to actually
+    // reach parity, not just a partial improvement. Own self-contained
+    // state/room (not the shared block above) since this needs to await a
+    // deferred second move without other synchronous test code mutating
+    // the same state object in between.
+    const Team = { RED: 1, BLUE: 2, SPECTATORS: 0 };
+    const players = [
+        { id: 1, team: Team.RED }, { id: 2, team: Team.RED }, { id: 3, team: Team.RED }, { id: 4, team: Team.RED },
+    ];
+    const state = { chooseMode: false, players, teamRed: [...players], teamBlue: [], teamSpec: [] };
+    const roomMock = {
+        setPlayerTeam: (id, team) => {
+            const player = players.find((p) => p.id === id);
+            player.team = team;
+            state.teamRed = players.filter((p) => p.team === Team.RED);
+            state.teamBlue = players.filter((p) => p.team === Team.BLUE);
+            state.teamSpec = players.filter((p) => p.team === Team.SPECTATORS);
+        },
+    };
+    const createButtonHelpers = require(path.join(CORE, 'team', 'buttons'));
+    const buttons = createButtonHelpers({ room: roomMock, state, Team, getRandomInt: () => 0 });
+    const balance = require(path.join(CORE, 'team', 'balance'))({
+        room: roomMock, state, Team, State: { PLAY: 0, PAUSE: 1, STOP: 2 }, HaxNotification: { CHAT: 1 },
+        emptyPlayer: {}, infoColor: 5, scoreLimit: 3, teamSize: 4, timeLimit: 5,
+        activateChooseMode: () => {}, blueToSpecButton: buttons.blueToSpecButton, choosePlayer: () => {},
+        deactivateChooseMode: () => {}, endGame: () => {}, getRandomInt: () => 0,
+        getSpecList: () => {}, instantRestart: () => {}, randomButton: buttons.randomButton,
+        redToSpecButton: buttons.redToSpecButton, resetButton: buttons.resetButton, resumeGame: () => {},
+        stadiumCommand: () => {}, swapButton: buttons.swapButton, topButton: buttons.topButton,
+    });
+
+    balance.balanceTeams();
+    check('a 4v0 gap of 4 makes its first move synchronously', [state.teamRed.length, state.teamBlue.length], [3, 1]);
+    (async () => {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        check('...and its second move lands a tick later, reaching a clean 2v2 (not stuck at 3v1)', [state.teamRed.length, state.teamBlue.length], [2, 2]);
+    })();
+}
+
 console.log('\n--- team/balance.js: ensureFullFieldBeforeStart pulls stranded players in right before room.startGame() ---');
 {
     // Reported bug: a 2v1 finish sometimes started the next round with
@@ -1587,6 +1645,66 @@ console.log('\n--- team/balance.js: ensureFullFieldBeforeStart pulls stranded pl
         await new Promise((resolve) => setTimeout(resolve, 1600));
         check('by the time room.startGame() actually fires, nobody eligible is left spectating', [state.teamRed.length, state.teamBlue.length, state.teamSpec.length], [2, 1, 0]);
     })();
+}
+
+console.log('\n--- team/balance.js: a 1v1 finish with one genuinely-waiting spectator stays 1v1, not 2v1 ---');
+{
+    // Reported bug: "the game ended 1v1, I was in spectators, the next game
+    // started 2v1." Root cause was computeSpectatorsToInsert() (and, via
+    // it, ensureFullFieldBeforeStart()) draining every waiting spectator
+    // regardless of parity — the first pull correctly restored the 1v1 by
+    // refilling the benched loser's slot, but the loop didn't stop there
+    // and dragged the genuinely-waiting spectator in too, one player short
+    // of an even pair. Fixed by stopping at parity and only continuing in
+    // real pairs beyond that (same principle topButton()/randomButton()
+    // already use for "a lone leftover stays benched").
+    const State = { PLAY: 0, PAUSE: 1, STOP: 2 };
+    const Team = { RED: 1, BLUE: 2, SPECTATORS: 0 };
+    for (const lastWinner of [Team.RED, Team.BLUE]) {
+        const players = [
+            { id: 1, team: Team.RED }, { id: 2, team: Team.BLUE }, { id: 3, team: Team.SPECTATORS },
+        ];
+        const state = {
+            players, chooseMode: false, endGameVariable: true, lastWinner,
+            currentStadium: 'classic', gameState: State.STOP,
+        };
+        state.teamRed = players.filter((p) => p.team === Team.RED);
+        state.teamBlue = players.filter((p) => p.team === Team.BLUE);
+        state.teamSpec = players.filter((p) => p.team === Team.SPECTATORS);
+
+        const roomMock = {
+            getScores: () => ({ red: 0, blue: 0, scoreLimit: 3, time: 0, timeLimit: 3 }),
+            setScoreLimit: () => {}, setTimeLimit: () => {}, setCustomStadium: () => {}, setDefaultStadium: () => {},
+            stopGame: () => {}, startGame: () => {}, pauseGame: () => {},
+            setPlayerTeam: (id, team) => {
+                const player = state.players.find((p) => p.id === id);
+                if (!player) return;
+                player.team = team;
+                state.teamRed = state.players.filter((p) => p.team === Team.RED);
+                state.teamBlue = state.players.filter((p) => p.team === Team.BLUE);
+                state.teamSpec = state.players.filter((p) => p.team === Team.SPECTATORS);
+            },
+        };
+        const createButtonHelpers = require(path.join(CORE, 'team', 'buttons'));
+        const buttons = createButtonHelpers({ room: roomMock, state, Team, getRandomInt: () => 0 });
+        const balance = require(path.join(CORE, 'team', 'balance'))({
+            room: roomMock, state, Team, State, HaxNotification: { CHAT: 1 },
+            emptyPlayer: {}, infoColor: 5, scoreLimit: 3, teamSize: 4, timeLimit: 5,
+            activateChooseMode: () => {}, blueToSpecButton: buttons.blueToSpecButton, choosePlayer: () => {},
+            deactivateChooseMode: () => {}, endGame: () => {}, getRandomInt: () => 0,
+            getSpecList: () => {}, instantRestart: () => {}, randomButton: buttons.randomButton,
+            redToSpecButton: buttons.redToSpecButton, resetButton: buttons.resetButton, resumeGame: () => {},
+            stadiumCommand: () => {}, swapButton: buttons.swapButton, topButton: buttons.topButton,
+        });
+
+        balance.handlePlayersStop(null);
+
+        (async () => {
+            await new Promise((resolve) => setTimeout(resolve, 2100));
+            const label = lastWinner === Team.RED ? 'RED' : 'BLUE';
+            check(`1v1 (${label} won) + 1 waiting spectator settles on 1v1, spectator still waiting`, [state.teamRed.length, state.teamBlue.length, state.teamSpec.length], [1, 1, 1]);
+        })();
+    }
 }
 
 console.log('\n--- team/balance.js: handlePlayersStop with MORE than a full house (chooseMode stuck on) rebuilds cleanly, not 4v5 ---');
@@ -2038,6 +2156,52 @@ console.log('\n--- team/choosing.js: a captain\'s own pick does not wipe out the
         global.setTimeout = realSetTimeout;
         global.clearTimeout = realClearTimeout;
     }
+}
+
+console.log('\n--- team/choosing.js: choosePlayer auto-fills a completely empty side instead of silently doing nothing ---');
+{
+    // Reported live bug: choose mode active (the "time to pick captains"
+    // announcement already fired from activateChooseMode()), but one side
+    // was completely empty — neither branch of choosePlayer()'s captain
+    // determination matches an empty side (both require length != 0), so
+    // captain stayed undefined and the whole prompt+timer block, plus
+    // getSpecList() below it, were silently skipped. The room sat stuck
+    // mid-pick with no captain ever asked anything, until an unrelated
+    // join/leave/AFK toggle happened to deactivate choose mode via the
+    // self-heal check elsewhere — exactly matching the reported workaround.
+    const Team = { RED: 1, BLUE: 2, SPECTATORS: 0 };
+    const players = [];
+    let pid = 1;
+    for (let i = 0; i < 4; i++) players.push({ id: pid++, team: Team.RED });
+    for (let i = 0; i < 5; i++) players.push({ id: pid++, team: Team.SPECTATORS });
+    const state = { redCaptainChoice: '', blueCaptainChoice: '' };
+    state.teamRed = players.filter((p) => p.team === Team.RED);
+    state.teamBlue = [];
+    state.teamSpec = players.filter((p) => p.team === Team.SPECTATORS);
+
+    const roomCallsLocal = [];
+    const roomMock = {
+        sendAnnouncement: () => {},
+        setPlayerTeam: (id, team) => {
+            const player = players.find((p) => p.id === id);
+            if (!player) return;
+            player.team = team;
+            state.teamRed = players.filter((p) => p.team === Team.RED);
+            state.teamBlue = players.filter((p) => p.team === Team.BLUE);
+            state.teamSpec = players.filter((p) => p.team === Team.SPECTATORS);
+            roomCallsLocal.push(`setPlayerTeam:${id}:${team}`);
+        },
+    };
+    const choosing = require(path.join(CORE, 'team', 'choosing'))({
+        room: roomMock, state, Team, HaxNotification: { CHAT: 1, MENTION: 2 },
+        announcementColor: 1, errorColor: 2, infoColor: 3, warningColor: 4,
+        chooseModeSlowMode: 10, chooseTime: 15, defaultSlowMode: 0, SMSet: new Set(),
+        getRandomInt: (max) => Math.floor(Math.random() * max),
+    });
+
+    choosing.choosePlayer();
+    check('choosePlayer auto-fills the empty side with a spectator instead of doing nothing', state.teamBlue.length, 1);
+    check('the auto-filled player actually came from the waiting spectators', roomCallsLocal.length > 0, true);
 }
 
 console.log('\n--- commands/player.js: !afk never fires a no-op room.setPlayerTeam when already a spectator ---');
@@ -2565,6 +2729,32 @@ console.log('\n--- core/economy.js: coin awards, playtime ticker, shop/inventory
     check('equipping a form recomputes both sides via setTeamColors', roomCallsLocal, [
         `setTeamColors:${Team.RED}:${JSON.stringify([0xe56e56])}`,
         `setTeamColors:${Team.BLUE}:${JSON.stringify([0xffd700])}`,
+    ]);
+
+    // !unequip: rejects an id that isn't currently equipped. 'violet' is a
+    // real item (so this exercises the "wrong slot value" rejection, not
+    // just "unknown id") but Blue1 has neither bought nor equipped it —
+    // gold is what's actually in the form slot right now.
+    sentLocal.length = 0;
+    await economy.unequipCommand({ id: 2, name: 'Blue1' }, '!unequip violet');
+    check('!unequip <not currently equipped> is rejected', /не надето/.test(sentLocal[0].msg), true);
+    check('rejection never touches the db', (await db.getEquipped('AUTH_BLUE1')).form, 'gold');
+
+    // !unequip: unknown id.
+    sentLocal.length = 0;
+    await economy.unequipCommand({ id: 2, name: 'Blue1' }, '!unequip nope');
+    check('!unequip <unknown id> reports no such item', /Нет такого/.test(sentLocal[0].msg), true);
+
+    // !unequip: the currently-equipped form — same setTeamColors recompute
+    // as equipping one, just falling back to the default kit instead.
+    roomCallsLocal.length = 0;
+    sentLocal.length = 0;
+    await economy.unequipCommand({ id: 2, name: 'Blue1' }, '!unequip gold');
+    check('!unequip <currently equipped> confirms', /Снято: Золотой/.test(sentLocal[0].msg), true);
+    check('the slot is actually cleared in the db', (await db.getEquipped('AUTH_BLUE1')).form, null);
+    check('unequipping a form recomputes both sides back to their defaults', roomCallsLocal, [
+        `setTeamColors:${Team.RED}:${JSON.stringify([0xe56e56])}`,
+        `setTeamColors:${Team.BLUE}:${JSON.stringify([0x6a8ef5])}`,
     ]);
 
     // Equipping a 'size' item has NO immediate effect — it's a post-goal-only

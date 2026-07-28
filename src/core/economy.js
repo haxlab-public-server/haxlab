@@ -350,6 +350,33 @@ module.exports = function createEconomy({
         room.sendAnnouncement(`✔️ Надето: ${item.name} !`, player.id, announcementColor, 'bold', HaxNotification.CHAT);
     }
 
+    async function unequipCommand(player, message) {
+        const msgArray = message.split(/ +/).slice(1);
+        const itemId = msgArray[0];
+        if (!itemId) {
+            room.sendAnnouncement(`Использование: !unequip <id>. Список ваших аксессуаров — "!inventory".`, player.id, errorColor, 'bold', HaxNotification.CHAT);
+            return;
+        }
+        const item = itemsById.get(itemId);
+        if (!item) {
+            room.sendAnnouncement(`Нет такого аксессуара.`, player.id, errorColor, 'bold', HaxNotification.CHAT);
+            return;
+        }
+        const auth = getAuth(player);
+        const equipped = await db.getEquipped(auth);
+        if (equipped[item.type] !== item.id) {
+            room.sendAnnouncement(`У вас не надето "${item.name}".`, player.id, errorColor, 'bold', HaxNotification.CHAT);
+            return;
+        }
+        await db.setEquipped(auth, item.type, null);
+        // Same reasoning as equipCommand above: a form is a whole-side
+        // decision, so unequipping one needs both sides recomputed (falls
+        // back to a teammate's form, or the default kit) — not just this
+        // player's own state.
+        if (item.type === 'form') await applyTeamForms();
+        room.sendAnnouncement(`✔️ Снято: ${item.name} !`, player.id, announcementColor, 'bold', HaxNotification.CHAT);
+    }
+
     // Testing/support tool, not a player-facing command — gated to
     // Role.MASTER in commands.js, same as !banauth/!setadmin/etc. Target
     // accepts #<id> (online) or a raw auth (offline), same as !banauth.
@@ -401,6 +428,7 @@ module.exports = function createEconomy({
         shopCommand,
         inventoryCommand,
         equipCommand,
+        unequipCommand,
         addCoinsCommand,
         balanceCommand,
     };

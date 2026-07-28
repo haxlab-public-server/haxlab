@@ -66,6 +66,23 @@ module.exports = function createChoosingHelpers({
 
     function choosePlayer() {
         clearTimeout(state.timeOutCap);
+        // Bug: if one side is completely empty, neither branch below ever
+        // assigns a captain (both require the side to be non-empty) —
+        // captain stayed undefined, the whole announcement+timer block was
+        // silently skipped, and getSpecList() below also never ran (it
+        // requires BOTH sides non-empty). The room was left showing
+        // activateChooseMode()'s "time to pick captains" announcement with
+        // no captain ever actually prompted, stuck until an unrelated
+        // join/leave/AFK toggle happened to deactivate choose mode via the
+        // self-heal check elsewhere. There's nothing to "pick" for a side
+        // with nobody on it anyway — auto-fill it with one waiting
+        // spectator and let the resulting room.onPlayerTeamChange cascade
+        // (-> handlePlayersTeamChange) re-evaluate from there, same as
+        // every other roster change in this file.
+        if ((state.teamRed.length == 0 || state.teamBlue.length == 0) && state.teamSpec.length > 0) {
+            room.setPlayerTeam(state.teamSpec[0].id, state.teamRed.length == 0 ? Team.RED : Team.BLUE);
+            return;
+        }
         let captain;
         if (state.teamRed.length <= state.teamBlue.length && state.teamRed.length != 0) {
             captain = state.teamRed[0];
@@ -126,7 +143,15 @@ module.exports = function createChoosingHelpers({
         const msgArray = message.split(/ +/);
         if (player.id == state.teamRed[0].id || player.id == state.teamBlue[0].id) {
             if (state.teamRed.length <= state.teamBlue.length && player.id == state.teamRed[0].id) {
-                if (['top', 'auto'].includes(msgArray[0].toLowerCase())) {
+                // Bug: unlike the numeric-pick branch below (which already
+                // bounds-checks against state.teamSpec.length), top/random/
+                // bottom indexed straight into state.teamSpec with no
+                // guard — reachable if a captain's message lands right as
+                // teamSpec empties out from elsewhere, throwing instead of
+                // reporting nothing left to pick.
+                if (state.teamSpec.length == 0) {
+                    return true;
+                } else if (['top', 'auto'].includes(msgArray[0].toLowerCase())) {
                     room.setPlayerTeam(state.teamSpec[0].id, Team.RED);
                     state.redCaptainChoice = 'top';
                     room.sendAnnouncement(
@@ -183,7 +208,10 @@ module.exports = function createChoosingHelpers({
                 return true;
             }
             if (state.teamRed.length > state.teamBlue.length && player.id == state.teamBlue[0].id) {
-                if (['top', 'auto'].includes(msgArray[0].toLowerCase())) {
+                // See the identical guard/comment on the red branch above.
+                if (state.teamSpec.length == 0) {
+                    return true;
+                } else if (['top', 'auto'].includes(msgArray[0].toLowerCase())) {
                     room.setPlayerTeam(state.teamSpec[0].id, Team.BLUE);
                     state.blueCaptainChoice = 'top';
                     room.sendAnnouncement(
