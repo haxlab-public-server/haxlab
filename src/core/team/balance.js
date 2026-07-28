@@ -58,68 +58,47 @@ module.exports = function createTeamBalance({
 
     // Safety net around room.startGame(): whatever sequence of
     // benches/pulls/pairs led here, if there are up to a full house's worth
-    // of players (<=2*teamSize) and the field is uneven, top the smaller
-    // side back up to parity instead of kicking off with a player parked
-    // who should be on the field. Bug this had at first: draining EVERY
-    // waiting spectator regardless of parity — a clean 1v1 with one
-    // genuinely-waiting spectator (nothing wrong with it, no one stranded)
-    // got that spectator force-added right before start, landing on 2v1
-    // instead of leaving them waiting. Reuses computeSpectatorsToInsert()'s
-    // "up to parity, then only genuine pairs beyond that" rule so a real
-    // stranding still gets fixed without also dragging in a legitimate
-    // leftover. Staggered (not a synchronous loop) — same reasoning as
-    // every other multi-move sequence in this file: state.teamSpec isn't
-    // reliably guaranteed to have shrunk yet by the very next call in real
-    // production.
-    // Bug: this pulls in waiting spectators same as the ordinary
-    // balanceTeams() growth path, but WITHOUT that path's "stay within the
-    // current stadium's own cap" limit (computeSpectatorsToInsert() fills up
-    // to the full 2*teamSize, not the live stadium's cap) — needed here
-    // since this is the one place that's supposed to catch a genuinely
-    // stranded player regardless of shape. Confirmed in practice: a 2v2 on
-    // classic with spectators waiting could get topped all the way to 3v3
-    // right here, but nothing reasserted the stadium afterward, so the
-    // match started on classic anyway (the reported "stuck on classic"
-    // bug). onSettled runs after the pulls (if any) have actually landed,
-    // not synchronously — callers that need to start the game only once the
-    // final shape (and now-correct stadium) are both settled should do that
-    // inside it rather than racing it with their own fixed delay.
-    // Bug (reported live, twice): computeSpectatorsToInsert() only ever
-    // PULLS FROM SPECTATORS — unlike balanceTeams()'s own "abs(diff)>specLen"
-    // handling, it has no cross-move fallback for when there's genuinely
-    // nobody waiting (rule 3: nxn-2 with zero spectators should move the
-    // last player of the bigger side across instead of just sitting
-    // uneven). It's also computed once, synchronously, right after
-    // benching — state.teamSpec excludes AFK players entirely, same as
-    // state.players everywhere else, so if the just-benched losing side
-    // went AFK right as/after losing (a common reaction), they land on
-    // team=SPECTATORS but aren't counted here at all, and nothing ever
-    // re-checks afterward. Reported live as the match starting (or staying
-    // stopped) with the benched side sitting at 0 — the ONLY thing that
-    // ever fixed it was some unrelated join/leave/afk toggle, because
-    // THAT goes through balanceTeams(), which already has both the
-    // cross-move fallback and gets re-run fresh on every such event. Fixed
-    // by reusing balanceTeams() itself here for whatever's still uneven
-    // after the direct pull, instead of a second, separate, incomplete
-    // implementation — the room now recovers exactly the same way a
-    // manual !afk toggle already reliably did, without needing anyone to
-    // trigger it.
+    // of players (<=2*teamSize) and the field is uneven, top it back up to
+    // parity (pullSpectatorsToParity() — pull from spectators, cross-move
+    // if genuinely none are available) instead of kicking off with a
+    // player parked who should be on the field, or sitting lopsided
+    // forever. Uses that narrow primitive rather than the general
+    // balanceTeams() specifically because pullSpectatorsToParity() never
+    // touches state.chooseMode — this function's own onSettled() is what
+    // schedules room.startGame() moments later, so it must never fire
+    // while a genuine interactive choose-mode session is active.
+    //
+    // Bug (reported live): that session doesn't have to come from THIS
+    // function's own pull to be a problem — this runs 2000ms after a match
+    // ends (see handlePlayersStop's scheduleRestart), and an ordinary join
+    // or leave landing anywhere in that window can independently activate
+    // real choosing via balanceTeams()'s own "abs(diff)<specLen, full
+    // house" branch (pausing the game, prompting a captain). Without
+    // checking state.chooseMode here, this would still call onSettled()
+    // regardless once its own pull settles, forcing room.startGame() out
+    // from under that in-progress pick (reported live as "капитана всё
+    // равно нет, игра стартует 4x0"). Checked both up front (in case it
+    // was already true before this function even started) and again after
+    // the pull settles (in case an event landed during it) — if it's
+    // active either time, this bails out entirely and leaves starting the
+    // game to that session's own completion path
+    // (handlePlayersTeamChange's resumeGame()/room.startGame(), once
+    // picking is genuinely done) instead of racing it.
     function ensureFullFieldBeforeStart(onSettled) {
+        if (state.chooseMode) {
+            return;
+        }
         if (state.players.length > 2 * teamSize) {
             if (onSettled) onSettled();
             return;
         }
-        const n = computeSpectatorsToInsert();
-        for (let i = 0; i < n; i++) {
-            setTimeout(() => {
-                safeMoveNextSpec(state.teamRed.length <= state.teamBlue.length ? Team.RED : Team.BLUE);
-            }, 5 * i);
-        }
-        setTimeout(() => {
-            balanceTeams();
+        pullSpectatorsToParity(() => {
+            if (state.chooseMode) {
+                return;
+            }
             reassertStadium();
             if (onSettled) onSettled();
-        }, 5 * n);
+        });
     }
 
     // Every staggered spectator-pull below schedules its moves as a fixed
@@ -155,6 +134,87 @@ module.exports = function createTeamBalance({
         const towardParity = Math.min(available, diff);
         const remainingPairs = Math.floor((available - towardParity) / 2);
         return towardParity + remainingPairs * 2;
+    }
+
+    // The core "close the numeric gap using whoever's actually available"
+    // mechanic — used to be reimplemented slightly differently in three
+    // places (balanceTeams()'s own "abs(diff)>specLen" branch,
+    // handlePlayersStop's WinStay bench+refill branches, and
+    // ensureFullFieldBeforeStart), each patched separately over several
+    // reported bugs this session. Unified here: pull from state.teamSpec to
+    // parity-then-pairs first (computeSpectatorsToInsert() — already
+    // correct, untouched), then, once that settles, if the gap is STILL
+    // >=2 with spectators genuinely exhausted, cross-move the excess from
+    // the bigger side (rule 3: nxn-2 with zero spectators moves the last
+    // player across instead of sitting uneven). Deliberately never touches
+    // state.chooseMode / activateChooseMode() — this is the "always safe,
+    // never triggers interactive picking" primitive, unlike balanceTeams()
+    // itself (whose own "abs(diff)<specLen, full house" branch DOES
+    // activate real choosing — calling balanceTeams() from
+    // ensureFullFieldBeforeStart used to risk hitting that branch right
+    // before a forced room.startGame(), yanking the game out from under an
+    // in-progress pick; using this narrower primitive there instead fixes
+    // that). When there's nothing at all to pull (n===0), the cross-move
+    // check — and its first move, if needed — runs synchronously, matching
+    // every direct balanceTeams() caller's expectation of seeing an
+    // immediate effect; any further moves, or the whole sequence when
+    // there WAS something to pull first, stay staggered.
+    function pullSpectatorsToParity(callback) {
+        const n = computeSpectatorsToInsert();
+        const runCrossMove = () => {
+            if (state.teamSpec.length !== 0 || Math.abs(state.teamRed.length - state.teamBlue.length) < 2) {
+                if (callback) callback();
+                return;
+            }
+            const movesNeeded = Math.floor(Math.abs(state.teamRed.length - state.teamBlue.length) / 2);
+            const moveOneAcross = () => {
+                if (Math.abs(state.teamRed.length - state.teamBlue.length) >= 2) {
+                    const biggerTeam = state.teamRed.length > state.teamBlue.length ? state.teamRed : state.teamBlue;
+                    const smallerSide = state.teamRed.length > state.teamBlue.length ? Team.BLUE : Team.RED;
+                    room.setPlayerTeam(biggerTeam[biggerTeam.length - 1].id, smallerSide);
+                }
+            };
+            for (let i = 0; i < movesNeeded; i++) {
+                if (i === 0) {
+                    moveOneAcross();
+                } else {
+                    setTimeout(moveOneAcross, 5 * i);
+                }
+            }
+            setTimeout(() => {
+                if (callback) callback();
+            }, 5 * movesNeeded);
+        };
+        if (n === 0) {
+            runCrossMove();
+        } else {
+            const pullOne = () => {
+                safeMoveNextSpec(state.teamRed.length <= state.teamBlue.length ? Team.RED : Team.BLUE);
+            };
+            for (let i = 0; i < n; i++) {
+                if (i === 0) {
+                    pullOne();
+                } else {
+                    setTimeout(pullOne, 5 * i);
+                }
+            }
+            setTimeout(runCrossMove, 5 * n);
+        }
+    }
+
+    // Replaces what used to be 5 identical copies (one per handlePlayersStop
+    // branch) of "wait delayMs, run the pre-start safety net, then start the
+    // game 50ms after that settles" — same delayMs (2000 everywhere it was
+    // used) and same 50ms trailing buffer every time, just written out
+    // separately per branch.
+    function scheduleRestart(delayMs) {
+        state.startTimeout = setTimeout(() => {
+            ensureFullFieldBeforeStart(() => {
+                setTimeout(() => {
+                    room.startGame();
+                }, 50);
+            });
+        }, delayMs);
     }
 
     // Rebuilds from a clean 0v0, assigning every current player (capped at
@@ -291,79 +351,21 @@ module.exports = function createTeamBalance({
                 // spectators genuinely waiting, just not ENOUGH of them to
                 // fully close the gap on their own (e.g. a 4v0 with only 2
                 // waiting, not the 4 needed) — used to fall through this
-                // whole branch doing nothing at all, since the cross-move
-                // below only ever fired when teamSpec was EXACTLY empty.
-                // Those waiting spectators just sat there indefinitely
-                // ("капитаном синих должен стать человек из зрителей, не
-                // афк, но он не встаёт") until an unrelated join/leave/afk
-                // toggle happened to shift the numbers into one of the
-                // branches that DID do something. Pull in whatever IS
-                // actually available onto the smaller side first (can never
-                // overshoot past parity: this branch only runs while
-                // available < the gap, so the gap after pulling everyone in
-                // is always still >= 1) — same one-real-tick-apart reasoning
-                // as every other multi-move sequence in this file.
-                const availableToPull = state.teamSpec.length;
-                if (availableToPull > 0) {
-                    const smallerSide = state.teamRed.length < state.teamBlue.length ? Team.RED : Team.BLUE;
-                    for (let i = 0; i < availableToPull; i++) {
-                        if (i === 0) {
-                            safeMoveNextSpec(smallerSide);
-                        } else {
-                            setTimeout(() => {
-                                safeMoveNextSpec(smallerSide);
-                            }, 5 * i);
-                        }
-                    }
-                }
-                // Exception: if there's truly nobody left to draw from (no
-                // non-AFK spectators waiting at all — either genuinely none
-                // to begin with, or the pull above just used up the last of
-                // them), a lopsided match like 4v2 would otherwise stay that
-                // way indefinitely. Nudge it back toward parity by moving
-                // the last player of the BIGGER side across to the smaller
-                // one — they keep playing, just switch sides, unlike the
-                // old benching behavior this deliberately doesn't bring
-                // back. Only when the gap is at least 2: moving exactly one
-                // player changes the gap by exactly 2 either way, so at a
-                // gap of 1 (e.g. 4v3) this would just flip who has the extra
-                // player (4v3 -> 3v4) — no actual improvement, just churn —
-                // whereas a gap of 2+ (4v2 -> 3v3) is always a genuine step
-                // toward parity. Numeric balance is meant to hold at all
-                // times, not just eventually — a single move here only
-                // closes 2 of the gap (4v0 -> 3v1, still off by 2), and
-                // nothing else re-triggers this branch until the next
-                // unrelated join/leave. Loop enough moves to close the WHOLE
-                // gap down to <=1 in one pass. Deferred until after the pull
-                // above actually lands (if it ran at all) — reads the
-                // settled result, not the pre-pull snapshot. Each move
-                // re-checks the live gap first, both as the natural stopping
-                // condition and as a guard against a concurrent event
-                // closing it in the meantime.
-                const closeRemainingGap = () => {
-                    if (state.teamSpec.length == 0 && Math.abs(state.teamRed.length - state.teamBlue.length) >= 2) {
-                        const movesNeeded = Math.floor(Math.abs(state.teamRed.length - state.teamBlue.length) / 2);
-                        const moveOneAcross = () => {
-                            if (Math.abs(state.teamRed.length - state.teamBlue.length) >= 2) {
-                                const biggerTeam = state.teamRed.length > state.teamBlue.length ? state.teamRed : state.teamBlue;
-                                const smallerSide = state.teamRed.length > state.teamBlue.length ? Team.BLUE : Team.RED;
-                                room.setPlayerTeam(biggerTeam[biggerTeam.length - 1].id, smallerSide);
-                            }
-                        };
-                        for (let i = 0; i < movesNeeded; i++) {
-                            if (i === 0) {
-                                moveOneAcross();
-                                continue;
-                            }
-                            setTimeout(moveOneAcross, 5 * i);
-                        }
-                    }
-                };
-                if (availableToPull === 0) {
-                    closeRemainingGap();
-                } else {
-                    setTimeout(closeRemainingGap, 5 * availableToPull);
-                }
+                // whole branch doing nothing at all, since the old inline
+                // cross-move only ever fired when teamSpec was EXACTLY
+                // empty. Those waiting spectators just sat there
+                // indefinitely ("капитаном синих должен стать человек из
+                // зрителей, не афк, но он не встаёт") until an unrelated
+                // join/leave/afk toggle happened to shift the numbers into
+                // one of the branches that DID do something. Fixed by
+                // pullSpectatorsToParity() (see its own comment): pull
+                // whatever IS actually available first (rule 2), then
+                // cross-move any remaining gap of 2+ once spectators are
+                // genuinely exhausted (rule 3) — this branch's own reason
+                // for existing (diff > specLen) guarantees the pull alone
+                // can never fully close the gap here, so the cross-move
+                // always has real work left to do once it runs.
+                pullSpectatorsToParity();
             } else if (Math.abs(state.teamRed.length - state.teamBlue.length) < state.teamSpec.length && state.teamRed.length != state.teamBlue.length) {
                 const n = Math.abs(state.teamRed.length - state.teamBlue.length);
                 if (state.players.length >= 2 * teamSize) {
@@ -706,331 +708,176 @@ module.exports = function createTeamBalance({
         }
     }
 
+    // Bug: this used to also have a second, near-identical copy of the
+    // WinStay bench+refill logic below, reached whenever state.chooseMode
+    // was still true (endGame() used to defensively activateChooseMode()
+    // on every win with a full-or-bigger house — see its own comment for
+    // why that was removed). That copy is now unreachable:
+    // activateChooseMode() is only ever called from balanceTeams()'s own
+    // ordinary-growth branch during LIVE play, which requires
+    // state.gameState to not already be freshly STOP, and can't coincide
+    // with state.endGameVariable being true at the moment this function's
+    // own guard checks it (endGameVariable only becomes true inside
+    // endGame(), which is what a genuine match conclusion sets — not
+    // something a still-live, mid-pick round has done yet). Deleting it
+    // removed ~140 lines of duplicated bench/refill/reset logic that had
+    // its own, subtly different bugs from the copy below over the course
+    // of this file's history.
     function handlePlayersStop(byPlayer) {
         if (byPlayer == null && state.endGameVariable) {
-            if (state.chooseMode) {
-                if (state.players.length == 2 * teamSize) {
-                    // endGame() activates choose mode defensively on EVERY
-                    // win with a full-or-bigger house, before it's known
-                    // whether there are actually any extra spectators to
-                    // pick from. Landing here means there weren't (exactly
-                    // 2*teamSize total) — nothing to choose, so skip
-                    // straight to a random fill. Must go through
-                    // deactivateChooseMode(), not a bare assignment: it also
-                    // resets slowMode back down (otherwise chat stays on the
-                    // slower captain-picking rate) and clears
-                    // redCaptainChoice/blueCaptainChoice (otherwise a stale
-                    // 'top'/'random'/'bottom' from this round leaks into the
-                    // NEXT real choose-mode session, silently auto-picking
-                    // for whichever captain sits down next without ever
-                    // asking them).
-                    deactivateChooseMode();
-                    // resetButton() + teamSize x randomButton() below always
-                    // rebuilds an even teamSize v teamSize split regardless
-                    // of whatever shape led in here, so the map this needs
-                    // is already known up front — no need to wait and
-                    // observe the rebuilt teams. Switching the stadium
-                    // BEFORE the rebuild keeps the map settled before anyone
-                    // gets placed on it, rather than reshuffling teams onto
-                    // a map that's about to change under them.
-                    if (state.currentStadium != desiredStadiumFor(teamSize)) {
-                        setTimeout(() => {
-                            stadiumCommand(emptyPlayer, `!${desiredStadiumFor(teamSize)}`);
-                        }, 5);
-                    }
-                    resetButton();
-                    for (let i = 0; i < teamSize; i++) {
-                        clearTimeout(state.insertingTimeout);
-                        state.insertingPlayers = true;
-                        setTimeout(() => {
-                            randomButton();
-                        }, 200 * i);
-                    }
+            if (state.players.length == 2) {
+                if (state.lastWinner == Team.BLUE) {
+                    swapButton();
+                }
+                // swapButton() only relabels which color the winner wears —
+                // team SIZES are already final synchronously, but still
+                // deferred a tick like every other stadium switch in this
+                // file (never called synchronously mid-cascade).
+                setTimeout(() => {
+                    reassertStadium();
+                }, 5);
+                scheduleRestart(2000);
+            } else if (state.players.length == 3 || state.players.length == 5 || state.players.length == 7 || state.players.length >= 2 * teamSize) {
+                // Bug: 7 was missing entirely from this list — every OTHER
+                // total from 2 up to a full house (2, 3, 4, 5, 6) had a
+                // branch, plus 8 and 9+, but a match ending at exactly 7
+                // (e.g. 4v3) matched none of them. handlePlayersStop did
+                // nothing at all: no rebuild, no stadium check, no
+                // room.startGame() — the room sat frozen with no new round
+                // ever starting until something else (a join or leave
+                // changing the total) happened to trigger a different
+                // path. Folded in here since 7, like 3 and 5, is "odd,
+                // below a full house" — same bench+refill shape applies.
+                // 5 used to also trigger captain-choosing mode here — the
+                // room's policy now is to wait for a full 4v4 house before
+                // doing that, so 5 (like 3) just keeps playing: the losing
+                // team benches, the refill below pulls someone back in.
+                // >=2*teamSize (8, 9+) used to be reached only when
+                // state.chooseMode was still true (via endGame()'s own
+                // defensive activateChooseMode() call — removed, see its
+                // own comment) through a second, near-identical copy of
+                // this exact branch. Folded in here instead: same WinStay
+                // bench+refill shape as every other total.
+                //
+                // Bug: with genuinely ZERO waiting spectators (checked
+                // BEFORE any benching below — the bench itself always
+                // creates a non-empty teamSpec, that's not what this
+                // checks), the bench+swap+refill sequence only ever has the
+                // just-benched loser(s) to draw the refill from — reported
+                // live as "a match ending 2v1 starts the next one 2v1
+                // again": the SAME loser gets put right back, reconstructing
+                // the identical shape (winners kept together, loser alone)
+                // instead of a fresh, random reassignment. An uneven split
+                // itself is unavoidable with an odd total (someone's always
+                // going to be the "extra"), but WHO ends up where shouldn't
+                // be tied to who just won or lost. Reuse the same random
+                // rebuild the exact-4/exact-6 branches already do below for
+                // this specific case.
+                if (state.teamSpec.length == 0) {
+                    randomFillAll();
+                    clearTimeout(state.insertingTimeout);
+                    state.insertingPlayers = true;
+                    const totalToPlace = Math.min(state.players.length, 2 * teamSize);
                     state.insertingTimeout = setTimeout(() => {
                         state.insertingPlayers = false;
-                    }, 200 * teamSize);
-                    state.startTimeout = setTimeout(() => {
-                        ensureFullFieldBeforeStart(() => {
-                            setTimeout(() => {
-                                room.startGame();
-                            }, 50);
-                        });
-                    }, 2000);
+                    }, 5 * totalToPlace);
+                    setTimeout(() => {
+                        reassertStadium();
+                    }, 5 * totalToPlace);
                 } else {
-                    // Bug: this branch's own bench + swap + topButton()
-                    // sequence below is a fully automatic, deterministic
-                    // rebuild — nobody is actually hand-picking anything
-                    // here — but chooseMode was never turned off for this
-                    // shape (only the exact-2*teamSize branch above does
-                    // that). Every room.setPlayerTeam() call this sequence
-                    // makes still fires room.onPlayerTeamChange ->
-                    // handlePlayersTeamChange, which — seeing chooseMode
-                    // still true — reacts independently: pulling its OWN
-                    // spectators via its abs(diff)==specLen completion
-                    // branch, or worse, falling through to choosePlayer(),
-                    // which sends a genuine "pick a player" prompt (and
-                    // arms a kick timer) to whichever player happens to be
-                    // teamRed[0]/teamBlue[0] at that instant — mid-automatic
-                    // rebuild, to someone who was never actually asked to
-                    // captain anything. Confirmed in practice: this second,
-                    // uncoordinated process pulling from the same teamSpec
-                    // pool as this branch's own topButton() loop below can
-                    // land the match on an uneven split (e.g. 4v5) instead
-                    // of the balanced result this branch is trying to build.
-                    // Deactivating up front — matching the exact-2*teamSize
-                    // branch above — removes the second process entirely.
-                    deactivateChooseMode();
                     if (state.lastWinner == Team.RED) {
                         blueToSpecButton();
-                    } else if (state.lastWinner == Team.BLUE) {
+                    } else {
                         redToSpecButton();
                         setTimeout(() => {
                             swapButton();
-                        }, 10);
-                    } else {
-                        resetButton();
+                        }, 5);
                     }
                     clearTimeout(state.insertingTimeout);
                     state.insertingPlayers = true;
-                    // Same reasoning as the plain 3/5/9+ branch below: one
-                    // topButton() call only pulls in a single spectator,
-                    // which stranded the rest of a benched bigger team
-                    // instead of refilling properly. Loop once per spectator
-                    // NEEDED — see computeSpectatorsToInsert() for how many
-                    // that actually is (fills to parity, then only genuine
-                    // pairs beyond that).
-                    const spectatorsToInsert = computeSpectatorsToInsert();
-                    for (let i = 0; i < spectatorsToInsert; i++) {
-                        setTimeout(() => {
-                            // spectatorsToInsert counts PLAYERS to insert,
-                            // one per scheduled call — topButton() doesn't
-                            // match that: once red==blue mid-loop it takes
-                            // its OWN pair branch and inserts 2 (a sync move
-                            // plus its own +5ms deferred second half), which
-                            // this loop's per-call cap check can't see
-                            // coming. Confirmed in practice this overfills
-                            // past 2*teamSize (e.g. 4v5 instead of 4v4) —
-                            // no fixed stagger between these calls reliably
-                            // avoided it either, since topButton()'s
-                            // deferred half and this loop's own calls both
-                            // land within the same few-ms window under real
-                            // timer jitter. Filling directly with
-                            // safeMoveNextSpec — always exactly one player,
-                            // no internal deferred half of its own — sidesteps
-                            // the whole problem instead of racing it.
-                            if (state.teamRed.length + state.teamBlue.length < 2 * teamSize) {
-                                safeMoveNextSpec(state.teamRed.length <= state.teamBlue.length ? Team.RED : Team.BLUE);
-                            }
-                        }, 300 + 5 * i);
-                    }
-                    state.insertingTimeout = setTimeout(() => {
-                        state.insertingPlayers = false;
-                    }, 300 + 5 * spectatorsToInsert);
-                    // Unlike the exact-2*teamSize branch above, the shape
-                    // this settles on isn't known in advance (depends on how
-                    // many spectators were actually available to refill
-                    // with) — wait for the refill to finish, then reassert
-                    // off the real result rather than guessing from the
-                    // pre-refill player count.
+                    // Bug (reported live): the refill used to compute
+                    // computeSpectatorsToInsert() SYNCHRONOUSLY, immediately
+                    // after blueToSpecButton()/redToSpecButton() returns —
+                    // but room.setPlayerTeam() firing room.onPlayerTeamChange
+                    // synchronously isn't reliable for a TIGHT loop of
+                    // back-to-back calls in real production (the exact same
+                    // reasoning behind every other "index [0], staggered 5ms
+                    // apart" pattern in this file — see e.g. topButton()'s
+                    // own comment). The just-benched losers weren't reliably
+                    // counted in state.teamSpec yet, undercounting how many
+                    // were actually available and stranding the rest:
+                    // reported live as 9 players (2v2 + 5 waiting) settling
+                    // on a 3v3 with 3 non-AFK spectators left over instead of
+                    // the 4v4 those numbers could have filled. Deferred a
+                    // tick so the bench (and, on the swapped path, the swap
+                    // itself) has actually landed before counting off it —
+                    // then pullSpectatorsToParity() handles the actual
+                    // refill (pull to parity, cross-move if genuinely
+                    // nobody's left — see its own comment). state.insertingPlayers
+                    // is cleared from ITS completion callback (not a
+                    // guessed fixed duration like the old inline version
+                    // used) — more precise, and required: leaving it stuck
+                    // true forever (a real regression introduced while
+                    // consolidating this branch) permanently stalled
+                    // safeBalanceTeams() for every subsequent join/leave,
+                    // confirmed via the fuzzer as a genuine rule-2
+                    // violation (a waiting spectator never getting pulled
+                    // in, no matter how long the room sat afterward).
                     setTimeout(() => {
-                        reassertStadium();
-                    }, 300 + 5 * spectatorsToInsert);
+                        pullSpectatorsToParity(() => {
+                            state.insertingPlayers = false;
+                            reassertStadium();
+                        });
+                    }, 10);
                 }
-            } else {
-                if (state.players.length == 2) {
-                    if (state.lastWinner == Team.BLUE) {
-                        swapButton();
-                    }
-                    // swapButton() only relabels which color the winner
-                    // wears — team SIZES are already final synchronously,
-                    // but still deferred a tick like every other stadium
-                    // switch in this file (never called synchronously
-                    // mid-cascade).
+                scheduleRestart(2000);
+            } else if (state.players.length == 4) {
+                // resetButton() + 2x randomButton() below always rebuilds an
+                // even 2v2 regardless of the shape leading in, so the map is
+                // already known up front — switch BEFORE the rebuild so it's
+                // already settled before anyone gets placed on it.
+                if (state.currentStadium != desiredStadiumFor(2)) {
                     setTimeout(() => {
-                        reassertStadium();
+                        stadiumCommand(emptyPlayer, `!${desiredStadiumFor(2)}`);
                     }, 5);
-                    state.startTimeout = setTimeout(() => {
-                        ensureFullFieldBeforeStart(() => {
-                            setTimeout(() => {
-                                room.startGame();
-                            }, 50);
-                        });
-                    }, 2000);
-                } else if (state.players.length == 3 || state.players.length == 5 || state.players.length == 7 || state.players.length >= 2 * teamSize) {
-                    // Bug: 7 was missing entirely from this list — every
-                    // OTHER total from 2 up to a full house (2, 3, 4, 5, 6)
-                    // had a branch, plus the exact-full-house and 9+ cases
-                    // above, but a match ending at exactly 7 (e.g. 4v3)
-                    // matched none of them. handlePlayersStop did nothing
-                    // at all: no rebuild, no stadium check, no
-                    // room.startGame() — the room sat frozen with no new
-                    // round ever starting until something else (a join or
-                    // leave changing the total) happened to trigger a
-                    // different path. Folded in here since 7, like 3 and 5,
-                    // is "odd, below a full house" — same bench+refill
-                    // shape applies.
-                    // 5 used to also trigger captain-choosing mode here — the
-                    // room's policy now is to wait for a full 4v4 house before
-                    // doing that, so 5 (like 3) just keeps playing: the losing
-                    // team benches, topButton() pulls someone back in.
-                    // >=2*teamSize (8, 9+) used to be handled by the
-                    // chooseMode branches above, reached via endGame()'s own
-                    // defensive activateChooseMode() call — removed (see
-                    // endGame()'s comment: it only ever produced a confusing
-                    // on/off flicker and a real race window, since those
-                    // branches always deactivated immediately anyway with
-                    // nothing to hand-pick). Folded in here instead: same
-                    // WinStay bench+refill shape as every other total,
-                    // exactly like 9+ already was.
-                    //
-                    // Bug: with genuinely ZERO waiting spectators (checked
-                    // BEFORE any benching below — the bench itself always
-                    // creates a non-empty teamSpec, that's not what this
-                    // checks), the bench+swap+refill sequence only ever has
-                    // the just-benched loser(s) to draw the refill from —
-                    // reported live as "a match ending 2v1 starts the next
-                    // one 2v1 again": the SAME loser gets put right back,
-                    // reconstructing the identical shape (winners kept
-                    // together, loser alone) instead of a fresh, random
-                    // reassignment. An uneven split itself is unavoidable
-                    // with an odd total (someone's always going to be the
-                    // "extra"), but WHO ends up where shouldn't be tied to
-                    // who just won or lost. Reuse the same random rebuild
-                    // the exact-4/exact-6 branches already do below for
-                    // this specific case.
-                    if (state.teamSpec.length == 0) {
-                        randomFillAll();
-                        clearTimeout(state.insertingTimeout);
-                        state.insertingPlayers = true;
-                        const totalToPlace = Math.min(state.players.length, 2 * teamSize);
-                        state.insertingTimeout = setTimeout(() => {
-                            state.insertingPlayers = false;
-                        }, 5 * totalToPlace);
-                        setTimeout(() => {
-                            reassertStadium();
-                        }, 5 * totalToPlace);
-                    } else {
-                        if (state.lastWinner == Team.RED) {
-                            blueToSpecButton();
-                        } else {
-                            redToSpecButton();
-                            setTimeout(() => {
-                                swapButton();
-                            }, 5);
-                        }
-                        clearTimeout(state.insertingTimeout);
-                        state.insertingPlayers = true;
-                        // One topButton() call only ever pulls in a single
-                        // spectator — fine when the losing side had just one
-                        // player to begin with, but benching a bigger losing
-                        // side (e.g. a 3v2 down to 5 total) left the rest
-                        // stranded in spectators instead of playing, settling
-                        // on something like 2v1/3v1 instead of the 3v2 those
-                        // 5 players could actually fill. Looping once per
-                        // spectator NEEDED — see computeSpectatorsToInsert()
-                        // for how many that actually is: fills to parity with
-                        // whoever's still on the field, then only continues
-                        // in genuine pairs beyond that. Bug this used to
-                        // have: a clean 1v1 with ONE genuinely-waiting
-                        // spectator (not part of the bench) restored the 1v1
-                        // correctly on the first pull, then kept going and
-                        // dragged that same spectator in anyway, landing on
-                        // 2v1 instead of leaving them waiting.
-                        const spectatorsToInsert = computeSpectatorsToInsert();
-                        for (let i = 0; i < spectatorsToInsert; i++) {
-                            setTimeout(() => {
-                                // See the identical guard/comment on the
-                                // chooseMode branch above: safeMoveNextSpec
-                                // (always exactly one player, no internal
-                                // deferred half of its own) sidesteps
-                                // topButton()'s pair-branch overfill instead
-                                // of trying to out-time it.
-                                if (state.teamRed.length + state.teamBlue.length < 2 * teamSize) {
-                                    safeMoveNextSpec(state.teamRed.length <= state.teamBlue.length ? Team.RED : Team.BLUE);
-                                }
-                            }, 200 + 5 * i);
-                        }
-                        state.insertingTimeout = setTimeout(() => {
-                            state.insertingPlayers = false;
-                        }, 300 + 5 * spectatorsToInsert);
-                        // Same reasoning as the chooseMode branch above: the
-                        // resulting shape depends on how many spectators were
-                        // actually available, so wait for the refill to
-                        // settle before reasserting — well before
-                        // room.startGame() fires at 2000ms below.
-                        setTimeout(() => {
-                            reassertStadium();
-                        }, 300 + 5 * spectatorsToInsert);
-                    }
-                    state.startTimeout = setTimeout(() => {
-                        ensureFullFieldBeforeStart(() => {
-                            setTimeout(() => {
-                                room.startGame();
-                            }, 50);
-                        });
-                    }, 2000);
-                } else if (state.players.length == 4) {
-                    // resetButton() + 2x randomButton() below always
-                    // rebuilds an even 2v2 regardless of the shape leading
-                    // in, so (same reasoning as the exact-2*teamSize
-                    // chooseMode branch) the map is already known up front —
-                    // switch BEFORE the rebuild so the map is already
-                    // settled before anyone gets placed on it.
-                    if (state.currentStadium != desiredStadiumFor(2)) {
-                        setTimeout(() => {
-                            stadiumCommand(emptyPlayer, `!${desiredStadiumFor(2)}`);
-                        }, 5);
-                    }
-                    resetButton();
-                    clearTimeout(state.insertingTimeout);
-                    state.insertingPlayers = true;
-                    setTimeout(() => {
-                        randomButton();
-                        setTimeout(() => {
-                            randomButton();
-                        }, 500);
-                    }, 500);
-                    state.insertingTimeout = setTimeout(() => {
-                        state.insertingPlayers = false;
-                    }, 2000);
-                    state.startTimeout = setTimeout(() => {
-                        ensureFullFieldBeforeStart(() => {
-                            setTimeout(() => {
-                                room.startGame();
-                            }, 50);
-                        });
-                    }, 2000);
-                } else if (state.players.length == 6) {
-                    // Same reasoning as the 4-player case above — resetButton()
-                    // + 3x randomButton() always rebuilds an even 3v3.
-                    if (state.currentStadium != desiredStadiumFor(3)) {
-                        setTimeout(() => {
-                            stadiumCommand(emptyPlayer, `!${desiredStadiumFor(3)}`);
-                        }, 5);
-                    }
-                    resetButton();
-                    clearTimeout(state.insertingTimeout);
-                    state.insertingPlayers = true;
-                    state.insertingTimeout = setTimeout(() => {
-                        state.insertingPlayers = false;
-                    }, 1500);
-                    setTimeout(() => {
-                        randomButton();
-                        setTimeout(() => {
-                            randomButton();
-                            setTimeout(() => {
-                                randomButton();
-                            }, 500);
-                        }, 500);
-                    }, 500);
-                    state.startTimeout = setTimeout(() => {
-                        ensureFullFieldBeforeStart(() => {
-                            setTimeout(() => {
-                                room.startGame();
-                            }, 50);
-                        });
-                    }, 2000);
                 }
+                resetButton();
+                clearTimeout(state.insertingTimeout);
+                state.insertingPlayers = true;
+                setTimeout(() => {
+                    randomButton();
+                    setTimeout(() => {
+                        randomButton();
+                    }, 500);
+                }, 500);
+                state.insertingTimeout = setTimeout(() => {
+                    state.insertingPlayers = false;
+                }, 2000);
+                scheduleRestart(2000);
+            } else if (state.players.length == 6) {
+                // Same reasoning as the 4-player case above — resetButton()
+                // + 3x randomButton() always rebuilds an even 3v3.
+                if (state.currentStadium != desiredStadiumFor(3)) {
+                    setTimeout(() => {
+                        stadiumCommand(emptyPlayer, `!${desiredStadiumFor(3)}`);
+                    }, 5);
+                }
+                resetButton();
+                clearTimeout(state.insertingTimeout);
+                state.insertingPlayers = true;
+                state.insertingTimeout = setTimeout(() => {
+                    state.insertingPlayers = false;
+                }, 1500);
+                setTimeout(() => {
+                    randomButton();
+                    setTimeout(() => {
+                        randomButton();
+                        setTimeout(() => {
+                            randomButton();
+                        }, 500);
+                    }, 500);
+                }, 500);
+                scheduleRestart(2000);
             }
         }
     }
