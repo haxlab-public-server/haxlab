@@ -617,10 +617,26 @@ function resumeGame() {
 // rejection no matter how it's called: a failed save gets logged/reported
 // instead of the game continuing unaware.
 async function endGame(winner) {
-    // Captain-choosing mode is reserved for a genuine full house (enough for
-    // 4v4) — with fewer players, people should just keep playing whatever
-    // smaller size they naturally have (2v2, 3v3) without the pick ritual.
-    if (state.players.length >= 2 * teamSize) activateChooseMode();
+    // Bug (reported live): used to defensively activateChooseMode() here on
+    // every win with a full-or-bigger house, before it's known whether
+    // there's actually anyone to pick — handlePlayersStop's own chooseMode
+    // branches ALWAYS immediately deactivated it again anyway (nothing to
+    // hand-pick right at match end; see its own comments), so this only
+    // ever produced a confusing "🐢 Время капитанов..." flicker on/off
+    // around every full-house finish. Worse: room.stopGame() (which is what
+    // actually runs handlePlayersStop's rebuild) fires on a SEPARATE,
+    // deferred timer 1-2s after endGame() (see onTeamGoal/checkTime's own
+    // stopTimeout) — during that gap, chooseMode sat transiently TRUE with
+    // nothing benched/refilled yet, so any join/leave/afk landing in that
+    // window could trip balanceTeams()'s "chooseMode stuck below a full
+    // house" self-heal, which calls resumeGame() (meant for resuming a
+    // mid-match PAUSED pick session, not starting a fresh post-match round)
+    // — racing handlePlayersStop's own later, correct bench+refill+start
+    // sequence and potentially starting the next round with the losing
+    // side still sitting in spectators. Real captain-choosing is reserved
+    // for a genuine full house reached via ordinary joins DURING an
+    // ongoing match (balanceTeams()'s own ordinary-growth branch) — that's
+    // the only place activateChooseMode() is called now.
     const scores = room.getScores();
     state.game.scores = scores;
     state.lastWinner = winner;

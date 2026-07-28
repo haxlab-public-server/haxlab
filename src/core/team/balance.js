@@ -266,49 +266,82 @@ module.exports = function createTeamBalance({
                     state.teamRedStats = [];
                     state.teamBlueStats = [];
                 }
-                // Exception: if there's truly nobody left to draw from (no
-                // non-AFK spectators waiting at all — AFK players are
-                // already excluded from state.teamSpec by updateTeams(), so
-                // this only fires on a genuinely empty bench, not merely a
-                // short one), a lopsided match like 4v2 would otherwise stay
-                // that way indefinitely. Nudge it back toward parity by
-                // moving the last player of the BIGGER side across to the
-                // smaller one — they keep playing, just switch sides,
-                // unlike the old benching behavior above that this
-                // deliberately doesn't bring back. Only when the gap is at
-                // least 2: moving exactly one player changes the gap by
-                // exactly 2 either way, so at a gap of 1 (e.g. 4v3) this
-                // would just flip who has the extra player (4v3 -> 3v4) —
-                // no actual improvement, just churn — whereas a gap of 2+
-                // (4v2 -> 3v3) is always a genuine step toward parity.
-                // Numeric balance is meant to hold at all times, not just
-                // eventually — a single move here only closes 2 of the gap
-                // (4v0 -> 3v1, still off by 2), and nothing else re-triggers
-                // this branch until the next unrelated join/leave. Loop
-                // enough moves to close the WHOLE gap down to <=1 in one
-                // pass. The first move runs synchronously (matching every
-                // caller that expects to observe it immediately); any
-                // further moves a bigger gap needs are staggered 5ms apart
-                // like every other multi-move sequence in this file. Each
-                // call re-checks the live gap first, both as the natural
-                // stopping condition and as a guard against a concurrent
-                // event closing it in the meantime.
-                if (state.teamSpec.length == 0 && Math.abs(state.teamRed.length - state.teamBlue.length) >= 2) {
-                    const movesNeeded = Math.floor(Math.abs(state.teamRed.length - state.teamBlue.length) / 2);
-                    const moveOneAcross = () => {
-                        if (Math.abs(state.teamRed.length - state.teamBlue.length) >= 2) {
-                            const biggerTeam = state.teamRed.length > state.teamBlue.length ? state.teamRed : state.teamBlue;
-                            const smallerSide = state.teamRed.length > state.teamBlue.length ? Team.BLUE : Team.RED;
-                            room.setPlayerTeam(biggerTeam[biggerTeam.length - 1].id, smallerSide);
-                        }
-                    };
-                    for (let i = 0; i < movesNeeded; i++) {
+                // Bug (reported live): a PARTIAL bench — some non-AFK
+                // spectators genuinely waiting, just not ENOUGH of them to
+                // fully close the gap on their own (e.g. a 4v0 with only 2
+                // waiting, not the 4 needed) — used to fall through this
+                // whole branch doing nothing at all, since the cross-move
+                // below only ever fired when teamSpec was EXACTLY empty.
+                // Those waiting spectators just sat there indefinitely
+                // ("капитаном синих должен стать человек из зрителей, не
+                // афк, но он не встаёт") until an unrelated join/leave/afk
+                // toggle happened to shift the numbers into one of the
+                // branches that DID do something. Pull in whatever IS
+                // actually available onto the smaller side first (can never
+                // overshoot past parity: this branch only runs while
+                // available < the gap, so the gap after pulling everyone in
+                // is always still >= 1) — same one-real-tick-apart reasoning
+                // as every other multi-move sequence in this file.
+                const availableToPull = state.teamSpec.length;
+                if (availableToPull > 0) {
+                    const smallerSide = state.teamRed.length < state.teamBlue.length ? Team.RED : Team.BLUE;
+                    for (let i = 0; i < availableToPull; i++) {
                         if (i === 0) {
-                            moveOneAcross();
-                            continue;
+                            safeMoveNextSpec(smallerSide);
+                        } else {
+                            setTimeout(() => {
+                                safeMoveNextSpec(smallerSide);
+                            }, 5 * i);
                         }
-                        setTimeout(moveOneAcross, 5 * i);
                     }
+                }
+                // Exception: if there's truly nobody left to draw from (no
+                // non-AFK spectators waiting at all — either genuinely none
+                // to begin with, or the pull above just used up the last of
+                // them), a lopsided match like 4v2 would otherwise stay that
+                // way indefinitely. Nudge it back toward parity by moving
+                // the last player of the BIGGER side across to the smaller
+                // one — they keep playing, just switch sides, unlike the
+                // old benching behavior this deliberately doesn't bring
+                // back. Only when the gap is at least 2: moving exactly one
+                // player changes the gap by exactly 2 either way, so at a
+                // gap of 1 (e.g. 4v3) this would just flip who has the extra
+                // player (4v3 -> 3v4) — no actual improvement, just churn —
+                // whereas a gap of 2+ (4v2 -> 3v3) is always a genuine step
+                // toward parity. Numeric balance is meant to hold at all
+                // times, not just eventually — a single move here only
+                // closes 2 of the gap (4v0 -> 3v1, still off by 2), and
+                // nothing else re-triggers this branch until the next
+                // unrelated join/leave. Loop enough moves to close the WHOLE
+                // gap down to <=1 in one pass. Deferred until after the pull
+                // above actually lands (if it ran at all) — reads the
+                // settled result, not the pre-pull snapshot. Each move
+                // re-checks the live gap first, both as the natural stopping
+                // condition and as a guard against a concurrent event
+                // closing it in the meantime.
+                const closeRemainingGap = () => {
+                    if (state.teamSpec.length == 0 && Math.abs(state.teamRed.length - state.teamBlue.length) >= 2) {
+                        const movesNeeded = Math.floor(Math.abs(state.teamRed.length - state.teamBlue.length) / 2);
+                        const moveOneAcross = () => {
+                            if (Math.abs(state.teamRed.length - state.teamBlue.length) >= 2) {
+                                const biggerTeam = state.teamRed.length > state.teamBlue.length ? state.teamRed : state.teamBlue;
+                                const smallerSide = state.teamRed.length > state.teamBlue.length ? Team.BLUE : Team.RED;
+                                room.setPlayerTeam(biggerTeam[biggerTeam.length - 1].id, smallerSide);
+                            }
+                        };
+                        for (let i = 0; i < movesNeeded; i++) {
+                            if (i === 0) {
+                                moveOneAcross();
+                                continue;
+                            }
+                            setTimeout(moveOneAcross, 5 * i);
+                        }
+                    }
+                };
+                if (availableToPull === 0) {
+                    closeRemainingGap();
+                } else {
+                    setTimeout(closeRemainingGap, 5 * availableToPull);
                 }
             } else if (Math.abs(state.teamRed.length - state.teamBlue.length) < state.teamSpec.length && state.teamRed.length != state.teamBlue.length) {
                 const n = Math.abs(state.teamRed.length - state.teamBlue.length);
@@ -802,7 +835,7 @@ module.exports = function createTeamBalance({
                             }, 50);
                         });
                     }, 2000);
-                } else if (state.players.length == 3 || state.players.length == 5 || state.players.length == 7 || state.players.length >= 2 * teamSize + 1) {
+                } else if (state.players.length == 3 || state.players.length == 5 || state.players.length == 7 || state.players.length >= 2 * teamSize) {
                     // Bug: 7 was missing entirely from this list — every
                     // OTHER total from 2 up to a full house (2, 3, 4, 5, 6)
                     // had a branch, plus the exact-full-house and 9+ cases
@@ -818,9 +851,16 @@ module.exports = function createTeamBalance({
                     // 5 used to also trigger captain-choosing mode here — the
                     // room's policy now is to wait for a full 4v4 house before
                     // doing that, so 5 (like 3) just keeps playing: the losing
-                    // team benches, topButton() pulls someone back in. 9+ here
-                    // shouldn't normally happen — endGame() already turns on
-                    // choose mode at a full 4v4 house before this ever runs.
+                    // team benches, topButton() pulls someone back in.
+                    // >=2*teamSize (8, 9+) used to be handled by the
+                    // chooseMode branches above, reached via endGame()'s own
+                    // defensive activateChooseMode() call — removed (see
+                    // endGame()'s comment: it only ever produced a confusing
+                    // on/off flicker and a real race window, since those
+                    // branches always deactivated immediately anyway with
+                    // nothing to hand-pick). Folded in here instead: same
+                    // WinStay bench+refill shape as every other total,
+                    // exactly like 9+ already was.
                     //
                     // Bug: with genuinely ZERO waiting spectators (checked
                     // BEFORE any benching below — the bench itself always

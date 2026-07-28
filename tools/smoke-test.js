@@ -1326,9 +1326,14 @@ console.log('\n--- team/balance.js: an already-full match never auto-upgrades to
         check('the shrunk match still rebalances to 1v1 from the remaining spectator', roomCallsLocal, [`setPlayerTeam:2:${Team.BLUE}`]);
 
         // Same for shrinking down to 5 (more excess on one side than there are
-        // spectators to cover) — the excess used to get benched to spectators to
-        // force parity; the room's policy now is to just keep playing uneven
-        // instead of pulling a player off the field because their opponent quit.
+        // spectators to fully cover) — the excess itself used to get benched
+        // to force parity; the room's policy now is to just keep playing
+        // uneven instead of pulling a player off the field because their
+        // opponent quit. But the ONE genuinely-waiting spectator here should
+        // still get pulled in to close part of the gap (reported live as a
+        // waiting non-AFK spectator never getting invited at all whenever
+        // there weren't EXACTLY enough of them to close the whole gap) —
+        // partial coverage isn't "no coverage".
         state.teamRed = [{ id: 1 }, { id: 2 }, { id: 3 }];
         state.teamBlue = [{ id: 4 }];
         state.teamSpec = [{ id: 5 }];
@@ -1337,7 +1342,7 @@ console.log('\n--- team/balance.js: an already-full match never auto-upgrades to
         calls.length = 0;
         balance.balanceTeams();
         check('a match shrinking down to 5 players does not restart or switch stadium', calls, []);
-        check('the excess player is left on the field instead of being benched', roomCallsLocal, []);
+        check('the one available spectator IS pulled in to narrow the gap, not left waiting', roomCallsLocal, [`setPlayerTeam:5:${Team.BLUE}`]);
 
         // New rule: with ZERO spectators (not just "not enough") to draw
         // from at all, a lopsided 4v2 no longer stays that way forever —
@@ -1445,6 +1450,34 @@ console.log('\n--- team/balance.js: an already-full match never auto-upgrades to
         check('handlePlayersStop at 7 players does not silently do nothing', calls.includes('blueToSpecButton') || calls.includes('redToSpecButton'), true);
         await wait(2100);
         check('handlePlayersStop at 7 players actually starts the next round', roomCallsLocal.includes('startGame'), true);
+
+        // Bug (reported live): endGame() used to defensively
+        // activateChooseMode() on every win with a full-or-bigger house,
+        // before it was known whether there was actually anyone to pick —
+        // handlePlayersStop's own chooseMode branches always deactivated
+        // it again immediately anyway (nothing to hand-pick right at match
+        // end), so this only ever produced a confusing "🐢 Время
+        // капитанов..." on/off flicker, and opened a real race window: the
+        // actual room.stopGame() (which runs this rebuild) fires on a
+        // SEPARATE, deferred 1-2s timer — during that gap, chooseMode sat
+        // transiently true with nothing benched/refilled yet, so any
+        // join/leave/afk landing in it could trip balanceTeams()'s
+        // "chooseMode stuck below a full house" self-heal, calling
+        // resumeGame() (meant for resuming a mid-match PAUSED pick
+        // session, not starting a fresh post-match round) — racing this
+        // rebuild's own later room.startGame(). Fixed by removing that
+        // defensive activation entirely and folding exactly-8 (and 9+)
+        // into the same non-chooseMode WinStay bench+refill path already
+        // proven for every other total. This is the realistic path now:
+        // chooseMode stays false the whole way through.
+        state.chooseMode = false;
+        state.endGameVariable = true;
+        state.lastWinner = Team.RED;
+        state.players = new Array(8).fill(0).map((_, i) => ({ id: i }));
+        calls.length = 0;
+        balance.handlePlayersStop(null);
+        check('an exact 4v4 finish never touches chooseMode (no more activate/deactivate flicker)', calls.includes('activateChooseMode'), false);
+        await wait(2100);
 
         // Bug fix: 3v3/4v4 must use the big map — it must not stay on classic
         // just because the room grew into that size without an explicit !big.
@@ -1578,6 +1611,58 @@ console.log('\n--- team/balance.js: a bigger gap (4v0) with zero spectators full
     (async () => {
         await new Promise((resolve) => setTimeout(resolve, 20));
         check('...and its second move lands a tick later, reaching a clean 2v2 (not stuck at 3v1)', [state.teamRed.length, state.teamBlue.length], [2, 2]);
+    })();
+}
+
+console.log('\n--- team/balance.js: a partial bench (some non-AFK spectators, not enough to fully close the gap) still pulls them in ---');
+{
+    // Reported live: a match ends 4v0 (or shrinks to it) with a couple of
+    // genuinely non-AFK spectators waiting — NOT enough of them to fully
+    // close the gap (need 4, only 2 available) — and the room just sat
+    // there, nobody getting invited, until an unrelated join/leave/afk
+    // toggle happened to shift the numbers. Root cause: the cross-move
+    // fallback that closes a gap when spectators are exhausted only ever
+    // checked for EXACTLY zero — a small but nonzero pool fell through
+    // doing nothing at all. Fixed: whatever's actually available gets
+    // pulled onto the smaller side first, and whatever gap still remains
+    // afterward (spectators now genuinely exhausted — a 4v2 with nobody
+    // left waiting is exactly rule 3's "nxn-2 with zero spectators" case)
+    // goes through the existing cross-move fallback, so this closes all the
+    // way to a clean 3v3 rather than stopping halfway at 4v2. Own
+    // self-contained state/room, same reasoning as the gap-of-4 test above
+    // (needs to await deferred moves cleanly).
+    const Team = { RED: 1, BLUE: 2, SPECTATORS: 0 };
+    const players = [
+        { id: 1, team: Team.RED }, { id: 2, team: Team.RED }, { id: 3, team: Team.RED }, { id: 4, team: Team.RED },
+        { id: 5, team: Team.SPECTATORS }, { id: 6, team: Team.SPECTATORS },
+    ];
+    const state = { chooseMode: false, players, teamRed: players.filter((p) => p.team === Team.RED), teamBlue: [], teamSpec: players.filter((p) => p.team === Team.SPECTATORS) };
+    const roomMock = {
+        setPlayerTeam: (id, team) => {
+            const player = players.find((p) => p.id === id);
+            player.team = team;
+            state.teamRed = players.filter((p) => p.team === Team.RED);
+            state.teamBlue = players.filter((p) => p.team === Team.BLUE);
+            state.teamSpec = players.filter((p) => p.team === Team.SPECTATORS);
+        },
+    };
+    const createButtonHelpers = require(path.join(CORE, 'team', 'buttons'));
+    const buttons = createButtonHelpers({ room: roomMock, state, Team, getRandomInt: () => 0 });
+    const balance = require(path.join(CORE, 'team', 'balance'))({
+        room: roomMock, state, Team, State: { PLAY: 0, PAUSE: 1, STOP: 2 }, HaxNotification: { CHAT: 1 },
+        emptyPlayer: {}, infoColor: 5, scoreLimit: 3, teamSize: 4, timeLimit: 5,
+        activateChooseMode: () => {}, blueToSpecButton: buttons.blueToSpecButton, choosePlayer: () => {},
+        deactivateChooseMode: () => {}, endGame: () => {}, getRandomInt: () => 0,
+        getSpecList: () => {}, instantRestart: () => {}, randomButton: buttons.randomButton,
+        redToSpecButton: buttons.redToSpecButton, resetButton: buttons.resetButton, resumeGame: () => {},
+        stadiumCommand: () => {}, swapButton: buttons.swapButton, topButton: buttons.topButton,
+    });
+
+    balance.balanceTeams();
+    check('the first available spectator is pulled in synchronously', [state.teamRed.length, state.teamBlue.length, state.teamSpec.length], [4, 1, 1]);
+    (async () => {
+        await new Promise((resolve) => setTimeout(resolve, 30));
+        check('both spectators land AND the remaining gap closes via cross-move, reaching a clean 3v3', [state.teamRed.length, state.teamBlue.length, state.teamSpec.length], [3, 3, 0]);
     })();
 }
 
@@ -1723,6 +1808,74 @@ console.log('\n--- team/balance.js: ensureFullFieldBeforeStart reasserts the sta
         check('the pull grew the match past classic\'s own cap', Math.max(state.teamRed.length, state.teamBlue.length), 3);
         check('the stadium was reasserted to match the NEW shape, not left on classic', state.currentStadium, 'big');
         check('nobody was left stranded in spectators', state.teamSpec.length, 0);
+    })();
+}
+
+console.log('\n--- team/balance.js: an exact 4v4 finish (with genuine waiting spectators) benches the loser via WinStay and correctly switches to big, with chooseMode never touched ---');
+{
+    // Companion to the shared-block check above (which only verifies
+    // activateChooseMode is never called, since that block stubs out the
+    // actual bench/refill functions) — this uses the REAL button
+    // implementations to confirm the full outcome: endGame() no longer
+    // defensively activates choose mode for a full-or-bigger house (see
+    // its own comment in entry.js), so handlePlayersStop's non-chooseMode
+    // path now handles exactly 8 (with genuine spectators already waiting
+    // — the realistic "9+" shape) via the same WinStay bench+refill logic
+    // already used for every other total: RED (the winner) stays intact,
+    // BLUE gets benched and refilled from the waiting spectators (not
+    // randomFillAll()'s from-scratch reshuffle, which only kicks in when
+    // teamSpec is genuinely empty), and the stadium still correctly
+    // asserts to 'big'.
+    const State = { PLAY: 0, PAUSE: 1, STOP: 2 };
+    const Team = { RED: 1, BLUE: 2, SPECTATORS: 0 };
+    const players = [
+        { id: 1, team: Team.RED }, { id: 2, team: Team.RED }, { id: 3, team: Team.RED }, { id: 4, team: Team.RED },
+        { id: 5, team: Team.BLUE }, { id: 6, team: Team.BLUE }, { id: 7, team: Team.BLUE }, { id: 8, team: Team.BLUE },
+        { id: 9, team: Team.SPECTATORS }, { id: 10, team: Team.SPECTATORS },
+    ];
+    const state = {
+        players, chooseMode: false, endGameVariable: true, lastWinner: Team.RED,
+        currentStadium: 'classic', gameState: State.STOP,
+    };
+    state.teamRed = players.filter((p) => p.team === Team.RED);
+    state.teamBlue = players.filter((p) => p.team === Team.BLUE);
+    state.teamSpec = players.filter((p) => p.team === Team.SPECTATORS);
+
+    const stadiumCalls = [];
+    const activateChooseModeCalls = [];
+    const roomMock = {
+        getScores: () => ({ red: 0, blue: 0, scoreLimit: 3, time: 0, timeLimit: 3 }),
+        setScoreLimit: () => {}, setTimeLimit: () => {}, setCustomStadium: () => {}, setDefaultStadium: () => {},
+        stopGame: () => {}, startGame: () => {}, pauseGame: () => {},
+        setPlayerTeam: (id, team) => {
+            const player = state.players.find((p) => p.id === id);
+            if (!player) return;
+            player.team = team;
+            state.teamRed = state.players.filter((p) => p.team === Team.RED);
+            state.teamBlue = state.players.filter((p) => p.team === Team.BLUE);
+            state.teamSpec = state.players.filter((p) => p.team === Team.SPECTATORS);
+        },
+    };
+    const createButtonHelpers = require(path.join(CORE, 'team', 'buttons'));
+    const buttons = createButtonHelpers({ room: roomMock, state, Team, getRandomInt: () => 0 });
+    const balance = require(path.join(CORE, 'team', 'balance'))({
+        room: roomMock, state, Team, State, HaxNotification: { CHAT: 1 },
+        emptyPlayer: {}, infoColor: 5, scoreLimit: 3, teamSize: 4, timeLimit: 5,
+        activateChooseMode: () => activateChooseModeCalls.push(1), blueToSpecButton: buttons.blueToSpecButton, choosePlayer: () => {},
+        deactivateChooseMode: () => {}, endGame: () => {}, getRandomInt: () => 0,
+        getSpecList: () => {}, instantRestart: () => {}, randomButton: buttons.randomButton,
+        redToSpecButton: buttons.redToSpecButton, resetButton: buttons.resetButton, resumeGame: () => {},
+        stadiumCommand: (emptyPlayer, cmd) => { stadiumCalls.push(cmd); state.currentStadium = cmd.replace('!', ''); },
+        swapButton: buttons.swapButton, topButton: buttons.topButton,
+    });
+
+    balance.handlePlayersStop(null);
+    (async () => {
+        await new Promise((resolve) => setTimeout(resolve, 400));
+        check('RED (the winner) stayed intact', state.teamRed.map((p) => p.id).sort(), [1, 2, 3, 4]);
+        check('BLUE got fully refilled back to 4', state.teamBlue.length, 4);
+        check('chooseMode was never activated for this', activateChooseModeCalls.length, 0);
+        check('the stadium correctly asserts to big for a 4v4', stadiumCalls.includes('!big'), true);
     })();
 }
 
