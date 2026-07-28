@@ -57,8 +57,6 @@ module.exports = function createRoomStats({
         }
     }
 
-    // Only playtime's leaderboard command is active right now (see commands.js),
-    // but the others stay translated here too in case that policy changes.
     const STAT_LABELS = {
         games: 'Игры',
         wins: 'Победы',

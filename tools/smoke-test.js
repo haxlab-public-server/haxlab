@@ -41,7 +41,7 @@ const room = {
     getPlayerList: () => [],
 };
 
-console.log('--- stats/print.js: only playtime is shown, per haxlab\'s no-stat-race policy ---');
+console.log('--- stats/print.js: !stats shows the full stat block ---');
 {
     const createPrintStats = require(path.join(CORE, 'stats', 'print'));
     const printStats = createPrintStats({ getTimeStats: (seconds) => `${Math.floor(seconds / 60)}m` });
@@ -51,12 +51,13 @@ console.log('--- stats/print.js: only playtime is shown, per haxlab\'s no-stat-r
     };
     const output = printStats.printPlayerStats(stats);
     check('shows the player name', output.includes('Alice'), true);
+    check('shows games', output.includes('Игры: 10'), true);
+    check('shows wins and winrate', output.includes('Победы: 7 (70.0%)'), true);
     check('shows playtime', output.includes('Время игры: 10m'), true);
-    check('does not show a Games label', /\bGames\b/.test(output), false);
-    check('does not show a Goals label', /\bGoals\b/.test(output), false);
-    check('does not show Wins/Winrate labels', /\bWin/i.test(output), false);
-    check('does not show an Assists label', /Assist/i.test(output), false);
-    check('does not show CS/Own Goals labels', /\bCS\b|Own\s?Goal/i.test(output), false);
+    check('shows goals', output.includes('Голы: 25'), true);
+    check('shows assists', output.includes('Ассисты: 12'), true);
+    check('shows clean sheets', output.includes('Сухие матчи: 3'), true);
+    check('shows own goals', output.includes('Автоголы: 1'), true);
 }
 
 console.log('\n--- chat.js: helpers must see state populated AFTER wiring ---');
@@ -93,6 +94,14 @@ console.log('\n--- chat.js: helpers must see state populated AFTER wiring ---');
     sent.length = 0;
     chat.playerChat(playersAll[0], '@@Bob_Smith hey');
     check('playerChat reaches both sides', sent.map((s) => s.id), [1, 2]);
+    // Bug: the copy sent to the RECIPIENT (id 2) labelled the message with
+    // the recipient's own name instead of the actual sender's — every PM
+    // the recipient received looked like it came from themselves.
+    const senderCopy = sent.find((s) => s.id === 1).msg;
+    const recipientCopy = sent.find((s) => s.id === 2).msg;
+    check('the sender sees their own name as the speaker', senderCopy.includes('Alice: hey'), true);
+    check('the recipient ALSO sees the sender\'s name as the speaker, not their own', recipientCopy.includes('Alice: hey'), true);
+    check('the recipient copy does not mislabel the speaker as themselves', recipientCopy.includes('Bob Smith: hey'), false);
     check('playerChat rejects unknown target', chat.playerChat(playersAll[0], '@@Ghost hi'), false);
     check('playerChat rejects self-PM', chat.playerChat(playersAll[0], '@@Alice hi'), false);
 
@@ -1514,6 +1523,162 @@ console.log('\n--- team/balance.js: an already-full match never auto-upgrades to
     })();
 }
 
+console.log('\n--- team/balance.js: a full-4v4 rebuild survives an actual stadium switch instead of losing a randomButton() pick ---');
+{
+    // Bug: the exact-2*teamSize choose-mode branch schedules its stadium
+    // switch (if one's actually needed) 5ms out, but its own randomButton()
+    // rebuild loop's first call was scheduled at delay 0 — racing it
+    // directly. A real stadium switch resets every player on the field back
+    // to spectators as a side effect (same as resetButton() does
+    // explicitly) — confirmed in practice (100% reproducible, not a rare
+    // race), the switch fired AFTER randomButton() had already placed 1-2
+    // players, silently wiping that pick with nothing to re-run it,
+    // settling the house one player short per side (3v3 instead of 4v4)
+    // with 2 players stuck spectating who should be playing. This only
+    // shows up when a switch is genuinely needed (room was on classic, house
+    // is a full 4v4 needing big) — a stadiumCalls-only check (see the test
+    // above) can't catch it, since the command still fires exactly once
+    // either way; only the FINAL team composition reveals the lost pick.
+    const State = { PLAY: 0, PAUSE: 1, STOP: 2 };
+    const Team = { RED: 1, BLUE: 2, SPECTATORS: 0 };
+    const players = new Array(8).fill(0).map((_, i) => ({ id: i + 1, team: Team.RED }));
+    for (let i = 4; i < 8; i++) players[i].team = Team.BLUE;
+    const state = {
+        players, chooseMode: true, endGameVariable: true, lastWinner: Team.RED,
+        currentStadium: 'classic', gameState: State.STOP,
+    };
+    state.teamRed = players.filter((p) => p.team === Team.RED);
+    state.teamBlue = players.filter((p) => p.team === Team.BLUE);
+    state.teamSpec = players.filter((p) => p.team === Team.SPECTATORS);
+
+    const roomMock = {
+        getScores: () => ({ red: 0, blue: 0, scoreLimit: 3, time: 0, timeLimit: 3 }),
+        setScoreLimit: () => {}, setTimeLimit: () => {},
+        stopGame: () => {}, startGame: () => {}, pauseGame: () => {},
+        setPlayerTeam: (id, team) => {
+            const player = state.players.find((p) => p.id === id);
+            if (!player) return;
+            player.team = team;
+            state.teamRed = state.players.filter((p) => p.team === Team.RED);
+            state.teamBlue = state.players.filter((p) => p.team === Team.BLUE);
+            state.teamSpec = state.players.filter((p) => p.team === Team.SPECTATORS);
+        },
+    };
+    // Mimics what a real stadium switch does: reload the map, which resets
+    // every player on the field back to spectators.
+    const stadiumCommand = (emptyPlayer, cmd) => {
+        state.currentStadium = cmd.replace('!', '');
+        for (const p of [...state.teamRed, ...state.teamBlue]) {
+            roomMock.setPlayerTeam(p.id, Team.SPECTATORS);
+        }
+    };
+    const createButtonHelpers = require(path.join(CORE, 'team', 'buttons'));
+    const buttons = createButtonHelpers({ room: roomMock, state, Team, getRandomInt: (max) => Math.floor(Math.random() * max) });
+    const balance = require(path.join(CORE, 'team', 'balance'))({
+        room: roomMock, state, Team, State, HaxNotification: { CHAT: 1 },
+        emptyPlayer: {}, infoColor: 5, scoreLimit: 3, teamSize: 4, timeLimit: 5,
+        activateChooseMode: () => {}, blueToSpecButton: buttons.blueToSpecButton, choosePlayer: () => {},
+        deactivateChooseMode: () => { state.chooseMode = false; }, endGame: () => {}, getRandomInt: (max) => Math.floor(Math.random() * max),
+        getSpecList: () => {}, instantRestart: () => {}, randomButton: buttons.randomButton,
+        redToSpecButton: buttons.redToSpecButton, resetButton: buttons.resetButton, resumeGame: () => {},
+        stadiumCommand, swapButton: buttons.swapButton, topButton: buttons.topButton,
+    });
+
+    balance.handlePlayersStop(null);
+
+    (async () => {
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+        check('a full 4v4 rebuild that needs a real stadium switch still lands on 4v4, not 3v3', [state.teamRed.length, state.teamBlue.length, state.teamSpec.length], [4, 4, 0]);
+    })();
+}
+
+console.log('\n--- team/balance.js: handlePlayersStop with MORE than a full house (chooseMode stuck on) rebuilds cleanly, not 4v5 ---');
+{
+    // Two bugs, both only reachable with players.length > 2*teamSize (a
+    // full house PLUS extra waiting spectators — endGame() activates
+    // chooseMode defensively at any >=2*teamSize win, before it's known
+    // there's nothing to actually choose from):
+    //
+    // 1. This branch's own bench+swap+topButton() rebuild is fully
+    //    automatic — nobody is hand-picking anything — but it never called
+    //    deactivateChooseMode(). Every room.setPlayerTeam() it makes still
+    //    fires handlePlayersTeamChange, which — seeing chooseMode still
+    //    true — reacted independently: pulling spectators via its own
+    //    completion branch, or falling through to choosePlayer(), which
+    //    sends a genuine "pick a player" prompt (and arms a kick timer!) to
+    //    whoever happened to be teamRed[0]/teamBlue[0] at that instant, mid
+    //    automatic rebuild. Fixed by deactivating chooseMode up front.
+    // 2. Independently: spectatorsToInsert counts players to insert, one
+    //    per scheduled call, but topButton() can insert 2 at once (its own
+    //    pair branch, once red==blue mid-loop) — confirmed in practice this
+    //    overfilled past 2*teamSize (4v5 instead of 4v4). Fixed by filling
+    //    directly with safeMoveNextSpec (always exactly one player) instead
+    //    of topButton() in this specific refill loop.
+    const State = { PLAY: 0, PAUSE: 1, STOP: 2 };
+    const Team = { RED: 1, BLUE: 2, SPECTATORS: 0 };
+    // An uneven 4v3 was playing (the room's "keep playing uneven" policy),
+    // plus 3 extra waiting spectators — 10 total, matching what was
+    // reported in practice.
+    const players = [];
+    let pid = 1;
+    for (let i = 0; i < 4; i++) players.push({ id: pid++, team: Team.RED });
+    for (let i = 0; i < 3; i++) players.push({ id: pid++, team: Team.BLUE });
+    for (let i = 0; i < 3; i++) players.push({ id: pid++, team: Team.SPECTATORS });
+    const state = {
+        players, chooseMode: true, endGameVariable: true, lastWinner: Team.BLUE,
+        currentStadium: 'big', gameState: State.STOP,
+        redCaptainChoice: '', blueCaptainChoice: '', capLeft: false, streak: 1,
+    };
+    state.teamRed = players.filter((p) => p.team === Team.RED);
+    state.teamBlue = players.filter((p) => p.team === Team.BLUE);
+    state.teamSpec = players.filter((p) => p.team === Team.SPECTATORS);
+
+    const bogusPrompts = [];
+    const roomMock = {
+        getScores: () => ({ red: 0, blue: 0, scoreLimit: 3, time: 0, timeLimit: 3 }),
+        setScoreLimit: () => {}, setTimeLimit: () => {}, pauseGame: () => {}, startGame: () => {},
+        sendAnnouncement: (msg) => { if (msg.includes('Для выбора игрока')) bogusPrompts.push(msg); },
+        kickPlayer: () => bogusPrompts.push('KICK'),
+        setPlayerTeam: (id, team) => {
+            const player = state.players.find((p) => p.id === id);
+            if (!player) return;
+            player.team = team;
+            state.teamRed = state.players.filter((p) => p.team === Team.RED);
+            state.teamBlue = state.players.filter((p) => p.team === Team.BLUE);
+            state.teamSpec = state.players.filter((p) => p.team === Team.SPECTATORS);
+            balanceRef.handlePlayersTeamChange(null);
+        },
+    };
+    let balanceRef;
+    const createButtonHelpers = require(path.join(CORE, 'team', 'buttons'));
+    const buttons = createButtonHelpers({ room: roomMock, state, Team, getRandomInt: (max) => Math.floor(Math.random() * max) });
+    const createChoosingHelpers = require(path.join(CORE, 'team', 'choosing'));
+    const choosing = createChoosingHelpers({
+        room: roomMock, state, Team, HaxNotification: { CHAT: 1, MENTION: 2 },
+        announcementColor: 1, errorColor: 2, infoColor: 3, warningColor: 4,
+        chooseModeSlowMode: 10, chooseTime: 15, defaultSlowMode: 0, SMSet: new Set(), getRandomInt: (max) => Math.floor(Math.random() * max),
+    });
+    const balance = require(path.join(CORE, 'team', 'balance'))({
+        room: roomMock, state, Team, State, HaxNotification: { CHAT: 1 },
+        emptyPlayer: {}, infoColor: 5, scoreLimit: 3, teamSize: 4, timeLimit: 5,
+        activateChooseMode: choosing.activateChooseMode, blueToSpecButton: buttons.blueToSpecButton, choosePlayer: choosing.choosePlayer,
+        deactivateChooseMode: choosing.deactivateChooseMode, endGame: () => {}, getRandomInt: (max) => Math.floor(Math.random() * max),
+        getSpecList: choosing.getSpecList, instantRestart: () => {}, randomButton: buttons.randomButton,
+        redToSpecButton: buttons.redToSpecButton, resetButton: buttons.resetButton, resumeGame: () => {},
+        stadiumCommand: () => {}, swapButton: buttons.swapButton, topButton: buttons.topButton,
+    });
+    balanceRef = balance;
+
+    balance.handlePlayersStop(null);
+
+    (async () => {
+        await new Promise((resolve) => setTimeout(resolve, 500));
+        check('more than a full house rebuilds to exactly 4v4, not 4v5', [state.teamRed.length, state.teamBlue.length], [4, 4]);
+        check('no bogus "pick a player" prompt or kick fires during the automatic rebuild', bogusPrompts, []);
+        check('chooseMode is off once the automatic rebuild settles', state.chooseMode, false);
+    })();
+}
+
 console.log('\n--- team/balance.js: choose mode never gets stuck on as the room shrinks below a full house via ordinary leaves ---');
 {
     // End-to-end regression for the reported bug: a room drops below
@@ -2234,6 +2399,11 @@ console.log('\n--- core/economy.js: coin awards, playtime ticker, shop/inventory
             home: { colors: [0x8a2be2], textColor: 0xffffff, angle: 0 },
             away: { colors: [0xffffff], textColor: 0x1a1a1a, angle: 0 },
         },
+        {
+            id: 'crimson', type: 'form', name: 'Багровый', price: 150, clashesWithDefault: 'red',
+            home: { colors: [0xd60000], textColor: 0xffffff, angle: 0 },
+            away: { colors: [0x4d4d4d], textColor: 0xd60000, angle: 0 },
+        },
         { id: 'small', type: 'size', name: 'Малыш', price: 50, radius: 12 },
     ];
 
@@ -2461,6 +2631,17 @@ console.log('\n--- core/economy.js: coin awards, playtime ticker, shop/inventory
     roomCallsLocal.length = 0;
     await economy.applyTeamForms();
     check('applyTeamForms falls back to the default red color when nobody on it has a form', roomCallsLocal.includes(`setTeamColors:${Team.RED}:${JSON.stringify([0xe56e56])}`), true);
+
+    // Bug: crimson's home kit (deep reds) is close enough to the default
+    // red kit that a blue side wearing crimson blended in with a red side
+    // that has no form at all — same visual problem as two sides sharing a
+    // form, just against the DEFAULT rather than another form. Red still
+    // has no form from the check above.
+    await db.buyItem('AUTH_BLUE1', 'Blue1', 'crimson', 0);
+    await db.setEquipped('AUTH_BLUE1', 'form', 'crimson');
+    roomCallsLocal.length = 0;
+    await economy.applyTeamForms();
+    check('applyTeamForms switches blue to away when its form clashes with red\'s default color', roomCallsLocal.includes(`setTeamColors:${Team.BLUE}:${JSON.stringify([0x4d4d4d])}`), true);
 
     // announceTeamForms: match-start-only, credits whoever the form actually
     // came from, and says nothing at all if neither side has a custom form.

@@ -86,7 +86,7 @@ module.exports = function createChatHelpers({
         }
         const messageFrom = `📝 [ЛС с ${playerTarget.name}] ${player.name}: ${msgArray.slice(1).join(' ')}`;
 
-        const messageTo = `📝 [ЛС с ${player.name}] ${playerTarget.name}: ${msgArray.slice(1).join(' ')}`;
+        const messageTo = `📝 [ЛС с ${player.name}] ${player.name}: ${msgArray.slice(1).join(' ')}`;
 
         room.sendAnnouncement(
             messageFrom,

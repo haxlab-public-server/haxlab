@@ -26,6 +26,12 @@
  *            kit; if red and blue land on the SAME form, red keeps `home`
  *            and blue switches to `away` so they're never wearing identical
  *            colors.
+ *   clashesWithDefault — optional, for type: 'form' only. 'red' or 'blue' if
+ *            this form's `home` kit is close enough to that side's DEFAULT
+ *            kit (see economy.js) to be hard to tell apart when the OTHER
+ *            side has no form of its own active. When set, applyTeamForms()
+ *            falls back to `away` for exactly that case, the same way it
+ *            already does when both sides land on the same form.
  *   radius — required for type: 'size'. Only ever applied for the few-second
  *            goal celebration window, never during actual play, precisely so
  *            this can't become a paid gameplay advantage — it's fine for
@@ -34,7 +40,7 @@
  */
 module.exports = [
     {
-        id: 'crimson', type: 'form', name: 'Багровый', price: 150,
+        id: 'crimson', type: 'form', name: 'Багровый', price: 150, clashesWithDefault: 'red',
         home: { colors: [0xD60000, 0x8F1410, 0x750000], textColor: 0xffffff, angle: 60 },
         away: { colors: [0x4D4D4D, 0x383838, 0x242424], textColor: 0xD60000, angle: 60 },
     },

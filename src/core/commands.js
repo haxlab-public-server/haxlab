@@ -8,7 +8,7 @@ module.exports = function createCommands({
     linkDiscordCommand,
     statsLeaderboardCommand,
     afkCommand,
-    afkListCommand,
+    afkListCommand, 
     restartCommand,
     restartSwapCommand,
     swapCommand,
@@ -94,43 +94,41 @@ module.exports = function createCommands({
     Пример: !discord 123456789012345678 связывает ваш аккаунт Discord.`,
         function: linkDiscordCommand,
     },
-    // haxlab policy: play without obligations or a race for goals/wins/etc —
-    // these leaderboards are disabled (not deleted) so only !playtime remains.
-    // games: {
-    //     aliases: [],
-    //     roles: Role.PLAYER,
-    //     desc: `
-    //     This command shows the top 5 players with the most games in the room.`,
-    //     function: statsLeaderboardCommand,
-    // },
-    // wins: {
-    //     aliases: [],
-    //     roles: Role.PLAYER,
-    //     desc: `
-    //     This command shows the top 5 players with the most wins in the room.`,
-    //     function: statsLeaderboardCommand,
-    // },
-    // goals: {
-    //     aliases: [],
-    //     roles: Role.PLAYER,
-    //     desc: `
-    //     This command shows the top 5 players with the most goals in the room.`,
-    //     function: statsLeaderboardCommand,
-    // },
-    // assists: {
-    //     aliases: [],
-    //     roles: Role.PLAYER,
-    //     desc: `
-    //     This command shows the top 5 players with the most assists in the room.`,
-    //     function: statsLeaderboardCommand,
-    // },
-    // cs: {
-    //     aliases: [],
-    //     roles: Role.PLAYER,
-    //     desc: `
-    //     This command shows the top 5 players with the most CS in the room.`,
-    //     function: statsLeaderboardCommand,
-    // },
+    games: {
+        aliases: [],
+        roles: Role.PLAYER,
+        desc: `
+        Эта команда показывает топ 5 игроков с самым большим количеством игр в комнате.`,
+        function: statsLeaderboardCommand,
+    },
+    wins: {
+        aliases: [],
+        roles: Role.PLAYER,
+        desc: `
+        Эта команда показывает топ 5 игроков с самым большим количеством побед в комнате.`,
+        function: statsLeaderboardCommand,
+    },
+    goals: {
+        aliases: [],
+        roles: Role.PLAYER,
+        desc: `
+        Эта команда показывает топ 5 игроков с самым большим количеством голов в комнате.`,
+        function: statsLeaderboardCommand,
+    },
+    assists: {
+        aliases: [],
+        roles: Role.PLAYER,
+        desc: `
+        Эта команда показывает топ 5 игроков с самым большим количеством ассистов в комнате.`,
+        function: statsLeaderboardCommand,
+    },
+    cs: {
+        aliases: [],
+        roles: Role.PLAYER,
+        desc: `
+        Эта команда показывает топ 5 игроков с самым большим количеством сухих матчей в комнате.`,
+        function: statsLeaderboardCommand,
+    },
     playtime: {
         aliases: ['pt'],
         roles: Role.PLAYER,
@@ -139,7 +137,7 @@ module.exports = function createCommands({
         function: statsLeaderboardCommand,
     },
     x: {
-        aliases: [],
+        aliases: ['ч'],
         roles: Role.PLAYER,
         desc: `
         Эта команда отправляет сообщение только вашей команде (работает так же, как обычный командный чат — набрать "t <сообщение>").

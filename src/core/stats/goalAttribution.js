@@ -44,7 +44,7 @@ module.exports = function createGoalAttribution({
         if (goalAttribution[0] != null) {
             if (goalAttribution[0].team == team) {
                 if (goalAttribution[1] != null && goalAttribution[1].team == team) {
-                    goalString = `⚽ ${getTimeGame(scores.time)} Гол забил ${goalAttribution[0].name} ! С ассистом ${goalAttribution[1].name}.`;
+                    goalString = `⚽ ${getTimeGame(scores.time)} Гол забил ${goalAttribution[0].name} ! Ассистент: ${goalAttribution[1].name}.`;
                     state.game.goals.push(
                         new Goal(
                             scores.time,

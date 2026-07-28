@@ -173,7 +173,7 @@ module.exports = function createGameManagementEvents({
             goalString,
             null,
             team == Team.RED ? redColor : blueColor,
-            null,
+            'bold',
             HaxNotification.CHAT
         );
         discordBot.sendLog(`[${getDate()}] ${goalString}`);

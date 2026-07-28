@@ -70,6 +70,29 @@ module.exports = function createTeamBalance({
         }
     }
 
+    // handlePlayersJoin()/handlePlayersLeave() call balanceTeams()
+    // unconditionally on every join/leave — but a join/leave landing while
+    // handlePlayersStop's own staggered blueToSpecButton/redToSpecButton +
+    // topButton() rebuild is still in flight (state.removingPlayers or
+    // state.insertingPlayers true) starts a SECOND, independent pair-fill
+    // sequence pulling from the same shrinking teamSpec pool, uncoordinated
+    // with the first. Confirmed in practice: a player leaving mid-rebuild
+    // could land both sequences' moves on the SAME side back to back
+    // (spec[0] resolving to a different player each time as the pool
+    // shrinks from both directions at once), settling on an uneven split
+    // like 3v1 instead of the intended 2v2 — this is state.insertingPlayers'
+    // actual purpose, previously set all over this file but never read
+    // anywhere. Retrying every 50ms until the in-flight sequence's own
+    // auto-clear timeout fires defers to a single clean pass against the
+    // final, settled roster instead of racing it.
+    function safeBalanceTeams() {
+        if (state.removingPlayers || state.insertingPlayers) {
+            setTimeout(safeBalanceTeams, 50);
+            return;
+        }
+        balanceTeams();
+    }
+
     function balanceTeams() {
         // Self-heal a chooseMode session that's stuck true below the
         // threshold it needs (a full-or-bigger house) — not just here for
@@ -239,7 +262,7 @@ module.exports = function createTeamBalance({
         if (state.chooseMode) {
             getSpecList(state.teamRed.length <= state.teamBlue.length ? state.teamRed[0] : state.teamBlue[0]);
         }
-        balanceTeams();
+        safeBalanceTeams();
     }
 
     function handlePlayersLeave() {
@@ -351,7 +374,7 @@ module.exports = function createTeamBalance({
                 getSpecList(state.teamRed.length <= state.teamBlue.length ? state.teamRed[0] : state.teamBlue[0]);
             }
         }
-        balanceTeams();
+        safeBalanceTeams();
     }
 
     function handlePlayersTeamChange(byPlayer) {
@@ -463,26 +486,66 @@ module.exports = function createTeamBalance({
                     // a stadium resets everyone to spectators, so the
                     // rebuild has to run against that reset roster, not the
                     // other way around.
-                    if (state.currentStadium != desiredStadiumFor(teamSize)) {
+                    // A real switch (not just this no-op check) reloads the
+                    // stadium, which resets every player back to spectators
+                    // as a side effect — the SAME reset resetButton() below
+                    // does explicitly. With the randomButton() loop's own
+                    // first call scheduled at delay 0 (i=0), it used to race
+                    // this deferred 5ms stadium switch directly: confirmed in
+                    // practice, the switch fires AFTER randomButton() has
+                    // already placed 1-2 players, wiping them straight back
+                    // to spectators — that call's work is silently lost
+                    // (nothing re-runs it), settling the house one short on
+                    // each side (e.g. 3v3 instead of 4v4) with players stuck
+                    // spectating who should be playing. Starting the whole
+                    // rebuild loop after the switch's own delay avoids the
+                    // race entirely; skipped when no switch is needed so the
+                    // already-common case isn't slowed down for nothing.
+                    const needsStadiumSwitch = state.currentStadium != desiredStadiumFor(teamSize);
+                    if (needsStadiumSwitch) {
                         setTimeout(() => {
                             stadiumCommand(emptyPlayer, `!${desiredStadiumFor(teamSize)}`);
                         }, 5);
                     }
                     resetButton();
+                    const rebuildDelay = needsStadiumSwitch ? 10 : 0;
                     for (let i = 0; i < teamSize; i++) {
                         clearTimeout(state.insertingTimeout);
                         state.insertingPlayers = true;
                         setTimeout(() => {
                             randomButton();
-                        }, 200 * i);
+                        }, rebuildDelay + 200 * i);
                     }
                     state.insertingTimeout = setTimeout(() => {
                         state.insertingPlayers = false;
-                    }, 200 * teamSize);
+                    }, rebuildDelay + 200 * teamSize);
                     state.startTimeout = setTimeout(() => {
                         room.startGame();
                     }, 2000);
                 } else {
+                    // Bug: this branch's own bench + swap + topButton()
+                    // sequence below is a fully automatic, deterministic
+                    // rebuild — nobody is actually hand-picking anything
+                    // here — but chooseMode was never turned off for this
+                    // shape (only the exact-2*teamSize branch above does
+                    // that). Every room.setPlayerTeam() call this sequence
+                    // makes still fires room.onPlayerTeamChange ->
+                    // handlePlayersTeamChange, which — seeing chooseMode
+                    // still true — reacts independently: pulling its OWN
+                    // spectators via its abs(diff)==specLen completion
+                    // branch, or worse, falling through to choosePlayer(),
+                    // which sends a genuine "pick a player" prompt (and
+                    // arms a kick timer) to whichever player happens to be
+                    // teamRed[0]/teamBlue[0] at that instant — mid-automatic
+                    // rebuild, to someone who was never actually asked to
+                    // captain anything. Confirmed in practice: this second,
+                    // uncoordinated process pulling from the same teamSpec
+                    // pool as this branch's own topButton() loop below can
+                    // land the match on an uneven split (e.g. 4v5) instead
+                    // of the balanced result this branch is trying to build.
+                    // Deactivating up front — matching the exact-2*teamSize
+                    // branch above — removes the second process entirely.
+                    deactivateChooseMode();
                     if (state.lastWinner == Team.RED) {
                         blueToSpecButton();
                     } else if (state.lastWinner == Team.BLUE) {
@@ -514,7 +577,25 @@ module.exports = function createTeamBalance({
                     );
                     for (let i = 0; i < spectatorsToInsert; i++) {
                         setTimeout(() => {
-                            topButton();
+                            // spectatorsToInsert counts PLAYERS to insert,
+                            // one per scheduled call — topButton() doesn't
+                            // match that: once red==blue mid-loop it takes
+                            // its OWN pair branch and inserts 2 (a sync move
+                            // plus its own +5ms deferred second half), which
+                            // this loop's per-call cap check can't see
+                            // coming. Confirmed in practice this overfills
+                            // past 2*teamSize (e.g. 4v5 instead of 4v4) —
+                            // no fixed stagger between these calls reliably
+                            // avoided it either, since topButton()'s
+                            // deferred half and this loop's own calls both
+                            // land within the same few-ms window under real
+                            // timer jitter. Filling directly with
+                            // safeMoveNextSpec — always exactly one player,
+                            // no internal deferred half of its own — sidesteps
+                            // the whole problem instead of racing it.
+                            if (state.teamRed.length + state.teamBlue.length < 2 * teamSize) {
+                                safeMoveNextSpec(state.teamRed.length <= state.teamBlue.length ? Team.RED : Team.BLUE);
+                            }
                         }, 300 + 5 * i);
                     }
                     state.insertingTimeout = setTimeout(() => {
@@ -584,7 +665,15 @@ module.exports = function createTeamBalance({
                     );
                     for (let i = 0; i < spectatorsToInsert; i++) {
                         setTimeout(() => {
-                            topButton();
+                            // See the identical guard/comment on the
+                            // chooseMode branch above: safeMoveNextSpec
+                            // (always exactly one player, no internal
+                            // deferred half of its own) sidesteps
+                            // topButton()'s pair-branch overfill instead of
+                            // trying to out-time it.
+                            if (state.teamRed.length + state.teamBlue.length < 2 * teamSize) {
+                                safeMoveNextSpec(state.teamRed.length <= state.teamBlue.length ? Team.RED : Team.BLUE);
+                            }
                         }, 200 + 5 * i);
                     }
                     state.insertingTimeout = setTimeout(() => {

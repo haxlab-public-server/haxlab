@@ -174,6 +174,19 @@ module.exports = function createEconomy({
         // home, blue switches to its away variant so they're never twinning.
         if (red && blue && red.item.id === blue.item.id) {
             blueKit = blue.item.away;
+        } else {
+            // The other side isn't wearing a form at all here (it's about to
+            // fall back to DEFAULT_RED_KIT/DEFAULT_BLUE_KIT below) — a form
+            // whose home kit is close to THAT default (see
+            // clashesWithDefault in shopItems.js, e.g. crimson's deep reds
+            // next to the default red kit) reads as near-identical to the
+            // side with no form, same problem as two sides sharing a form.
+            if (!red && blue && blue.item.clashesWithDefault === 'red') {
+                blueKit = blue.item.away;
+            }
+            if (!blue && red && red.item.clashesWithDefault === 'blue') {
+                redKit = red.item.away;
+            }
         }
         redKit ??= DEFAULT_RED_KIT;
         blueKit ??= DEFAULT_BLUE_KIT;
