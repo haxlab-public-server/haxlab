@@ -21,6 +21,7 @@ module.exports = function createGameManagementEvents({
     redColor,
     teamSize,
     announceTeamForms,
+    balanceTeams,
     calculateStadiumVariables,
     deactivateChooseMode,
     endGame,
@@ -97,6 +98,25 @@ module.exports = function createGameManagementEvents({
         state.playSituation = Situation.STOP;
         updateTeams();
         handlePlayersStop(byPlayer);
+        // Bug (reported live): handlePlayersStop only ever does anything on
+        // a NATURAL end (byPlayer==null, the round's own endGame() already
+        // ran) — a genuine admin/native stop mid-round (someone pausing
+        // the game directly in the HaxBall client, not via !restart or any
+        // command that manages its own follow-up) leaves the roster
+        // completely unmanaged: no bench, no refill, nothing scheduled to
+        // ever restart it. The room just sits there until some UNRELATED
+        // join/leave/afk happens to trigger balanceTeams() on its own —
+        // reported live as the room eventually limping back to life via a
+        // side effect of an unrelated choose-mode session, landing on a
+        // half-built team (blue with no captain, sometimes no blue at
+        // all). The room's policy is that it should keep working on its
+        // own regardless of why it stopped — so whenever
+        // handlePlayersStop's own guard didn't fire, fall back to the same
+        // ordinary self-heal joins/leaves already get, right away instead
+        // of waiting on an unrelated event to trigger it.
+        if (!(byPlayer == null && state.endGameVariable)) {
+            balanceTeams();
+        }
         handleActivityStop();
     }
 

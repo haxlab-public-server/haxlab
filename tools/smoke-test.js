@@ -821,6 +821,88 @@ console.log('\n--- events/movement.js: auth-bans block a join regardless of conn
     }, 20);
 })();
 
+console.log('\n--- events/gameManagement.js: onGameStop falls back to balanceTeams() when handlePlayersStop\'s own guard doesn\'t fire ---');
+(async () => {
+    // Reported live: an admin natively stopping a round mid-play (pressing
+    // stop/pause directly in the HaxBall client, not via !restart or any
+    // command that manages its own follow-up) fires onGameStop with
+    // byPlayer set to that admin — but handlePlayersStop only ever does
+    // anything on a NATURAL end (byPlayer==null && state.endGameVariable,
+    // set once the round's own endGame() actually ran). An admin/native
+    // interruption mid-round leaves the roster completely unmanaged: no
+    // bench, no refill, nothing scheduled to ever restart it — the room
+    // just sat there (already uneven, e.g. from an earlier partial event)
+    // until some UNRELATED join/leave/afk happened to trigger
+    // balanceTeams() on its own. The room's policy is that it should keep
+    // working automatically regardless of why it stopped, so onGameStop
+    // now falls back to balanceTeams() itself whenever handlePlayersStop's
+    // own guard didn't fire.
+    const Team = { RED: 1, BLUE: 2, SPECTATORS: 0 };
+    const State = { PLAY: 0, PAUSE: 1, STOP: 2 };
+    const Situation = { STOP: 0, KICKOFF: 1, PLAY: 2, GOAL: 3 };
+    const players = [
+        { id: 1, team: Team.RED }, { id: 2, team: Team.RED }, { id: 3, team: Team.RED }, { id: 4, team: Team.RED },
+        { id: 5, team: Team.BLUE }, { id: 6, team: Team.BLUE },
+        { id: 7, team: Team.SPECTATORS }, { id: 8, team: Team.SPECTATORS },
+    ];
+    const state = {
+        players, chooseMode: false, endGameVariable: false, lastWinner: Team.RED,
+        currentStadium: 'big', gameState: State.PLAY, playSituation: Situation.PLAY,
+        game: { scores: { timeLimit: 300, time: 50, red: 1, blue: 0 }, playerComp: [[], []] },
+        cancelGameVariable: false,
+    };
+    state.teamRed = players.filter((p) => p.team === Team.RED);
+    state.teamBlue = players.filter((p) => p.team === Team.BLUE);
+    state.teamSpec = players.filter((p) => p.team === Team.SPECTATORS);
+    const roomMock = {
+        getScores: () => ({ red: 1, blue: 0, scoreLimit: 3, time: 50, timeLimit: 300 }),
+        setScoreLimit: () => {}, setTimeLimit: () => {}, setCustomStadium: () => {}, setDefaultStadium: () => {},
+        stopGame: () => {}, startGame: () => {}, pauseGame: () => {}, stopRecording: () => null,
+        kickPlayer: () => {}, sendAnnouncement: () => {},
+        setPlayerTeam: (id, team) => {
+            const player = players.find((p) => p.id === id);
+            if (!player) return;
+            player.team = team;
+            state.teamRed = players.filter((p) => p.team === Team.RED);
+            state.teamBlue = players.filter((p) => p.team === Team.BLUE);
+            state.teamSpec = players.filter((p) => p.team === Team.SPECTATORS);
+        },
+    };
+    const createButtonHelpers = require(path.join(CORE, 'team', 'buttons'));
+    const buttons = createButtonHelpers({ room: roomMock, state, Team, getRandomInt: (max) => Math.floor(Math.random() * max) });
+    const balance = require(path.join(CORE, 'team', 'balance'))({
+        room: roomMock, state, Team, State, HaxNotification: { CHAT: 1 },
+        emptyPlayer: {}, infoColor: 5, scoreLimit: 3, teamSize: 4, timeLimit: 5,
+        activateChooseMode: () => {}, blueToSpecButton: buttons.blueToSpecButton, choosePlayer: () => {},
+        deactivateChooseMode: () => {}, endGame: () => {}, getRandomInt: (max) => Math.floor(Math.random() * max),
+        getSpecList: () => {}, instantRestart: () => {}, randomButton: buttons.randomButton,
+        redToSpecButton: buttons.redToSpecButton, resetButton: buttons.resetButton, resumeGame: () => {},
+        stadiumCommand: () => {}, swapButton: buttons.swapButton, topButton: buttons.topButton,
+    });
+    const createGameManagementEvents = require(path.join(CORE, 'events', 'gameManagement'));
+    const gm = createGameManagementEvents({
+        room: roomMock, state, Game: function () {}, HaxNotification: { CHAT: 1, NONE: 0 }, Situation, State, Team,
+        blueColor: 0, defaultColor: 0, discordBot: { sendLog: () => {} }, fetchRecordingVariable: false,
+        getStartingLineups: () => [], mentionPlayersUnpause: false, redColor: 0, teamSize: 4,
+        announceTeamForms: async () => {}, balanceTeams: balance.balanceTeams, calculateStadiumVariables: () => {},
+        deactivateChooseMode: () => {}, endGame: () => {}, fetchRecording: () => {}, fetchSummaryEmbed: () => {},
+        getBallSpeed: () => 0, getDate: () => '', getGoalString: () => '', getPlayerComp: () => ({}),
+        handleActivityStop: () => {}, handlePlayersStop: balance.handlePlayersStop,
+        playGoalAnimation: async () => {}, playGoalSizeEffect: async () => {},
+        updateTeams: () => {
+            state.teamRed = players.filter((p) => p.team === Team.RED);
+            state.teamBlue = players.filter((p) => p.team === Team.BLUE);
+            state.teamSpec = players.filter((p) => p.team === Team.SPECTATORS);
+        },
+    });
+
+    const admin = { id: 99, name: 'letkh', admin: true };
+    gm.onGameStop(admin);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    check('an admin natively stopping a round mid-play still self-heals an uneven roster, no external nudge needed', Math.abs(state.teamRed.length - state.teamBlue.length) <= 1, true);
+    check('...specifically by pulling waiting spectators in', state.teamBlue.length, 4);
+})();
+
 console.log('\n--- team/buttons.js: randomButton must not strand a spectator across repeated calls ---');
 {
     // A realistic mock: room.setPlayerTeam here actually mutates the
@@ -1240,9 +1322,18 @@ console.log('\n--- team/balance.js: an already-full match never auto-upgrades to
         balance.balanceTeams();
         // Each pair in this growth branch is now a real tick apart (see
         // balance.js), not both back-to-back in the same call — wait for
-        // the pair to fully land before inspecting roomCallsLocal.
+        // the pair to fully land before inspecting roomCallsLocal. Checked
+        // as a set of {id -> team}, not the exact call order: under this
+        // whole test file's many-concurrent-timers load (dozens of blocks
+        // sharing one event loop, not a realistic single-room production
+        // scenario), which of the two near-simultaneous 0ms/5ms moves
+        // actually executes first isn't reliably pinned down — what
+        // matters functionally is that both id 3 and id 4 landed, one on
+        // each team, not which specific one got which.
         await wait(40);
-        check('a running 1v1 on classic pulls in exactly one pair from spectators to make 2v2', roomCallsLocal, [`setPlayerTeam:3:${Team.RED}`, `setPlayerTeam:4:${Team.BLUE}`]);
+        check('a running 1v1 on classic pulls in exactly one pair from spectators to make 2v2', roomCallsLocal.length, 2);
+        check('...and id 3 and id 4 landed on different teams (one each)', new Set(roomCallsLocal.map((c) => c.split(':')[2])).size, 2);
+        check('...and no other spectator was touched', roomCallsLocal.every((c) => c.startsWith('setPlayerTeam:3:') || c.startsWith('setPlayerTeam:4:')), true);
         check('growing within the current map does not restart or switch stadiums', calls, []);
 
         // Once at classic's 2v2 cap, further spectators keep waiting — this is
@@ -1808,6 +1899,66 @@ console.log('\n--- team/balance.js: ensureFullFieldBeforeStart reasserts the sta
         check('the pull grew the match past classic\'s own cap', Math.max(state.teamRed.length, state.teamBlue.length), 3);
         check('the stadium was reasserted to match the NEW shape, not left on classic', state.currentStadium, 'big');
         check('nobody was left stranded in spectators', state.teamSpec.length, 0);
+    })();
+}
+
+console.log('\n--- team/balance.js: ensureFullFieldBeforeStart cross-moves when genuinely zero spectators are available, instead of starting lopsided ---');
+{
+    // Reported live (twice): a match ends lopsided (e.g. the benched side
+    // going AFK right as they lost, excluding them from the count) with
+    // computeSpectatorsToInsert() correctly seeing 0 available RIGHT THEN
+    // — but nothing ever re-checked afterward, so the match started (or
+    // stayed stopped) at something like 4v0 until an unrelated join/leave/
+    // afk toggle happened to trigger balanceTeams() on its own, which DOES
+    // have a cross-move fallback (rule 3: nxn-2 with zero spectators moves
+    // the last player of the bigger side across). Fixed by having
+    // ensureFullFieldBeforeStart() reuse balanceTeams() itself for
+    // whatever's still uneven after its own direct pull, so a genuine
+    // zero-spectator 4v0 self-heals to 2v2 immediately, with no external
+    // nudge needed.
+    const State = { PLAY: 0, PAUSE: 1, STOP: 2 };
+    const Team = { RED: 1, BLUE: 2, SPECTATORS: 0 };
+    const players = [
+        { id: 1, team: Team.RED }, { id: 2, team: Team.RED }, { id: 3, team: Team.RED }, { id: 4, team: Team.RED },
+    ];
+    const state = {
+        players, chooseMode: false, endGameVariable: true, lastWinner: Team.RED,
+        currentStadium: 'big', gameState: State.STOP,
+    };
+    state.teamRed = players.filter((p) => p.team === Team.RED);
+    state.teamBlue = [];
+    state.teamSpec = [];
+    const roomMock = {
+        getScores: () => ({ red: 0, blue: 0, scoreLimit: 3, time: 0, timeLimit: 300 }),
+        setScoreLimit: () => {}, setTimeLimit: () => {}, setCustomStadium: () => {}, setDefaultStadium: () => {},
+        stopGame: () => {}, startGame: () => {}, pauseGame: () => {},
+        setPlayerTeam: (id, team) => {
+            const player = state.players.find((p) => p.id === id);
+            if (!player) return;
+            player.team = team;
+            state.teamRed = state.players.filter((p) => p.team === Team.RED);
+            state.teamBlue = state.players.filter((p) => p.team === Team.BLUE);
+            state.teamSpec = state.players.filter((p) => p.team === Team.SPECTATORS);
+        },
+    };
+    const createButtonHelpers = require(path.join(CORE, 'team', 'buttons'));
+    const buttons = createButtonHelpers({ room: roomMock, state, Team, getRandomInt: () => 0 });
+    const balance = require(path.join(CORE, 'team', 'balance'))({
+        room: roomMock, state, Team, State, HaxNotification: { CHAT: 1 },
+        emptyPlayer: {}, infoColor: 5, scoreLimit: 3, teamSize: 4, timeLimit: 5,
+        activateChooseMode: () => {}, blueToSpecButton: buttons.blueToSpecButton, choosePlayer: () => {},
+        deactivateChooseMode: () => {}, endGame: () => {}, getRandomInt: () => 0,
+        getSpecList: () => {}, instantRestart: () => {}, randomButton: buttons.randomButton,
+        redToSpecButton: buttons.redToSpecButton, resetButton: buttons.resetButton, resumeGame: () => {},
+        stadiumCommand: () => {}, swapButton: buttons.swapButton, topButton: buttons.topButton,
+    });
+
+    (async () => {
+        await new Promise((resolve) => {
+            balance.ensureFullFieldBeforeStart(resolve);
+        });
+        await new Promise((resolve) => setTimeout(resolve, 30));
+        check('a genuine zero-spectator 4v0 self-heals to a clean 2v2 immediately, no external nudge needed', [state.teamRed.length, state.teamBlue.length], [2, 2]);
     })();
 }
 

@@ -84,6 +84,26 @@ module.exports = function createTeamBalance({
     // not synchronously — callers that need to start the game only once the
     // final shape (and now-correct stadium) are both settled should do that
     // inside it rather than racing it with their own fixed delay.
+    // Bug (reported live, twice): computeSpectatorsToInsert() only ever
+    // PULLS FROM SPECTATORS — unlike balanceTeams()'s own "abs(diff)>specLen"
+    // handling, it has no cross-move fallback for when there's genuinely
+    // nobody waiting (rule 3: nxn-2 with zero spectators should move the
+    // last player of the bigger side across instead of just sitting
+    // uneven). It's also computed once, synchronously, right after
+    // benching — state.teamSpec excludes AFK players entirely, same as
+    // state.players everywhere else, so if the just-benched losing side
+    // went AFK right as/after losing (a common reaction), they land on
+    // team=SPECTATORS but aren't counted here at all, and nothing ever
+    // re-checks afterward. Reported live as the match starting (or staying
+    // stopped) with the benched side sitting at 0 — the ONLY thing that
+    // ever fixed it was some unrelated join/leave/afk toggle, because
+    // THAT goes through balanceTeams(), which already has both the
+    // cross-move fallback and gets re-run fresh on every such event. Fixed
+    // by reusing balanceTeams() itself here for whatever's still uneven
+    // after the direct pull, instead of a second, separate, incomplete
+    // implementation — the room now recovers exactly the same way a
+    // manual !afk toggle already reliably did, without needing anyone to
+    // trigger it.
     function ensureFullFieldBeforeStart(onSettled) {
         if (state.players.length > 2 * teamSize) {
             if (onSettled) onSettled();
@@ -96,6 +116,7 @@ module.exports = function createTeamBalance({
             }, 5 * i);
         }
         setTimeout(() => {
+            balanceTeams();
             reassertStadium();
             if (onSettled) onSettled();
         }, 5 * n);

@@ -1199,6 +1199,7 @@ Object.assign(room, wrapEventHandlers(createGameManagementEvents({
     redColor,
     teamSize,
     announceTeamForms,
+    balanceTeams,
     calculateStadiumVariables,
     deactivateChooseMode,
     endGame,
