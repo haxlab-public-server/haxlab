@@ -1523,28 +1523,26 @@ console.log('\n--- team/balance.js: an already-full match never auto-upgrades to
     })();
 }
 
-console.log('\n--- team/balance.js: a full-4v4 rebuild survives an actual stadium switch instead of losing a randomButton() pick ---');
+console.log('\n--- team/balance.js: ensureFullFieldBeforeStart pulls stranded players in right before room.startGame() ---');
 {
-    // Bug: the exact-2*teamSize choose-mode branch schedules its stadium
-    // switch (if one's actually needed) 5ms out, but its own randomButton()
-    // rebuild loop's first call was scheduled at delay 0 — racing it
-    // directly. A real stadium switch resets every player on the field back
-    // to spectators as a side effect (same as resetButton() does
-    // explicitly) — confirmed in practice (100% reproducible, not a rare
-    // race), the switch fired AFTER randomButton() had already placed 1-2
-    // players, silently wiping that pick with nothing to re-run it,
-    // settling the house one player short per side (3v3 instead of 4v4)
-    // with 2 players stuck spectating who should be playing. This only
-    // shows up when a switch is genuinely needed (room was on classic, house
-    // is a full 4v4 needing big) — a stadiumCalls-only check (see the test
-    // above) can't catch it, since the command still fires exactly once
-    // either way; only the FINAL team composition reveals the lost pick.
+    // Reported bug: a 2v1 finish sometimes started the next round with
+    // someone stuck in spectators instead of playing (seen as "2v1 starts
+    // the next match 2v0"). The exact mid-sequence cause wasn't pinned down
+    // (a stadium switch does NOT reset players to spectators, ruling out
+    // the first theory here) — so instead of chasing the precise trigger,
+    // this is a safety net: whatever left someone stranded, as long as the
+    // house is <=2*teamSize, nobody should still be in spectators by the
+    // time room.startGame() actually fires. Simulated here by forcing a
+    // player back to spectators well after the normal rebuild has already
+    // settled (standing in for whatever untraced mechanism does this in
+    // production), then checking the safety net catches it before start.
     const State = { PLAY: 0, PAUSE: 1, STOP: 2 };
     const Team = { RED: 1, BLUE: 2, SPECTATORS: 0 };
-    const players = new Array(8).fill(0).map((_, i) => ({ id: i + 1, team: Team.RED }));
-    for (let i = 4; i < 8; i++) players[i].team = Team.BLUE;
+    const players = [
+        { id: 1, team: Team.RED }, { id: 2, team: Team.RED }, { id: 3, team: Team.BLUE },
+    ];
     const state = {
-        players, chooseMode: true, endGameVariable: true, lastWinner: Team.RED,
+        players, chooseMode: false, endGameVariable: true, lastWinner: Team.RED,
         currentStadium: 'classic', gameState: State.STOP,
     };
     state.teamRed = players.filter((p) => p.team === Team.RED);
@@ -1553,7 +1551,7 @@ console.log('\n--- team/balance.js: a full-4v4 rebuild survives an actual stadiu
 
     const roomMock = {
         getScores: () => ({ red: 0, blue: 0, scoreLimit: 3, time: 0, timeLimit: 3 }),
-        setScoreLimit: () => {}, setTimeLimit: () => {},
+        setScoreLimit: () => {}, setTimeLimit: () => {}, setCustomStadium: () => {}, setDefaultStadium: () => {},
         stopGame: () => {}, startGame: () => {}, pauseGame: () => {},
         setPlayerTeam: (id, team) => {
             const player = state.players.find((p) => p.id === id);
@@ -1564,31 +1562,30 @@ console.log('\n--- team/balance.js: a full-4v4 rebuild survives an actual stadiu
             state.teamSpec = state.players.filter((p) => p.team === Team.SPECTATORS);
         },
     };
-    // Mimics what a real stadium switch does: reload the map, which resets
-    // every player on the field back to spectators.
-    const stadiumCommand = (emptyPlayer, cmd) => {
-        state.currentStadium = cmd.replace('!', '');
-        for (const p of [...state.teamRed, ...state.teamBlue]) {
-            roomMock.setPlayerTeam(p.id, Team.SPECTATORS);
-        }
-    };
     const createButtonHelpers = require(path.join(CORE, 'team', 'buttons'));
-    const buttons = createButtonHelpers({ room: roomMock, state, Team, getRandomInt: (max) => Math.floor(Math.random() * max) });
+    const buttons = createButtonHelpers({ room: roomMock, state, Team, getRandomInt: () => 0 });
     const balance = require(path.join(CORE, 'team', 'balance'))({
         room: roomMock, state, Team, State, HaxNotification: { CHAT: 1 },
         emptyPlayer: {}, infoColor: 5, scoreLimit: 3, teamSize: 4, timeLimit: 5,
         activateChooseMode: () => {}, blueToSpecButton: buttons.blueToSpecButton, choosePlayer: () => {},
-        deactivateChooseMode: () => { state.chooseMode = false; }, endGame: () => {}, getRandomInt: (max) => Math.floor(Math.random() * max),
+        deactivateChooseMode: () => {}, endGame: () => {}, getRandomInt: () => 0,
         getSpecList: () => {}, instantRestart: () => {}, randomButton: buttons.randomButton,
         redToSpecButton: buttons.redToSpecButton, resetButton: buttons.resetButton, resumeGame: () => {},
-        stadiumCommand, swapButton: buttons.swapButton, topButton: buttons.topButton,
+        stadiumCommand: () => {}, swapButton: buttons.swapButton, topButton: buttons.topButton,
     });
 
     balance.handlePlayersStop(null);
 
     (async () => {
-        await new Promise((resolve) => setTimeout(resolve, 1000));
-        check('a full 4v4 rebuild that needs a real stadium switch still lands on 4v4, not 3v3', [state.teamRed.length, state.teamBlue.length, state.teamSpec.length], [4, 4, 0]);
+        // Well after the normal 200ms refill has settled into 2v1, but
+        // before the 2000ms room.startGame() timer — simulates the
+        // untraced mechanism that stranded a player.
+        await new Promise((resolve) => setTimeout(resolve, 500));
+        roomMock.setPlayerTeam(3, Team.SPECTATORS);
+        check('the stranding was applied: someone is spectating right before start', [state.teamRed.length, state.teamBlue.length, state.teamSpec.length], [2, 0, 1]);
+
+        await new Promise((resolve) => setTimeout(resolve, 1600));
+        check('by the time room.startGame() actually fires, nobody eligible is left spectating', [state.teamRed.length, state.teamBlue.length, state.teamSpec.length], [2, 1, 0]);
     })();
 }
 

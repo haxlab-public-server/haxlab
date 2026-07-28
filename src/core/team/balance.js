@@ -56,6 +56,25 @@ module.exports = function createTeamBalance({
         }
     }
 
+    // Safety net around room.startGame(): whatever sequence of
+    // benches/pulls/pairs led here, if there are up to a full house's worth
+    // of players (<=2*teamSize) and any of them are still sitting in
+    // spectators when the match is about to start, spread them onto
+    // whichever side is smaller instead of kicking off with players parked
+    // who should be on the field. Staggered (not a synchronous loop) —
+    // same reasoning as every other multi-move sequence in this file:
+    // state.teamSpec isn't reliably guaranteed to have shrunk yet by the
+    // very next call in real production.
+    function ensureFullFieldBeforeStart() {
+        if (state.players.length > 2 * teamSize) return;
+        const n = state.teamSpec.length;
+        for (let i = 0; i < n; i++) {
+            setTimeout(() => {
+                safeMoveNextSpec(state.teamRed.length <= state.teamBlue.length ? Team.RED : Team.BLUE);
+            }, 5 * i);
+        }
+    }
+
     // Every staggered spectator-pull below schedules its moves as a fixed
     // count of setTimeout calls computed once up front from teamSpec's
     // length at that moment — but a concurrent leave/join (or another
@@ -482,45 +501,30 @@ module.exports = function createTeamBalance({
                     // of whatever shape led in here, so the map this needs
                     // is already known up front — no need to wait and
                     // observe the rebuilt teams. Switching the stadium
-                    // BEFORE the rebuild (not after) is deliberate: loading
-                    // a stadium resets everyone to spectators, so the
-                    // rebuild has to run against that reset roster, not the
-                    // other way around.
-                    // A real switch (not just this no-op check) reloads the
-                    // stadium, which resets every player back to spectators
-                    // as a side effect — the SAME reset resetButton() below
-                    // does explicitly. With the randomButton() loop's own
-                    // first call scheduled at delay 0 (i=0), it used to race
-                    // this deferred 5ms stadium switch directly: confirmed in
-                    // practice, the switch fires AFTER randomButton() has
-                    // already placed 1-2 players, wiping them straight back
-                    // to spectators — that call's work is silently lost
-                    // (nothing re-runs it), settling the house one short on
-                    // each side (e.g. 3v3 instead of 4v4) with players stuck
-                    // spectating who should be playing. Starting the whole
-                    // rebuild loop after the switch's own delay avoids the
-                    // race entirely; skipped when no switch is needed so the
-                    // already-common case isn't slowed down for nothing.
-                    const needsStadiumSwitch = state.currentStadium != desiredStadiumFor(teamSize);
-                    if (needsStadiumSwitch) {
+                    // BEFORE the rebuild keeps the map settled before anyone
+                    // gets placed on it, rather than reshuffling teams onto
+                    // a map that's about to change under them.
+                    if (state.currentStadium != desiredStadiumFor(teamSize)) {
                         setTimeout(() => {
                             stadiumCommand(emptyPlayer, `!${desiredStadiumFor(teamSize)}`);
                         }, 5);
                     }
                     resetButton();
-                    const rebuildDelay = needsStadiumSwitch ? 10 : 0;
                     for (let i = 0; i < teamSize; i++) {
                         clearTimeout(state.insertingTimeout);
                         state.insertingPlayers = true;
                         setTimeout(() => {
                             randomButton();
-                        }, rebuildDelay + 200 * i);
+                        }, 200 * i);
                     }
                     state.insertingTimeout = setTimeout(() => {
                         state.insertingPlayers = false;
-                    }, rebuildDelay + 200 * teamSize);
+                    }, 200 * teamSize);
                     state.startTimeout = setTimeout(() => {
-                        room.startGame();
+                        ensureFullFieldBeforeStart();
+                        setTimeout(() => {
+                            room.startGame();
+                        }, 50);
                     }, 2000);
                 } else {
                     // Bug: this branch's own bench + swap + topButton()
@@ -625,7 +629,10 @@ module.exports = function createTeamBalance({
                         reassertStadium();
                     }, 5);
                     state.startTimeout = setTimeout(() => {
-                        room.startGame();
+                        ensureFullFieldBeforeStart();
+                        setTimeout(() => {
+                            room.startGame();
+                        }, 50);
                     }, 2000);
                 } else if (state.players.length == 3 || state.players.length == 5 || state.players.length >= 2 * teamSize + 1) {
                     // 5 used to also trigger captain-choosing mode here — the
@@ -688,15 +695,18 @@ module.exports = function createTeamBalance({
                         reassertStadium();
                     }, 300 + 5 * spectatorsToInsert);
                     state.startTimeout = setTimeout(() => {
-                        room.startGame();
+                        ensureFullFieldBeforeStart();
+                        setTimeout(() => {
+                            room.startGame();
+                        }, 50);
                     }, 2000);
                 } else if (state.players.length == 4) {
                     // resetButton() + 2x randomButton() below always
                     // rebuilds an even 2v2 regardless of the shape leading
                     // in, so (same reasoning as the exact-2*teamSize
-                    // chooseMode branch) the map is already known — switch
-                    // BEFORE the rebuild since loading a stadium resets
-                    // everyone to spectators.
+                    // chooseMode branch) the map is already known up front —
+                    // switch BEFORE the rebuild so the map is already
+                    // settled before anyone gets placed on it.
                     if (state.currentStadium != desiredStadiumFor(2)) {
                         setTimeout(() => {
                             stadiumCommand(emptyPlayer, `!${desiredStadiumFor(2)}`);
@@ -715,7 +725,10 @@ module.exports = function createTeamBalance({
                         state.insertingPlayers = false;
                     }, 2000);
                     state.startTimeout = setTimeout(() => {
-                        room.startGame();
+                        ensureFullFieldBeforeStart();
+                        setTimeout(() => {
+                            room.startGame();
+                        }, 50);
                     }, 2000);
                 } else if (state.players.length == 6) {
                     // Same reasoning as the 4-player case above — resetButton()
@@ -741,7 +754,10 @@ module.exports = function createTeamBalance({
                         }, 500);
                     }, 500);
                     state.startTimeout = setTimeout(() => {
-                        room.startGame();
+                        ensureFullFieldBeforeStart();
+                        setTimeout(() => {
+                            room.startGame();
+                        }, 50);
                     }, 2000);
                 }
             }
