@@ -71,14 +71,34 @@ module.exports = function createTeamBalance({
     // every other multi-move sequence in this file: state.teamSpec isn't
     // reliably guaranteed to have shrunk yet by the very next call in real
     // production.
-    function ensureFullFieldBeforeStart() {
-        if (state.players.length > 2 * teamSize) return;
+    // Bug: this pulls in waiting spectators same as the ordinary
+    // balanceTeams() growth path, but WITHOUT that path's "stay within the
+    // current stadium's own cap" limit (computeSpectatorsToInsert() fills up
+    // to the full 2*teamSize, not the live stadium's cap) — needed here
+    // since this is the one place that's supposed to catch a genuinely
+    // stranded player regardless of shape. Confirmed in practice: a 2v2 on
+    // classic with spectators waiting could get topped all the way to 3v3
+    // right here, but nothing reasserted the stadium afterward, so the
+    // match started on classic anyway (the reported "stuck on classic"
+    // bug). onSettled runs after the pulls (if any) have actually landed,
+    // not synchronously — callers that need to start the game only once the
+    // final shape (and now-correct stadium) are both settled should do that
+    // inside it rather than racing it with their own fixed delay.
+    function ensureFullFieldBeforeStart(onSettled) {
+        if (state.players.length > 2 * teamSize) {
+            if (onSettled) onSettled();
+            return;
+        }
         const n = computeSpectatorsToInsert();
         for (let i = 0; i < n; i++) {
             setTimeout(() => {
                 safeMoveNextSpec(state.teamRed.length <= state.teamBlue.length ? Team.RED : Team.BLUE);
             }, 5 * i);
         }
+        setTimeout(() => {
+            reassertStadium();
+            if (onSettled) onSettled();
+        }, 5 * n);
     }
 
     // Every staggered spectator-pull below schedules its moves as a fixed
@@ -114,6 +134,28 @@ module.exports = function createTeamBalance({
         const towardParity = Math.min(available, diff);
         const remainingPairs = Math.floor((available - towardParity) / 2);
         return towardParity + remainingPairs * 2;
+    }
+
+    // Rebuilds from a clean 0v0, assigning every current player (capped at
+    // 2*teamSize) to a RANDOM side, one at a time, always topping up
+    // whichever side is currently smaller (ties toward red) — same
+    // principle randomButton()'s own pair logic uses, just generalized to
+    // work for odd totals too (a 2v1/3v2/etc. shape, unavoidable with an
+    // odd count, still gets a genuinely random assignment instead of sync
+    // count-based pairs). Used specifically where there's no genuine
+    // outside spectator pool to draw from — see its call site's own
+    // comment for why that matters.
+    function randomFillAll() {
+        resetButton();
+        const totalToPlace = Math.min(state.teamSpec.length, 2 * teamSize);
+        for (let i = 0; i < totalToPlace; i++) {
+            setTimeout(() => {
+                if (state.teamSpec.length === 0) return;
+                const idx = getRandomInt(state.teamSpec.length);
+                const team = state.teamRed.length <= state.teamBlue.length ? Team.RED : Team.BLUE;
+                room.setPlayerTeam(state.teamSpec[idx].id, team);
+            }, 5 * i);
+        }
     }
 
     // handlePlayersJoin()/handlePlayersLeave() call balanceTeams()
@@ -494,11 +536,23 @@ module.exports = function createTeamBalance({
                 return;
             }
 
-            if (state.capLeft) {
-                choosePlayer();
-            } else {
-                getSpecList(state.teamRed.length <= state.teamBlue.length ? state.teamRed[0] : state.teamBlue[0]);
-            }
+            // Bug: getSpecList() alone only shows an updated waiting-list —
+            // it does NOT re-prompt anyone or re-arm state.timeOutCap. A
+            // leave can shift the teamRed<=teamBlue comparison (whose
+            // "turn" it is) WITHOUT checkCaptainLeave setting capLeft (that
+            // only fires when the departing player WAS the current-turn
+            // captain themselves) — leaving the room desynced: whoever was
+            // already prompted keeps their armed timer for a turn that
+            // isn't theirs anymore, while whoever's turn it actually
+            // becomes now was only shown a spectator list, never asked
+            // anything, with no timer of their own either. Reported live as
+            // a complete freeze after one player left a 9-person
+            // choose-mode session, with blue never getting a captain
+            // prompt. choosePlayer() already calls getSpecList() itself
+            // once it settles on a real captain, so always calling it here
+            // is a strict superset — it just also (re-)establishes a
+            // working prompt+timer for whoever's actually up.
+            choosePlayer();
         }
         safeBalanceTeams();
     }
@@ -642,10 +696,11 @@ module.exports = function createTeamBalance({
                         state.insertingPlayers = false;
                     }, 200 * teamSize);
                     state.startTimeout = setTimeout(() => {
-                        ensureFullFieldBeforeStart();
-                        setTimeout(() => {
-                            room.startGame();
-                        }, 50);
+                        ensureFullFieldBeforeStart(() => {
+                            setTimeout(() => {
+                                room.startGame();
+                            }, 50);
+                        });
                     }, 2000);
                 } else {
                     // Bug: this branch's own bench + swap + topButton()
@@ -741,10 +796,11 @@ module.exports = function createTeamBalance({
                         reassertStadium();
                     }, 5);
                     state.startTimeout = setTimeout(() => {
-                        ensureFullFieldBeforeStart();
-                        setTimeout(() => {
-                            room.startGame();
-                        }, 50);
+                        ensureFullFieldBeforeStart(() => {
+                            setTimeout(() => {
+                                room.startGame();
+                            }, 50);
+                        });
                     }, 2000);
                 } else if (state.players.length == 3 || state.players.length == 5 || state.players.length == 7 || state.players.length >= 2 * teamSize + 1) {
                     // Bug: 7 was missing entirely from this list — every
@@ -765,62 +821,92 @@ module.exports = function createTeamBalance({
                     // team benches, topButton() pulls someone back in. 9+ here
                     // shouldn't normally happen — endGame() already turns on
                     // choose mode at a full 4v4 house before this ever runs.
-                    if (state.lastWinner == Team.RED) {
-                        blueToSpecButton();
+                    //
+                    // Bug: with genuinely ZERO waiting spectators (checked
+                    // BEFORE any benching below — the bench itself always
+                    // creates a non-empty teamSpec, that's not what this
+                    // checks), the bench+swap+refill sequence only ever has
+                    // the just-benched loser(s) to draw the refill from —
+                    // reported live as "a match ending 2v1 starts the next
+                    // one 2v1 again": the SAME loser gets put right back,
+                    // reconstructing the identical shape (winners kept
+                    // together, loser alone) instead of a fresh, random
+                    // reassignment. An uneven split itself is unavoidable
+                    // with an odd total (someone's always going to be the
+                    // "extra"), but WHO ends up where shouldn't be tied to
+                    // who just won or lost. Reuse the same random rebuild
+                    // the exact-4/exact-6 branches already do below for
+                    // this specific case.
+                    if (state.teamSpec.length == 0) {
+                        randomFillAll();
+                        clearTimeout(state.insertingTimeout);
+                        state.insertingPlayers = true;
+                        const totalToPlace = Math.min(state.players.length, 2 * teamSize);
+                        state.insertingTimeout = setTimeout(() => {
+                            state.insertingPlayers = false;
+                        }, 5 * totalToPlace);
+                        setTimeout(() => {
+                            reassertStadium();
+                        }, 5 * totalToPlace);
                     } else {
-                        redToSpecButton();
+                        if (state.lastWinner == Team.RED) {
+                            blueToSpecButton();
+                        } else {
+                            redToSpecButton();
+                            setTimeout(() => {
+                                swapButton();
+                            }, 5);
+                        }
+                        clearTimeout(state.insertingTimeout);
+                        state.insertingPlayers = true;
+                        // One topButton() call only ever pulls in a single
+                        // spectator — fine when the losing side had just one
+                        // player to begin with, but benching a bigger losing
+                        // side (e.g. a 3v2 down to 5 total) left the rest
+                        // stranded in spectators instead of playing, settling
+                        // on something like 2v1/3v1 instead of the 3v2 those
+                        // 5 players could actually fill. Looping once per
+                        // spectator NEEDED — see computeSpectatorsToInsert()
+                        // for how many that actually is: fills to parity with
+                        // whoever's still on the field, then only continues
+                        // in genuine pairs beyond that. Bug this used to
+                        // have: a clean 1v1 with ONE genuinely-waiting
+                        // spectator (not part of the bench) restored the 1v1
+                        // correctly on the first pull, then kept going and
+                        // dragged that same spectator in anyway, landing on
+                        // 2v1 instead of leaving them waiting.
+                        const spectatorsToInsert = computeSpectatorsToInsert();
+                        for (let i = 0; i < spectatorsToInsert; i++) {
+                            setTimeout(() => {
+                                // See the identical guard/comment on the
+                                // chooseMode branch above: safeMoveNextSpec
+                                // (always exactly one player, no internal
+                                // deferred half of its own) sidesteps
+                                // topButton()'s pair-branch overfill instead
+                                // of trying to out-time it.
+                                if (state.teamRed.length + state.teamBlue.length < 2 * teamSize) {
+                                    safeMoveNextSpec(state.teamRed.length <= state.teamBlue.length ? Team.RED : Team.BLUE);
+                                }
+                            }, 200 + 5 * i);
+                        }
+                        state.insertingTimeout = setTimeout(() => {
+                            state.insertingPlayers = false;
+                        }, 300 + 5 * spectatorsToInsert);
+                        // Same reasoning as the chooseMode branch above: the
+                        // resulting shape depends on how many spectators were
+                        // actually available, so wait for the refill to
+                        // settle before reasserting — well before
+                        // room.startGame() fires at 2000ms below.
                         setTimeout(() => {
-                            swapButton();
-                        }, 5);
+                            reassertStadium();
+                        }, 300 + 5 * spectatorsToInsert);
                     }
-                    clearTimeout(state.insertingTimeout);
-                    state.insertingPlayers = true;
-                    // One topButton() call only ever pulls in a single
-                    // spectator — fine when the losing side had just one
-                    // player to begin with, but benching a bigger losing
-                    // side (e.g. a 3v2 down to 5 total) left the rest
-                    // stranded in spectators instead of playing, settling on
-                    // something like 2v1/3v1 instead of the 3v2 those 5
-                    // players could actually fill. Looping once per
-                    // spectator NEEDED — see computeSpectatorsToInsert() for
-                    // how many that actually is: fills to parity with
-                    // whoever's still on the field, then only continues in
-                    // genuine pairs beyond that. Bug this used to have: a
-                    // clean 1v1 with ONE genuinely-waiting spectator (not
-                    // part of the bench) restored the 1v1 correctly on the
-                    // first pull, then kept going and dragged that same
-                    // spectator in anyway, landing on 2v1 instead of leaving
-                    // them waiting.
-                    const spectatorsToInsert = computeSpectatorsToInsert();
-                    for (let i = 0; i < spectatorsToInsert; i++) {
-                        setTimeout(() => {
-                            // See the identical guard/comment on the
-                            // chooseMode branch above: safeMoveNextSpec
-                            // (always exactly one player, no internal
-                            // deferred half of its own) sidesteps
-                            // topButton()'s pair-branch overfill instead of
-                            // trying to out-time it.
-                            if (state.teamRed.length + state.teamBlue.length < 2 * teamSize) {
-                                safeMoveNextSpec(state.teamRed.length <= state.teamBlue.length ? Team.RED : Team.BLUE);
-                            }
-                        }, 200 + 5 * i);
-                    }
-                    state.insertingTimeout = setTimeout(() => {
-                        state.insertingPlayers = false;
-                    }, 300 + 5 * spectatorsToInsert);
-                    // Same reasoning as the chooseMode branch above: the
-                    // resulting shape depends on how many spectators were
-                    // actually available, so wait for the refill to settle
-                    // before reasserting — well before room.startGame()
-                    // fires at 2000ms below.
-                    setTimeout(() => {
-                        reassertStadium();
-                    }, 300 + 5 * spectatorsToInsert);
                     state.startTimeout = setTimeout(() => {
-                        ensureFullFieldBeforeStart();
-                        setTimeout(() => {
-                            room.startGame();
-                        }, 50);
+                        ensureFullFieldBeforeStart(() => {
+                            setTimeout(() => {
+                                room.startGame();
+                            }, 50);
+                        });
                     }, 2000);
                 } else if (state.players.length == 4) {
                     // resetButton() + 2x randomButton() below always
@@ -847,10 +933,11 @@ module.exports = function createTeamBalance({
                         state.insertingPlayers = false;
                     }, 2000);
                     state.startTimeout = setTimeout(() => {
-                        ensureFullFieldBeforeStart();
-                        setTimeout(() => {
-                            room.startGame();
-                        }, 50);
+                        ensureFullFieldBeforeStart(() => {
+                            setTimeout(() => {
+                                room.startGame();
+                            }, 50);
+                        });
                     }, 2000);
                 } else if (state.players.length == 6) {
                     // Same reasoning as the 4-player case above — resetButton()
@@ -876,10 +963,11 @@ module.exports = function createTeamBalance({
                         }, 500);
                     }, 500);
                     state.startTimeout = setTimeout(() => {
-                        ensureFullFieldBeforeStart();
-                        setTimeout(() => {
-                            room.startGame();
-                        }, 50);
+                        ensureFullFieldBeforeStart(() => {
+                            setTimeout(() => {
+                                room.startGame();
+                            }, 50);
+                        });
                     }, 2000);
                 }
             }
@@ -888,6 +976,7 @@ module.exports = function createTeamBalance({
 
     return {
         balanceTeams,
+        ensureFullFieldBeforeStart,
         handlePlayersJoin,
         handlePlayersLeave,
         handlePlayersTeamChange,

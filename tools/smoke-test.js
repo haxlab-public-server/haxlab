@@ -1635,15 +1635,160 @@ console.log('\n--- team/balance.js: ensureFullFieldBeforeStart pulls stranded pl
     balance.handlePlayersStop(null);
 
     (async () => {
-        // Well after the normal 200ms refill has settled into 2v1, but
-        // before the 2000ms room.startGame() timer — simulates the
-        // untraced mechanism that stranded a player.
+        // Well after the normal rebuild has settled into some 2v1 shape
+        // (identities now randomized by randomFillAll() rather than a fixed
+        // bench/swap — see its own comment), but before the 2000ms
+        // room.startGame() timer — simulates the untraced mechanism that
+        // stranded a player. Pull whoever landed on the majority team
+        // rather than a hardcoded id, since which player ends up where is
+        // no longer deterministic.
         await new Promise((resolve) => setTimeout(resolve, 500));
-        roomMock.setPlayerTeam(3, Team.SPECTATORS);
-        check('the stranding was applied: someone is spectating right before start', [state.teamRed.length, state.teamBlue.length, state.teamSpec.length], [2, 0, 1]);
+        // Strand a player off the MINORITY side specifically: pulling from
+        // the majority side would just settle into a balanced 1v1 (which
+        // the safety net correctly leaves alone, per the "genuinely-waiting
+        // spectator" rule below) — this needs a genuine imbalance (2v0) for
+        // the safety net to have anything to fix.
+        const minorityTeam = state.teamRed.length <= state.teamBlue.length ? state.teamRed : state.teamBlue;
+        roomMock.setPlayerTeam(minorityTeam[0].id, Team.SPECTATORS);
+        check('the stranding was applied: someone is spectating right before start', [state.teamRed.length + state.teamBlue.length, state.teamSpec.length], [2, 1]);
 
         await new Promise((resolve) => setTimeout(resolve, 1600));
-        check('by the time room.startGame() actually fires, nobody eligible is left spectating', [state.teamRed.length, state.teamBlue.length, state.teamSpec.length], [2, 1, 0]);
+        check('by the time room.startGame() actually fires, nobody eligible is left spectating', [state.teamRed.length + state.teamBlue.length, state.teamSpec.length], [3, 0]);
+    })();
+}
+
+console.log('\n--- team/balance.js: ensureFullFieldBeforeStart reasserts the stadium after its own pulls, not just before them ---');
+{
+    // Reported bug ("комната иногда застревает на карте classic"): a match
+    // ending on classic (2v2) with several genuinely-waiting spectators
+    // left could have its own safety-net pull (ensureFullFieldBeforeStart,
+    // right before room.startGame()) top the field all the way to 3v3 —
+    // computeSpectatorsToInsert() fills up to the full 2*teamSize cap, NOT
+    // the current stadium's own (smaller) cap, unlike the ordinary
+    // join/leave growth path. Nothing rechecked the stadium against that
+    // NEW, bigger shape afterward, so the match started 3v3 on classic
+    // instead of big. Root-caused via a scripted fuzzer replay (a genuine
+    // draw via endGame(Team.SPECTATORS) mishandled by a since-separately-
+    // reported branch, growing the room to a lopsided 2v0+4spec right
+    // before this safety net's 2000ms timer fired). Fixed by having
+    // ensureFullFieldBeforeStart() call reassertStadium() itself once its
+    // own pulls settle, and having every call site start the game only
+    // after that (via a callback) instead of on a fixed, race-prone delay.
+    const State = { PLAY: 0, PAUSE: 1, STOP: 2 };
+    const Team = { RED: 1, BLUE: 2, SPECTATORS: 0 };
+    const players = [
+        { id: 1, team: Team.RED }, { id: 2, team: Team.RED },
+        { id: 3, team: Team.SPECTATORS }, { id: 4, team: Team.SPECTATORS },
+        { id: 5, team: Team.SPECTATORS }, { id: 6, team: Team.SPECTATORS },
+    ];
+    const state = {
+        players, chooseMode: false, endGameVariable: true, lastWinner: Team.RED,
+        currentStadium: 'classic', gameState: State.STOP,
+    };
+    state.teamRed = players.filter((p) => p.team === Team.RED);
+    state.teamBlue = players.filter((p) => p.team === Team.BLUE);
+    state.teamSpec = players.filter((p) => p.team === Team.SPECTATORS);
+
+    const stadiumCalls = [];
+    const roomMock = {
+        getScores: () => ({ red: 0, blue: 0, scoreLimit: 3, time: 0, timeLimit: 3 }),
+        setScoreLimit: () => {}, setTimeLimit: () => {}, setCustomStadium: () => {}, setDefaultStadium: () => {},
+        stopGame: () => {}, startGame: () => {}, pauseGame: () => {},
+        setPlayerTeam: (id, team) => {
+            const player = state.players.find((p) => p.id === id);
+            if (!player) return;
+            player.team = team;
+            state.teamRed = state.players.filter((p) => p.team === Team.RED);
+            state.teamBlue = state.players.filter((p) => p.team === Team.BLUE);
+            state.teamSpec = state.players.filter((p) => p.team === Team.SPECTATORS);
+        },
+    };
+    const createButtonHelpers = require(path.join(CORE, 'team', 'buttons'));
+    const buttons = createButtonHelpers({ room: roomMock, state, Team, getRandomInt: () => 0 });
+    const balance = require(path.join(CORE, 'team', 'balance'))({
+        room: roomMock, state, Team, State, HaxNotification: { CHAT: 1 },
+        emptyPlayer: {}, infoColor: 5, scoreLimit: 3, teamSize: 4, timeLimit: 5,
+        activateChooseMode: () => {}, blueToSpecButton: buttons.blueToSpecButton, choosePlayer: () => {},
+        deactivateChooseMode: () => {}, endGame: () => {}, getRandomInt: () => 0,
+        getSpecList: () => {}, instantRestart: () => {}, randomButton: buttons.randomButton,
+        redToSpecButton: buttons.redToSpecButton, resetButton: buttons.resetButton, resumeGame: () => {},
+        stadiumCommand: (emptyPlayer, cmd) => { stadiumCalls.push(cmd); state.currentStadium = cmd.replace('!', ''); },
+        swapButton: buttons.swapButton, topButton: buttons.topButton,
+    });
+
+    (async () => {
+        await new Promise((resolve) => {
+            balance.ensureFullFieldBeforeStart(resolve);
+        });
+        check('the pull grew the match past classic\'s own cap', Math.max(state.teamRed.length, state.teamBlue.length), 3);
+        check('the stadium was reasserted to match the NEW shape, not left on classic', state.currentStadium, 'big');
+        check('nobody was left stranded in spectators', state.teamSpec.length, 0);
+    })();
+}
+
+console.log('\n--- team/balance.js: a 2v1 finish with zero spectators reshuffles WHO sits out, not the same loser every time ---');
+{
+    // Reported bug: "игра если закончилась 2x1, начнется 2x1... надо
+    // просто зарандомить" — a match ending 2v1 with genuinely zero
+    // spectators to draw from used to bench+refill from the SAME just-
+    // benched loser every time, always reconstructing the identical shape
+    // (winners kept together, same player left alone). The uneven split
+    // itself is unavoidable with an odd total, but WHO ends up as the odd
+    // one out shouldn't be tied to who just won/lost. Fixed via
+    // randomFillAll(). This runs many independent trials of the exact same
+    // starting 2v1 and checks the identity of whoever ends up alone
+    // actually varies — a fix that always produces the same 2v1 shape
+    // (just via a different code path) would still fail this.
+    const State = { PLAY: 0, PAUSE: 1, STOP: 2 };
+    const Team = { RED: 1, BLUE: 2, SPECTATORS: 0 };
+    const oddOnesOut = new Set();
+    let allTrialsStayed2v1 = true;
+    (async () => {
+    for (let trial = 0; trial < 30; trial++) {
+        const players = [
+            { id: 1, team: Team.RED }, { id: 2, team: Team.RED }, { id: 3, team: Team.BLUE },
+        ];
+        const state = {
+            players, chooseMode: false, endGameVariable: true, lastWinner: Team.RED,
+            currentStadium: 'classic', gameState: State.STOP,
+        };
+        state.teamRed = players.filter((p) => p.team === Team.RED);
+        state.teamBlue = players.filter((p) => p.team === Team.BLUE);
+        state.teamSpec = players.filter((p) => p.team === Team.SPECTATORS);
+        const roomMock = {
+            getScores: () => ({ red: 0, blue: 0, scoreLimit: 3, time: 0, timeLimit: 3 }),
+            setScoreLimit: () => {}, setTimeLimit: () => {}, setCustomStadium: () => {}, setDefaultStadium: () => {},
+            stopGame: () => {}, startGame: () => {}, pauseGame: () => {},
+            setPlayerTeam: (id, team) => {
+                const player = state.players.find((p) => p.id === id);
+                if (!player) return;
+                player.team = team;
+                state.teamRed = state.players.filter((p) => p.team === Team.RED);
+                state.teamBlue = state.players.filter((p) => p.team === Team.BLUE);
+                state.teamSpec = state.players.filter((p) => p.team === Team.SPECTATORS);
+            },
+        };
+        const createButtonHelpers = require(path.join(CORE, 'team', 'buttons'));
+        const buttons = createButtonHelpers({ room: roomMock, state, Team, getRandomInt: (max) => Math.floor(Math.random() * max) });
+        const balance = require(path.join(CORE, 'team', 'balance'))({
+            room: roomMock, state, Team, State, HaxNotification: { CHAT: 1 },
+            emptyPlayer: {}, infoColor: 5, scoreLimit: 3, teamSize: 4, timeLimit: 5,
+            activateChooseMode: () => {}, blueToSpecButton: buttons.blueToSpecButton, choosePlayer: () => {},
+            deactivateChooseMode: () => {}, endGame: () => {}, getRandomInt: (max) => Math.floor(Math.random() * max),
+            getSpecList: () => {}, instantRestart: () => {}, randomButton: buttons.randomButton,
+            redToSpecButton: buttons.redToSpecButton, resetButton: buttons.resetButton, resumeGame: () => {},
+            stadiumCommand: () => {}, swapButton: buttons.swapButton, topButton: buttons.topButton,
+        });
+        balance.handlePlayersStop(null);
+        // randomFillAll()'s staggered fills land within ~15ms; give it room.
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        const diff = Math.abs(state.teamRed.length - state.teamBlue.length);
+        if (state.players.length !== 3 || diff !== 1) allTrialsStayed2v1 = false;
+        const smallerTeam = state.teamRed.length <= state.teamBlue.length ? state.teamRed : state.teamBlue;
+        if (smallerTeam.length === 1) oddOnesOut.add(smallerTeam[0].id);
+    }
+    check('every trial stayed a genuine 2v1 (numeric balance kept, nobody vanished)', allTrialsStayed2v1, true);
+    check('across 30 trials, more than one player ended up as the odd one out (not deterministic)', oddOnesOut.size > 1, true);
     })();
 }
 
@@ -2202,6 +2347,87 @@ console.log('\n--- team/choosing.js: choosePlayer auto-fills a completely empty 
     choosing.choosePlayer();
     check('choosePlayer auto-fills the empty side with a spectator instead of doing nothing', state.teamBlue.length, 1);
     check('the auto-filled player actually came from the waiting spectators', roomCallsLocal.length > 0, true);
+}
+
+console.log('\n--- team/balance.js: a leave that shifts whose turn it is always re-arms a real captain prompt ---');
+{
+    // Reported live bug ("complete freeze", "blue never got a captain"): a
+    // leave can flip the teamRed<=teamBlue comparison (whose turn it is to
+    // pick) WITHOUT movement.js's checkCaptainLeave() setting capLeft —
+    // that only fires when the DEPARTING player was themselves the
+    // current-turn captain, not when an unrelated leave just changes which
+    // side is now smaller. handlePlayersLeave()'s final branch used to call
+    // getSpecList() (just an updated waiting-list, no prompt, no timer) in
+    // that case instead of choosePlayer() — leaving the room desynced:
+    // whoever was already prompted keeps an armed timer for a turn that
+    // isn't theirs anymore, while whoever's turn it actually becomes was
+    // never asked anything and has no timer either. Always calling
+    // choosePlayer() (a strict superset — it calls getSpecList() itself
+    // once it settles on a real captain) fixes this.
+    const Team = { RED: 1, BLUE: 2, SPECTATORS: 0 };
+    const State = { PLAY: 0, PAUSE: 1, STOP: 2 };
+    const players = [
+        { id: 1, team: Team.RED }, { id: 2, team: Team.RED }, { id: 3, team: Team.RED }, { id: 4, team: Team.RED },
+        { id: 5, team: Team.BLUE }, { id: 6, team: Team.BLUE }, { id: 7, team: Team.BLUE },
+        { id: 8, team: Team.SPECTATORS }, { id: 9, team: Team.SPECTATORS }, { id: 10, team: Team.SPECTATORS },
+    ];
+    const state = {
+        players, chooseMode: true, gameState: State.PLAY, streak: 1, capLeft: false,
+        redCaptainChoice: '', blueCaptainChoice: '', game: { scores: { timeLimit: 3 } },
+    };
+    state.teamRed = players.filter((p) => p.team === Team.RED);
+    state.teamBlue = players.filter((p) => p.team === Team.BLUE);
+    state.teamSpec = players.filter((p) => p.team === Team.SPECTATORS);
+
+    const sent = [];
+    const roomMock = {
+        getScores: () => ({ red: 0, blue: 0, scoreLimit: 3, time: 0, timeLimit: 3 }),
+        sendAnnouncement: (msg, id) => sent.push({ msg, id }),
+        kickPlayer: () => {},
+        setPlayerTeam: (id, team) => {
+            const player = players.find((p) => p.id === id);
+            if (!player) return;
+            player.team = team;
+            state.teamRed = players.filter((p) => p.team === Team.RED);
+            state.teamBlue = players.filter((p) => p.team === Team.BLUE);
+            state.teamSpec = players.filter((p) => p.team === Team.SPECTATORS);
+        },
+    };
+    const choosing = require(path.join(CORE, 'team', 'choosing'))({
+        room: roomMock, state, Team, HaxNotification: { CHAT: 1, MENTION: 2 },
+        announcementColor: 1, errorColor: 2, infoColor: 3, warningColor: 4,
+        chooseModeSlowMode: 10, chooseTime: 15, defaultSlowMode: 0, SMSet: new Set(),
+        getRandomInt: () => 0,
+    });
+    const balance = require(path.join(CORE, 'team', 'balance'))({
+        room: roomMock, state, Team, State, HaxNotification: { CHAT: 1 },
+        emptyPlayer: {}, infoColor: 5, scoreLimit: 3, teamSize: 4, timeLimit: 5,
+        activateChooseMode: choosing.activateChooseMode, blueToSpecButton: () => {},
+        choosePlayer: choosing.choosePlayer, deactivateChooseMode: choosing.deactivateChooseMode,
+        endGame: () => {}, getRandomInt: () => 0,
+        getSpecList: choosing.getSpecList, instantRestart: () => {}, randomButton: () => {},
+        redToSpecButton: () => {}, resetButton: () => {}, resumeGame: () => {},
+        stadiumCommand: () => {}, swapButton: () => {}, topButton: () => {},
+    });
+
+    // Establish the genuine initial prompt (blue was smaller: 3 < 4).
+    choosing.choosePlayer();
+    check('setup: blue is initially prompted', sent.some((s) => s.id === 5 && s.msg.includes('Для выбора')), true);
+    const timerBeforeLeave = state.timeOutCap;
+
+    // Red's captain (id 1) leaves — NOT the one currently being prompted,
+    // so checkCaptainLeave() would never have set capLeft here. Red drops
+    // to 3, tying blue at 3 -- whose turn it is just changed.
+    sent.length = 0;
+    const idx = players.findIndex((p) => p.id === 1);
+    players.splice(idx, 1);
+    state.teamRed = players.filter((p) => p.team === Team.RED);
+    state.teamBlue = players.filter((p) => p.team === Team.BLUE);
+    state.teamSpec = players.filter((p) => p.team === Team.SPECTATORS);
+    balance.handlePlayersLeave();
+
+    check('the NEW captain (now due to pick) gets a real prompt, not just a spectator list', sent.some((s) => s.id === 2 && s.msg.includes('Для выбора')), true);
+    check('a fresh timer was actually armed for them', state.timeOutCap !== timerBeforeLeave && state.timeOutCap != null, true);
 }
 
 console.log('\n--- commands/player.js: !afk never fires a no-op room.setPlayerTeam when already a spectator ---');
