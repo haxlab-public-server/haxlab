@@ -94,6 +94,12 @@ function createDatabaseApi(options = {}) {
         buyItem(auth, playerName, itemId, price) {
             return sqlite.buyItem(auth, playerName, itemId, price);
         },
+        getItemLevel(auth, itemId) {
+            return sqlite.getItemLevel(auth, itemId);
+        },
+        upgradeItem(auth, playerName, itemId, cost, expectedCurrentLevel) {
+            return sqlite.upgradeItem(auth, playerName, itemId, cost, expectedCurrentLevel);
+        },
         setEquipped(auth, slot, itemId) {
             return sqlite.setEquipped(auth, slot, itemId);
         },
@@ -144,6 +150,9 @@ function createDatabaseApi(options = {}) {
         },
         setClubColor(clubId, color) {
             return sqlite.setClubColor(clubId, color);
+        },
+        unlockClubColor(auth, clubId, cost) {
+            return sqlite.unlockClubColor(auth, clubId, cost);
         },
         setClubEmoji(clubId, emoji) {
             return sqlite.setClubEmoji(clubId, emoji);

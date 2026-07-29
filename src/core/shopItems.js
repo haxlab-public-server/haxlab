@@ -32,11 +32,26 @@
  *            side has no form of its own active. When set, applyTeamForms()
  *            falls back to `away` for exactly that case, the same way it
  *            already does when both sides land on the same form.
- *   radius — required for type: 'size'. Only ever applied for the few-second
- *            goal celebration window, never during actual play, precisely so
- *            this can't become a paid gameplay advantage — it's fine for
- *            these to be dramatic (small/huge) since it's purely a flex.
+ *   radius — required for type: 'size', UNLESS `upgradeable` is set (see
+ *            below). Only ever applied for the few-second goal celebration
+ *            window, never during actual play, precisely so this can't
+ *            become a paid gameplay advantage — it's fine for these to be
+ *            dramatic (small/huge) since it's purely a flex.
  *   avatar — required for type: 'goalAnimation'. A short string/emoji.
+ *
+ *   upgradeable — type: 'size' only. Marks a tiered item bought in place
+ *            (!shop <id> again upgrades it, rather than "already owned")
+ *            instead of a single flat purchase — see economy.js's
+ *            priceForLevel/radiusForLevel and db/sqlite.js's
+ *            getItemLevel/upgradeItem. Needs:
+ *              baseRadius — the untouched default disc radius (15).
+ *              direction  — +1 (bigger) or -1 (smaller) per level.
+ *              stepRadius — radius change per level.
+ *              maxLevel   — highest level sellable.
+ *              basePrice  — cost of level 1.
+ *              priceStep  — cost increase per level after that.
+ *            Level N's price is basePrice + priceStep*(N-1); its radius is
+ *            baseRadius + direction*stepRadius*N.
  */
 module.exports = [
     {
@@ -60,8 +75,16 @@ module.exports = [
         away: { colors: [0x4D4D4D, 0x383838, 0x242424], textColor: 0x8a2be2, angle: 60 },
     },
 
-    { id: 'small', type: 'size', name: 'Малыш', price: 200, radius: 8 },
-    { id: 'big', type: 'size', name: 'Здоровяк', price: 200, radius: 20 },
+    {
+        id: 'small', type: 'size', name: 'Малыш', upgradeable: true,
+        baseRadius: 15, direction: -1, stepRadius: 2, maxLevel: 5,
+        basePrice: 200, priceStep: 100,
+    },
+    {
+        id: 'big', type: 'size', name: 'Здоровяк', upgradeable: true,
+        baseRadius: 15, direction: 1, stepRadius: 2, maxLevel: 5,
+        basePrice: 200, priceStep: 100,
+    },
 
     { id: 'fire', type: 'goalAnimation', name: 'Огонь', price: 150, avatar: '🔥' },
     { id: 'star', type: 'goalAnimation', name: 'Звезда', price: 150, avatar: '⭐' },

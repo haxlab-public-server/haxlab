@@ -490,6 +490,24 @@ console.log('\n--- db + roomStats.js/player.js: player data actually round-trips
     check('buyItem refuses to sell the same item twice', db.buyItem('AUTH_NEWBIE', 'Newbie', 'fire', 50), false);
     check('a rejected duplicate purchase does not double-charge', db.getBalance('AUTH_NEWBIE'), 25);
 
+    // Upgradeable items (small/big, see shopItems.js) — level tracked on
+    // player_items.level, atomic the same way buyItem is.
+    db.addCoins('AUTH_NEWBIE', 'Newbie', 175);
+    check('getItemLevel is 0 for an item never bought', db.getItemLevel('AUTH_NEWBIE', 'bigtest'), 0);
+    check('upgradeItem rejects a stale expectedCurrentLevel', db.upgradeItem('AUTH_NEWBIE', 'Newbie', 'bigtest', 100, 1), false);
+    check('a rejected upgrade due to a stale level does not charge', db.getBalance('AUTH_NEWBIE'), 200);
+    check('upgradeItem succeeds from level 0 -> 1 within budget', db.upgradeItem('AUTH_NEWBIE', 'Newbie', 'bigtest', 100, 0), true);
+    check('the cost was deducted', db.getBalance('AUTH_NEWBIE'), 100);
+    check('getItemLevel now reports level 1', db.getItemLevel('AUTH_NEWBIE', 'bigtest'), 1);
+    check('upgradeItem also grants ownership', db.ownsItem('AUTH_NEWBIE', 'bigtest'), true);
+
+    check('upgradeItem fails without enough balance for the next level', db.upgradeItem('AUTH_NEWBIE', 'Newbie', 'bigtest', 200, 1), false);
+    check('a failed upgrade touches neither balance nor level', { balance: db.getBalance('AUTH_NEWBIE'), level: db.getItemLevel('AUTH_NEWBIE', 'bigtest') }, { balance: 100, level: 1 });
+
+    check('upgradeItem succeeds from level 1 -> 2 within budget', db.upgradeItem('AUTH_NEWBIE', 'Newbie', 'bigtest', 100, 1), true);
+    check('getItemLevel now reports level 2', db.getItemLevel('AUTH_NEWBIE', 'bigtest'), 2);
+    check('the balance reflects both upgrades', db.getBalance('AUTH_NEWBIE'), 0);
+
     check('getEquipped starts with all slots empty', db.getEquipped('AUTH_NEWBIE'), { form: null, goalAnimation: null, size: null, trophy: null });
     db.setEquipped('AUTH_NEWBIE', 'goalAnimation', 'fire');
     check('setEquipped fills only the targeted slot', db.getEquipped('AUTH_NEWBIE'), { form: null, goalAnimation: 'fire', size: null, trophy: null });
@@ -631,7 +649,37 @@ console.log('\n--- core/commands/club.js: create/invite/join/kick/leave/disband/
 
     sent.length = 0;
     await club.clubColorCommand(alice, '!clubcolor ff8800');
-    check('clubcolor accepts a valid hex value', /обновлен/.test(sent[0].msg), true);
+    check('clubcolor is gated behind !clubcolors buy until unlocked', /платная/.test(sent[0].msg), true);
+
+    sent.length = 0;
+    await club.clubColorsCommand(bob, '!clubcolors buy');
+    check('a non-member (bob was kicked earlier) cannot buy the color unlock', /не состоите/.test(sent[0].msg), true);
+
+    sent.length = 0;
+    await club.clubColorsCommand(alice, '!clubcolors buy');
+    check('clubcolors buy fails without enough coins', /Недостаточно монет/.test(sent[0].msg), true);
+    check('the cost mentioned is 10000', /10000/.test(sent[0].msg), true);
+    check('an unsuccessful unlock does not flip the flag', state.clubs[0].colorUnlocked, false);
+
+    db.addCoins('AUTH_OWNER', 'Alice', 10000);
+    sent.length = 0;
+    await club.clubColorsCommand(alice, '!clubcolors buy');
+    check('clubcolors buy succeeds once affordable', /разблокирован/.test(sent[0].msg), true);
+    check('the unlock is cached in state', state.clubs[0].colorUnlocked, true);
+    check('the unlock is persisted to the db', db.getClub(clubId).colorUnlocked, true);
+    check('the 10000 cost was deducted', db.getBalance('AUTH_OWNER'), 0);
+
+    sent.length = 0;
+    await club.clubColorsCommand(alice, '!clubcolors buy');
+    check('buying the unlock again is rejected (already unlocked)', /уже разблокирован/.test(sent[0].msg), true);
+
+    sent.length = 0;
+    await club.clubColorCommand(alice, '!clubcolor zz');
+    check('clubcolor still rejects a non-hex value once unlocked', /Использование/.test(sent[0].msg), true);
+
+    sent.length = 0;
+    await club.clubColorCommand(alice, '!clubcolor ff8800');
+    check('clubcolor accepts a valid hex value once unlocked', /обновлен/.test(sent[0].msg), true);
     check('the color is cached in state', state.clubs[0].color, 0xff8800);
     check('the color is persisted to the db', db.getClub(clubId).color, 0xff8800);
 
@@ -3898,7 +3946,11 @@ console.log('\n--- core/economy.js: coin awards, playtime ticker, shop/inventory
             home: { colors: [0xd60000], textColor: 0xffffff, angle: 0 },
             away: { colors: [0x4d4d4d], textColor: 0xd60000, angle: 0 },
         },
-        { id: 'small', type: 'size', name: 'Малыш', price: 50, radius: 12 },
+        {
+            id: 'small', type: 'size', name: 'Малыш', upgradeable: true,
+            baseRadius: 15, direction: -1, stepRadius: 2, maxLevel: 5,
+            basePrice: 200, priceStep: 100,
+        },
     ];
 
     // Minimal in-memory stand-in for the real db, shaped exactly like the
@@ -3908,6 +3960,7 @@ console.log('\n--- core/economy.js: coin awards, playtime ticker, shop/inventory
         const balances = new Map();
         const owned = new Map();
         const equipped = new Map();
+        const levels = new Map();
         return {
             addCoins: (auth, name, amount) => { balances.set(auth, (balances.get(auth) ?? 0) + amount); return Promise.resolve(); },
             getBalance: (auth) => Promise.resolve(balances.get(auth) ?? 0),
@@ -3918,6 +3971,20 @@ console.log('\n--- core/economy.js: coin awards, playtime ticker, shop/inventory
                 if (ownedSet.has(itemId)) return Promise.resolve(false);
                 if ((balances.get(auth) ?? 0) < price) return Promise.resolve(false);
                 balances.set(auth, (balances.get(auth) ?? 0) - price);
+                ownedSet.add(itemId);
+                owned.set(auth, ownedSet);
+                return Promise.resolve(true);
+            },
+            getItemLevel: (auth, itemId) => Promise.resolve(levels.get(auth)?.get(itemId) ?? 0),
+            upgradeItem: (auth, name, itemId, cost, expectedCurrentLevel) => {
+                const levelsForAuth = levels.get(auth) ?? new Map();
+                const current = levelsForAuth.get(itemId) ?? 0;
+                if (current !== expectedCurrentLevel) return Promise.resolve(false);
+                if ((balances.get(auth) ?? 0) < cost) return Promise.resolve(false);
+                balances.set(auth, (balances.get(auth) ?? 0) - cost);
+                levelsForAuth.set(itemId, expectedCurrentLevel + 1);
+                levels.set(auth, levelsForAuth);
+                const ownedSet = owned.get(auth) ?? new Set();
                 ownedSet.add(itemId);
                 owned.set(auth, ownedSet);
                 return Promise.resolve(true);
@@ -4126,8 +4193,9 @@ console.log('\n--- core/economy.js: coin awards, playtime ticker, shop/inventory
 
     // Equipping a 'size' item has NO immediate effect — it's a post-goal-only
     // celebration (see playGoalSizeEffect below), never a standing radius
-    // change, so equipping never touches the disc.
-    await db.buyItem('AUTH_BLUE1', 'Blue1', 'small', 0);
+    // change, so equipping never touches the disc. 'small' is upgradeable
+    // (see shopItems.js) — level 0 -> 1 via upgradeItem, same as !shop would.
+    await db.upgradeItem('AUTH_BLUE1', 'Blue1', 'small', 0, 0);
     roomCallsLocal.length = 0;
     sentLocal.length = 0;
     await economy.equipCommand({ id: 2, name: 'Blue1' }, '!equip small');
@@ -4241,16 +4309,56 @@ console.log('\n--- core/economy.js: coin awards, playtime ticker, shop/inventory
     await economy.playGoalAnimation({ id: 1, name: 'Red1' });
     check('playGoalAnimation is a no-op with nothing equipped', roomCallsLocal, []);
 
-    // playGoalSizeEffect: Blue1 has 'small' equipped (from the !equip test
-    // above) — briefly swaps the radius in, captured from the disc's own
-    // CURRENT properties (mocked at radius 15 here), not a hardcoded default.
+    // playGoalSizeEffect: Blue1 has 'small' equipped at level 1 (from the
+    // !equip test above) — briefly swaps the LEVEL-derived radius in
+    // (15 - 2*1 = 13), captured from the disc's own CURRENT properties
+    // (mocked at radius 15 here), not a hardcoded default.
     roomCallsLocal.length = 0;
     await economy.playGoalSizeEffect({ id: 2, name: 'Blue1' });
-    check('playGoalSizeEffect applies the equipped radius', roomCallsLocal, [`setPlayerDiscProperties:2:${JSON.stringify({ radius: 12 })}`]);
+    check('playGoalSizeEffect applies the level-1 radius', roomCallsLocal, [`setPlayerDiscProperties:2:${JSON.stringify({ radius: 13 })}`]);
 
     roomCallsLocal.length = 0;
     await economy.playGoalSizeEffect({ id: 1, name: 'Red1' });
     check('playGoalSizeEffect is a no-op with nothing equipped', roomCallsLocal, []);
+
+    // Upgradeable items (small/big, see shopItems.js): !shop <id> on an
+    // already-owned tiered item upgrades it in place instead of rejecting
+    // "already owned" — price rises 100/level, radius moves 2/level off 15.
+    authArray[8] = ['AUTH_UPGRADER'];
+    await db.addCoins('AUTH_UPGRADER', 'Upgrader', 1000);
+
+    sentLocal.length = 0;
+    await economy.shopCommand({ id: 8, name: 'Upgrader' }, '!shop small');
+    check('the first purchase of an upgradeable item goes from level 0 to 1', /улучшен до уровня 1\/5/.test(sentLocal[0].msg), true);
+    check('level 1 costs the base price (200)', await db.getBalance('AUTH_UPGRADER'), 800);
+
+    sentLocal.length = 0;
+    await economy.shopCommand({ id: 8, name: 'Upgrader' }, '!shop small');
+    check('buying it again upgrades to level 2, not "already owned"', /улучшен до уровня 2\/5/.test(sentLocal[0].msg), true);
+    check('level 2 costs 100 more than level 1 (300)', await db.getBalance('AUTH_UPGRADER'), 500);
+
+    await economy.shopCommand({ id: 8, name: 'Upgrader' }, '!shop small'); // level 3, -400 -> 100
+    sentLocal.length = 0;
+    await economy.shopCommand({ id: 8, name: 'Upgrader' }, '!shop small'); // level 4 needs 500, only has 100
+    check('an upgrade beyond the current balance is rejected like any purchase', /Недостаточно монет/.test(sentLocal[0].msg), true);
+    check('a rejected upgrade does not advance the level or charge anything', await db.getBalance('AUTH_UPGRADER'), 100);
+
+    await db.addCoins('AUTH_UPGRADER', 'Upgrader', 1000);
+    await economy.shopCommand({ id: 8, name: 'Upgrader' }, '!shop small'); // level 4
+    await economy.shopCommand({ id: 8, name: 'Upgrader' }, '!shop small'); // level 5 (max)
+    sentLocal.length = 0;
+    await economy.shopCommand({ id: 8, name: 'Upgrader' }, '!shop small');
+    check('buying past the max level is rejected', /максимального уровня/.test(sentLocal[0].msg), true);
+
+    sentLocal.length = 0;
+    await economy.shopCommand({ id: 8, name: 'Upgrader' }, '!shop');
+    check('!shop shows a maxed-out item as "максимум", not a price to pay', /small.*уровень 5\/5, максимум/.test(sentLocal[0].msg), true);
+
+    roomCallsLocal.length = 0;
+    await economy.equipCommand({ id: 8, name: 'Upgrader' }, '!equip small');
+    roomCallsLocal.length = 0;
+    await economy.playGoalSizeEffect({ id: 8, name: 'Upgrader' });
+    check('playGoalSizeEffect at max level (5) applies radius 5 (15 - 2*5)', roomCallsLocal, [`setPlayerDiscProperties:8:${JSON.stringify({ radius: 5 })}`]);
 
     // addCoinsCommand: a testing/support tool, not player-facing (role
     // gating to Role.MASTER happens at the dispatch layer in commands.js,

@@ -47,6 +47,7 @@ module.exports = function createCommands({
     clubAssistantCommand,
     clubDisbandCommand,
     clubColorCommand,
+    clubColorsCommand,
     clubEmojiCommand,
     clubSlotsCommand,
     clubInfoCommand,
@@ -173,7 +174,8 @@ module.exports = function createCommands({
         Без аргументов показывает магазин и ваш баланс монеток.
     Она принимает 1 аргумент (опционально):
     Аргумент 1: <id> id товара для покупки (посмотреть можно командой '!shop' без аргументов).
-    Пример: !shop fire купит товар с id "fire".`,
+    Пример: !shop fire купит товар с id "fire".
+    Товары "small" и "big" — улучшаемые (5 уровней, ±2 к радиусу шара за уровень от стандартных 15): повторный '!shop small'/'!shop big' повышает уровень вместо отказа "уже куплено", а цена растет на 100 монет за уровень.`,
         function: shopCommand,
     },
     inventory: {
@@ -501,6 +503,12 @@ module.exports = function createCommands({
         roles: Role.PLAYER,
         desc: `Смотрите "!clubhelp" для информации.`,
         function: clubColorCommand,
+    },
+    clubcolors: {
+        aliases: [],
+        roles: Role.PLAYER,
+        desc: `Смотрите "!clubhelp" для информации.`,
+        function: clubColorsCommand,
     },
     clubemoji: {
         aliases: [],

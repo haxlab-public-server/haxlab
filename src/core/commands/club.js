@@ -28,6 +28,7 @@ module.exports = function createClubCommands({
     const CLUB_SLOT_BASE_COST = 500;
     const CLUB_SLOT_COST_STEP = 100;
     const CLUB_INVITE_DURATION_SECONDS = 60;
+    const CLUB_COLOR_UNLOCK_COST = 10000;
 
     // The displayed prefix is capped at "1 emoji + 4 letters" — the emoji is
     // set separately (!clubemoji), so what !clubcreate takes here is just
@@ -347,10 +348,53 @@ module.exports = function createClubCommands({
             announceError(player, `Только владелец клуба может менять его цвет !`);
             return;
         }
+        if (!club.colorUnlocked) {
+            announceError(player, `Кастомный цвет клуба — платная возможность. Купите ее командой "!clubcolors buy" (${formatCoins(CLUB_COLOR_UNLOCK_COST)}).`);
+            return;
+        }
         const color = parseInt(hex, 16);
         await db.setClubColor(club.id, color);
         club.color = color;
         room.sendAnnouncement(`✔️ Цвет клуба "${club.name}" обновлен !`, player.id, successColor, 'bold', HaxNotification.CHAT);
+    }
+
+    // Unlocks !clubcolor for this club, permanently, once — not per-color-
+    // change. Paid by the owner from their own balance, same as !clubslots
+    // buy; club.colorUnlocked never gets reset back to false.
+    async function clubColorsCommand(player, message) {
+        const sub = message.split(/ +/)[1];
+        if ((sub ?? '').toLowerCase() !== 'buy') {
+            announceError(player, `Использование: !clubcolors buy — разблокировать кастомный цвет клуба. Введите "!clubhelp" для информации.`);
+            return;
+        }
+        const auth = getAuth(player);
+        const club = findClubByAuth(auth);
+        if (!club) {
+            announceError(player, `Вы не состоите в клубе !`);
+            return;
+        }
+        if (club.ownerAuth !== auth) {
+            announceError(player, `Только владелец клуба может покупать эту возможность !`);
+            return;
+        }
+        if (club.colorUnlocked) {
+            announceError(player, `Кастомный цвет уже разблокирован для вашего клуба !`);
+            return;
+        }
+        const unlocked = await db.unlockClubColor(auth, club.id, CLUB_COLOR_UNLOCK_COST);
+        if (!unlocked) {
+            const balance = await db.getBalance(auth);
+            announceError(player, `Недостаточно монет. Нужно ${formatCoins(CLUB_COLOR_UNLOCK_COST)}, у вас ${formatCoins(balance)}.`);
+            return;
+        }
+        club.colorUnlocked = true;
+        room.sendAnnouncement(
+            `✔️ Кастомный цвет разблокирован для клуба "${club.name}" ! Установите его командой "!clubcolor <hex>".`,
+            player.id,
+            successColor,
+            'bold',
+            HaxNotification.CHAT
+        );
     }
 
     // The prefix itself (!clubcreate) is letters-only — the emoji in front
@@ -455,7 +499,8 @@ module.exports = function createClubCommands({
             '!clubkick <#id|auth> — выгнать игрока из клуба (только владелец).',
             '!clubassistent <игрок> — назначить ассистента клуба, или без аргумента чтобы снять его (только владелец). У ассистента есть доступ только к приглашениям игроков.',
             '!clubdisband — расформировать клуб (только владелец).',
-            '!clubcolor <hex> — изменить цвет префикса клуба в чате (только владелец). Пример: !clubcolor ff8800.',
+            `!clubcolors buy — разблокировать кастомный цвет клуба (${formatCoins(CLUB_COLOR_UNLOCK_COST)}, только владелец, разовая покупка).`,
+            '!clubcolor <hex> — изменить цвет префикса клуба в чате (только владелец, требует "!clubcolors buy"). Пример: !clubcolor ff8800.',
             '!clubemoji <эмодзи> — добавить эмодзи к префиксу клуба, или без аргумента чтобы убрать его (только владелец). Пример: !clubemoji 🔥.',
             '!clubslots buy - купить слот (500 монеток, +100 за каждый следующий) (только владелец).',
         ].join('\n');
@@ -471,6 +516,7 @@ module.exports = function createClubCommands({
         clubAssistantCommand,
         clubDisbandCommand,
         clubColorCommand,
+        clubColorsCommand,
         clubEmojiCommand,
         clubSlotsCommand,
         clubInfoCommand,

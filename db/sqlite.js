@@ -116,6 +116,9 @@ function createSqliteDatabase(filePath = path.join(__dirname, 'haxlab.sqlite')) 
     // which one is currently equipped (player_stats.equipped_form/
     // equipped_goal_animation), so buying something doesn't have to also
     // wear it, and switching back to a previously-bought item never re-charges.
+    // level is only meaningful for the upgradeable 'small'/'big' size items
+    // (see shopItems.js's `upgradeable` items) — every other item is always
+    // level 1, bought once, done.
     const playerItemsStatement = database.prepare(`
         CREATE TABLE IF NOT EXISTS player_items (
             auth TEXT NOT NULL,
@@ -202,11 +205,13 @@ function createSqliteDatabase(filePath = path.join(__dirname, 'haxlab.sqlite')) 
         addColumnIfMissing('player_stats', 'equipped_size TEXT');
         addColumnIfMissing('player_stats', 'equipped_trophy TEXT');
         addColumnIfMissing('player_stats', 'hide_custom_colors INTEGER NOT NULL DEFAULT 0');
+        addColumnIfMissing('player_items', 'level INTEGER NOT NULL DEFAULT 1');
         clubsStatement.run();
         clubMembersStatement.run();
         clubInvitesStatement.run();
         addColumnIfMissing('clubs', 'emoji TEXT');
         addColumnIfMissing('clubs', 'assistant_auth TEXT');
+        addColumnIfMissing('clubs', 'color_unlocked INTEGER NOT NULL DEFAULT 0');
         return true;
     }
 
@@ -508,6 +513,38 @@ function createSqliteDatabase(filePath = path.join(__dirname, 'haxlab.sqlite')) 
         return true;
     }
 
+    // 0 if never bought at all (not just level 1) — lets the caller (see
+    // economy.js's shopCommand) treat "never owned" and "owned at level N"
+    // uniformly as just "current level, buy the next one".
+    function getItemLevel(auth, itemId) {
+        const row = database.prepare('SELECT level FROM player_items WHERE auth = ? AND item_id = ?').get(auth, itemId);
+        return row ? row.level : 0;
+    }
+
+    // Atomic like buyItem: re-reads the current level and re-checks the
+    // balance inside this same synchronous call. expectedCurrentLevel guards
+    // against a stale read winning a race (e.g. two rapid !shop calls) —
+    // if the level has already moved on, this fails rather than skipping or
+    // double-charging a tier. First purchase is level 0 -> 1, same call.
+    function upgradeItem(auth, playerName, itemId, cost, expectedCurrentLevel) {
+        if (getItemLevel(auth, itemId) !== expectedCurrentLevel) return false;
+        if (getBalance(auth) < cost) return false;
+        database
+            .prepare(
+                `INSERT INTO player_stats (auth, player_name, balance)
+                 VALUES (@auth, @playerName, -@cost)
+                 ON CONFLICT(auth) DO UPDATE SET balance = balance - @cost`
+            )
+            .run({ auth, playerName: playerName ?? '', cost });
+        database
+            .prepare(
+                `INSERT INTO player_items (auth, item_id, level) VALUES (@auth, @itemId, @level)
+                 ON CONFLICT(auth, item_id) DO UPDATE SET level = excluded.level`
+            )
+            .run({ auth, itemId, level: expectedCurrentLevel + 1 });
+        return true;
+    }
+
     // slot is 'form', 'goalAnimation' or 'size' (validated by the caller,
     // core/economy.js, which is also the only place that knows the shop
     // catalog and can check ownership before calling this) or 'trophy'
@@ -606,10 +643,13 @@ function createSqliteDatabase(filePath = path.join(__dirname, 'haxlab.sqlite')) 
 
     function rowToClub(row) {
         if (!row) return null;
-        return { id: row.id, name: row.name, prefix: row.prefix, emoji: row.emoji, ownerAuth: row.ownerAuth, assistantAuth: row.assistantAuth, color: row.color, slots: row.slots };
+        return {
+            id: row.id, name: row.name, prefix: row.prefix, emoji: row.emoji, ownerAuth: row.ownerAuth,
+            assistantAuth: row.assistantAuth, color: row.color, colorUnlocked: !!row.colorUnlocked, slots: row.slots,
+        };
     }
 
-    const CLUB_COLUMNS = 'id, name, prefix, emoji, owner_auth AS ownerAuth, assistant_auth AS assistantAuth, color, slots';
+    const CLUB_COLUMNS = 'id, name, prefix, emoji, owner_auth AS ownerAuth, assistant_auth AS assistantAuth, color, color_unlocked AS colorUnlocked, slots';
 
     function getClub(clubId) {
         return rowToClub(database.prepare(`SELECT ${CLUB_COLUMNS} FROM clubs WHERE id = ?`).get(clubId));
@@ -727,8 +767,30 @@ function createSqliteDatabase(filePath = path.join(__dirname, 'haxlab.sqlite')) 
         database.prepare('DELETE FROM clubs WHERE id = ?').run(clubId);
     }
 
+    // Gated behind !clubcolors buy (see commands/club.js) — setClubColor
+    // itself doesn't check colorUnlocked, that's the caller's job, same
+    // division of labor as ownership/role checks throughout club.js.
     function setClubColor(clubId, color) {
         database.prepare('UPDATE clubs SET color = ? WHERE id = ?').run(color, clubId);
+    }
+
+    // Atomic like buyClubSlot: checks the buyer's balance and deducts it in
+    // the same synchronous call that flips the flag, so a retry after a
+    // false return can never double-charge. Idempotent by design (setting
+    // color_unlocked = 1 again is harmless) — the caller is expected to
+    // check club.colorUnlocked first so this never actually gets called
+    // twice for the same club, but nothing breaks if it somehow did.
+    function unlockClubColor(auth, clubId, cost) {
+        if (getBalance(auth) < cost) return false;
+        database
+            .prepare(
+                `INSERT INTO player_stats (auth, player_name, balance)
+                 VALUES (@auth, '', -@cost)
+                 ON CONFLICT(auth) DO UPDATE SET balance = balance - @cost`
+            )
+            .run({ auth, cost });
+        database.prepare('UPDATE clubs SET color_unlocked = 1 WHERE id = ?').run(clubId);
+        return true;
     }
 
     function setClubEmoji(clubId, emoji) {
@@ -811,6 +873,8 @@ function createSqliteDatabase(filePath = path.join(__dirname, 'haxlab.sqlite')) 
         getOwnedItemIds,
         ownsItem,
         buyItem,
+        getItemLevel,
+        upgradeItem,
         setEquipped,
         getEquipped,
         getAllEquippedTrophies,
@@ -828,6 +892,7 @@ function createSqliteDatabase(filePath = path.join(__dirname, 'haxlab.sqlite')) 
         removeClubMember,
         disbandClub,
         setClubColor,
+        unlockClubColor,
         setClubEmoji,
         setClubAssistant,
         buyClubSlot,

@@ -15,6 +15,11 @@
  * changes the real physics collision radius, so making it a standing equip
  * would mean spending coins to change the game's balance. Confined to the
  * celebration window, it never affects ongoing play (see playGoalSizeEffect).
+ * 'small'/'big' are further upgradeable — 5 levels each, ±2 radius per
+ * level off the default 15, priced 100 more per level (see shopItems.js's
+ * `upgradeable` items and priceForLevel/radiusForLevel below) — !shop <id>
+ * on an already-owned tiered item upgrades it in place rather than
+ * rejecting "already owned".
  *
  * 'form' is NOT personal — it's a whole-SIDE decision, applied with a single
  * room.setTeamColors(team, angle, textColor, colors) call per side rather
@@ -52,6 +57,16 @@ module.exports = function createEconomy({
 
     const itemsById = new Map(items.map((item) => [item.id, item]));
     const CATEGORY_LABELS = { form: 'Формы', size: 'Размер шара после гола', goalAnimation: 'Аватарка после гола' };
+
+    // Level N's price/radius for an `upgradeable` size item (see
+    // shopItems.js) — level 1 is the first purchase (level 0 -> 1), up
+    // through item.maxLevel.
+    function priceForLevel(item, level) {
+        return item.basePrice + item.priceStep * (level - 1);
+    }
+    function radiusForLevel(item, level) {
+        return item.baseRadius + item.direction * item.stepRadius * level;
+    }
 
     function getAuth(player) {
         return authArray[player.id][0];
@@ -265,13 +280,20 @@ module.exports = function createEconomy({
     // via getPlayerDiscProperties) rather than some assumed map default, so
     // it's correct regardless of stadium or any other effect already in play.
     async function playGoalSizeEffect(player) {
-        const equipped = await db.getEquipped(getAuth(player));
+        const auth = getAuth(player);
+        const equipped = await db.getEquipped(auth);
         if (!equipped.size) return;
         const item = itemsById.get(equipped.size);
         if (!item) return;
         const original = room.getPlayerDiscProperties(player.id);
         if (!original) return;
-        room.setPlayerDiscProperties(player.id, { radius: item.radius });
+        // Upgradeable items (small/big) have no flat `.radius` — it depends
+        // on the level actually bought, so this needs its own DB read here
+        // rather than reusing whatever `equipped` already returned.
+        const radius = item.upgradeable
+            ? radiusForLevel(item, await db.getItemLevel(auth, item.id))
+            : item.radius;
+        room.setPlayerDiscProperties(player.id, { radius });
         setTimeout(() => {
             if (state.playersAll.some((p) => p.id === player.id)) {
                 room.setPlayerDiscProperties(player.id, { radius: original.radius });
@@ -281,14 +303,32 @@ module.exports = function createEconomy({
 
     /* COMMANDS */
 
-    function formatItemLine(item, owned, equippedId) {
+    // `level` is only meaningful (and only ever passed) for upgradeable
+    // items — everything else still just shows its flat price.
+    function formatItemLine(item, owned, equippedId, level) {
         const tag = !owned ? '' : item.id === equippedId ? ' [надето]' : ' [куплено]';
+        if (item.upgradeable) {
+            const currentLevel = level ?? 0;
+            const progress = `уровень ${currentLevel}/${item.maxLevel}`;
+            const nextStep = currentLevel >= item.maxLevel
+                ? 'максимум'
+                : `след.: ${formatCoins(priceForLevel(item, currentLevel + 1))}`;
+            return `${item.id} — ${item.name} (${progress}, ${nextStep})${tag}`;
+        }
         return `${item.id} — ${item.name} (${formatCoins(item.price)})${tag}`;
     }
 
-    function formatCatalogSection(type, owned, equipped) {
-        const lines = items.filter((i) => i.type === type).map((i) => formatItemLine(i, owned.includes(i.id), equipped[type]));
+    function formatCatalogSection(type, owned, equipped, levels) {
+        const lines = items.filter((i) => i.type === type).map((i) => formatItemLine(i, owned.includes(i.id), equipped[type], levels[i.id]));
         return `${CATEGORY_LABELS[type]}:\n${lines.join('\n')}`;
+    }
+
+    // Every upgradeable item's current level for this auth, keyed by id —
+    // 0 for one never bought at all, same as db.getItemLevel itself returns.
+    async function getUpgradeableLevels(auth, candidateItems) {
+        const upgradeableItems = candidateItems.filter((i) => i.upgradeable);
+        const entries = await Promise.all(upgradeableItems.map(async (i) => [i.id, await db.getItemLevel(auth, i.id)]));
+        return Object.fromEntries(entries);
     }
 
     async function shopCommand(player, message) {
@@ -297,9 +337,10 @@ module.exports = function createEconomy({
 
         if (msgArray.length === 0) {
             const [balance, owned, equipped] = await Promise.all([db.getBalance(auth), db.getOwnedItemIds(auth), db.getEquipped(auth)]);
-            const sections = ['form', 'size', 'goalAnimation'].map((type) => formatCatalogSection(type, owned, equipped)).join('\n');
+            const levels = await getUpgradeableLevels(auth, items);
+            const sections = ['form', 'size', 'goalAnimation'].map((type) => formatCatalogSection(type, owned, equipped, levels)).join('\n');
             room.sendAnnouncement(
-                `🛒 Магазин (баланс: ${formatCoins(balance)})\n${sections}\nКупить: !shop <id>. Надеть: !equip <id>.`,
+                `🛒 Магазин (баланс: ${formatCoins(balance)})\n${sections}\nКупить/улучшить: !shop <id>. Надеть: !equip <id>.`,
                 player.id,
                 announcementColor,
                 'bold',
@@ -313,6 +354,31 @@ module.exports = function createEconomy({
             room.sendAnnouncement(`Нет такого товара. Введите "!shop" для списка.`, player.id, errorColor, 'bold', HaxNotification.CHAT);
             return;
         }
+
+        if (item.upgradeable) {
+            const currentLevel = await db.getItemLevel(auth, item.id);
+            if (currentLevel >= item.maxLevel) {
+                room.sendAnnouncement(`"${item.name}" уже максимального уровня (${item.maxLevel}) !`, player.id, errorColor, 'bold', HaxNotification.CHAT);
+                return;
+            }
+            const nextLevel = currentLevel + 1;
+            const cost = priceForLevel(item, nextLevel);
+            const upgraded = await db.upgradeItem(auth, player.name, item.id, cost, currentLevel);
+            if (!upgraded) {
+                const balance = await db.getBalance(auth);
+                room.sendAnnouncement(`Недостаточно монет. Нужно ${formatCoins(cost)}, у вас ${formatCoins(balance)}.`, player.id, errorColor, 'bold', HaxNotification.CHAT);
+                return;
+            }
+            room.sendAnnouncement(
+                `✔️ "${item.name}" улучшен до уровня ${nextLevel}/${item.maxLevel} (радиус ${radiusForLevel(item, nextLevel)}) за ${formatCoins(cost)} !`,
+                player.id,
+                announcementColor,
+                'bold',
+                HaxNotification.CHAT
+            );
+            return;
+        }
+
         const bought = await db.buyItem(auth, player.name, item.id, item.price);
         if (!bought) {
             const [balance, alreadyOwned] = await Promise.all([db.getBalance(auth), db.ownsItem(auth, item.id)]);
@@ -343,10 +409,9 @@ module.exports = function createEconomy({
             return;
         }
         const equipped = await db.getEquipped(auth);
-        const lines = owned
-            .map((id) => itemsById.get(id))
-            .filter(Boolean)
-            .map((item) => formatItemLine(item, true, equipped[item.type]));
+        const ownedItems = owned.map((id) => itemsById.get(id)).filter(Boolean);
+        const levels = await getUpgradeableLevels(auth, ownedItems);
+        const lines = ownedItems.map((item) => formatItemLine(item, true, equipped[item.type], levels[item.id]));
         room.sendAnnouncement(`🎒 Ваши аксессуары:\n${lines.join('\n')}`, player.id, announcementColor, 'bold', HaxNotification.CHAT);
     }
 
