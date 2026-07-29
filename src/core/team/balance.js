@@ -795,35 +795,83 @@ module.exports = function createTeamBalance({
                     }
                     clearTimeout(state.insertingTimeout);
                     state.insertingPlayers = true;
-                    // Bug (reported live): the refill used to compute
-                    // computeSpectatorsToInsert() SYNCHRONOUSLY, immediately
-                    // after blueToSpecButton()/redToSpecButton() returns —
-                    // but room.setPlayerTeam() firing room.onPlayerTeamChange
+                    // Deferred a tick so the bench (and, on the swapped
+                    // path, the swap itself) has actually landed in
+                    // state.teamSpec before deciding what to do with it —
+                    // room.setPlayerTeam() firing room.onPlayerTeamChange
                     // synchronously isn't reliable for a TIGHT loop of
                     // back-to-back calls in real production (the exact same
                     // reasoning behind every other "index [0], staggered 5ms
                     // apart" pattern in this file — see e.g. topButton()'s
-                    // own comment). The just-benched losers weren't reliably
-                    // counted in state.teamSpec yet, undercounting how many
-                    // were actually available and stranding the rest:
-                    // reported live as 9 players (2v2 + 5 waiting) settling
-                    // on a 3v3 with 3 non-AFK spectators left over instead of
-                    // the 4v4 those numbers could have filled. Deferred a
-                    // tick so the bench (and, on the swapped path, the swap
-                    // itself) has actually landed before counting off it —
-                    // then pullSpectatorsToParity() handles the actual
-                    // refill (pull to parity, cross-move if genuinely
-                    // nobody's left — see its own comment). state.insertingPlayers
-                    // is cleared from ITS completion callback (not a
-                    // guessed fixed duration like the old inline version
-                    // used) — more precise, and required: leaving it stuck
-                    // true forever (a real regression introduced while
-                    // consolidating this branch) permanently stalled
-                    // safeBalanceTeams() for every subsequent join/leave,
-                    // confirmed via the fuzzer as a genuine rule-2
-                    // violation (a waiting spectator never getting pulled
-                    // in, no matter how long the room sat afterward).
+                    // own comment).
                     setTimeout(() => {
+                        const diff = Math.abs(state.teamRed.length - state.teamBlue.length);
+                        // Bug (reported live, regression from consolidating
+                        // this branch): a genuine full house (>=2*teamSize)
+                        // with a real SURPLUS of waiting spectators beyond
+                        // what's needed to fill the benched side — the
+                        // room's actual policy is that the benched side's
+                        // captain (the first non-AFK spectator, auto-placed
+                        // by choosePlayer()'s own empty-side guard) picks
+                        // their own teammates from that surplus, same as
+                        // choosing during ordinary mid-match growth
+                        // (balanceTeams()'s identical abs(diff)<specLen
+                        // check). This got silently folded into the plain
+                        // auto-refill below when the dead chooseMode branch
+                        // was deleted — restored here instead of calling
+                        // balanceTeams() itself, which would also invoke
+                        // resumeGame() (meant for resuming an interactive
+                        // pick session, not a fresh post-match round) and
+                        // race scheduleRestart()'s own timer below.
+                        if (state.players.length >= 2 * teamSize && diff < state.teamSpec.length) {
+                            state.insertingPlayers = false;
+                            // The bench itself (and, on the swapped path,
+                            // the swap) has already fully landed by this
+                            // point — that's the whole reason for this
+                            // 10ms defer. But blueToSpecButton()/
+                            // redToSpecButton()/swapButton() each also set
+                            // state.removingPlayers = true, clearing it
+                            // only via their OWN fixed 100ms timeout — far
+                            // longer than this 10ms defer. Left alone,
+                            // choosePlayer()'s empty-side auto-place below
+                            // triggers room.setPlayerTeam(), which cascades
+                            // into handlePlayersTeamChange() — but that
+                            // function's own guard
+                            // (`!state.removingPlayers`) would still see the
+                            // stale flag and silently skip re-prompting the
+                            // newly auto-placed captain (confirmed live: the
+                            // captain got seated but never actually asked to
+                            // pick). Since the bench is genuinely done, the
+                            // flag no longer serves its purpose here — clear
+                            // it explicitly instead of waiting out its timer.
+                            clearTimeout(state.removingTimeout);
+                            state.removingPlayers = false;
+                            activateChooseMode();
+                            choosePlayer();
+                            return;
+                        }
+                        // Bug (reported live): computeSpectatorsToInsert()
+                        // (inside pullSpectatorsToParity) used to be
+                        // computed SYNCHRONOUSLY right after
+                        // blueToSpecButton()/redToSpecButton() returns —
+                        // the just-benched losers weren't reliably counted
+                        // in state.teamSpec yet, undercounting how many
+                        // were actually available and stranding the rest:
+                        // reported live as 9 players (2v2 + 5 waiting)
+                        // settling on a 3v3 with 3 non-AFK spectators left
+                        // over instead of the 4v4 those numbers could have
+                        // filled. Fixed by the outer 10ms defer above.
+                        // state.insertingPlayers is cleared from
+                        // pullSpectatorsToParity's own completion callback
+                        // (not a guessed fixed duration like the old inline
+                        // version used) — more precise, and required:
+                        // leaving it stuck true forever (a real regression
+                        // introduced while consolidating this branch)
+                        // permanently stalled safeBalanceTeams() for every
+                        // subsequent join/leave, confirmed via the fuzzer
+                        // as a genuine rule-2 violation (a waiting spectator
+                        // never getting pulled in, no matter how long the
+                        // room sat afterward).
                         pullSpectatorsToParity(() => {
                             state.insertingPlayers = false;
                             reassertStadium();

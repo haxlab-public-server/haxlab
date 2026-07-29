@@ -2041,25 +2041,29 @@ console.log('\n--- team/balance.js: ensureFullFieldBeforeStart never force-start
     })();
 }
 
-console.log('\n--- team/balance.js: computeSpectatorsToInsert() counts the just-benched loser even when their setPlayerTeam lands a few ms late ---');
+console.log('\n--- team/balance.js: the surplus/no-surplus decision counts the just-benched loser even when their setPlayerTeam lands a few ms late ---');
 {
     // Reported live: 9 players at match end (2v2 + 5 waiting) settled on a
-    // 3v3 with 3 non-AFK spectators left over, instead of the 4v4 those
-    // numbers could fill. Root cause: computeSpectatorsToInsert() used to
-    // be called SYNCHRONOUSLY right after blueToSpecButton()'s own tight
-    // loop of room.setPlayerTeam() calls — but real headless HaxBall (via
+    // 3v3 with 3 non-AFK spectators left over, instead of correctly
+    // detecting the genuine surplus and handing off to real captain-picking
+    // (the room's actual policy at 8+/9+ players — see the other picking
+    // regression tests in this file). Root cause: the surplus/no-surplus
+    // decision (diff < teamSpec.length) used to be evaluated SYNCHRONOUSLY
+    // right after blueToSpecButton()'s own tight loop of
+    // room.setPlayerTeam() calls — but real headless HaxBall (via
     // Puppeteer) doesn't reliably deliver room.onPlayerTeamChange
     // synchronously for back-to-back calls (the same reasoning behind
     // every other "index [0], staggered 5ms apart" pattern in this file).
     // The just-benched losers weren't reliably counted yet, undercounting
-    // how many were actually available. Fixed by deferring the count (and
-    // the refill it schedules) by a tick. This mock specifically delays
-    // ONLY the bench's own two moves landing by a few ms (simulating that
-    // real lag) while everything else stays synchronous, to isolate
-    // exactly the diagnosed gap. Kept well under the fix's own defer, not
-    // right at the boundary — this whole test file runs dozens of blocks
-    // sharing one event loop (a concurrency load no single real room ever
-    // sees), so a tight margin here flakes on load unrelated to the fix.
+    // teamSpec.length and silently missing the surplus. Fixed by deferring
+    // the decision (and the picking or pull it triggers) by a tick. This
+    // mock specifically delays ONLY the bench's own two moves landing by a
+    // few ms (simulating that real lag) while everything else stays
+    // synchronous, to isolate exactly the diagnosed gap. Kept well under
+    // the fix's own defer, not right at the boundary — this whole test
+    // file runs dozens of blocks sharing one event loop (a concurrency load
+    // no single real room ever sees), so a tight margin here flakes on load
+    // unrelated to the fix.
     const State = { PLAY: 0, PAUSE: 1, STOP: 2 };
     const Team = { RED: 1, BLUE: 2, SPECTATORS: 0 };
     const players = [
@@ -2071,6 +2075,7 @@ console.log('\n--- team/balance.js: computeSpectatorsToInsert() counts the just-
     const state = {
         players, chooseMode: false, endGameVariable: true, lastWinner: Team.RED,
         currentStadium: 'big', gameState: State.STOP,
+        redCaptainChoice: '', blueCaptainChoice: '', capLeft: false,
     };
     state.teamRed = players.filter((p) => p.team === Team.RED);
     state.teamBlue = players.filter((p) => p.team === Team.BLUE);
@@ -2085,54 +2090,67 @@ console.log('\n--- team/balance.js: computeSpectatorsToInsert() counts the just-
         state.teamBlue = players.filter((p) => p.team === Team.BLUE);
         state.teamSpec = players.filter((p) => p.team === Team.SPECTATORS);
     };
+    const sent = [];
     const roomMock = {
         getScores: () => ({ red: 0, blue: 0, scoreLimit: 3, time: 0, timeLimit: 300 }),
         setScoreLimit: () => {}, setTimeLimit: () => {}, setCustomStadium: () => {}, setDefaultStadium: () => {},
-        stopGame: () => {}, startGame: () => {}, pauseGame: () => {},
-        kickPlayer: () => {}, sendAnnouncement: () => {},
+        stopGame: () => {}, startGame: () => {}, pauseGame: () => {}, kickPlayer: () => {},
+        sendAnnouncement: (msg, id) => sent.push({ msg, id }),
         setPlayerTeam: (id, team) => {
             if (benchTargets.has(id) && team === Team.SPECTATORS) {
                 benchTargets.delete(id);
-                setTimeout(() => applyMove(id, team), 2);
+                setTimeout(() => { applyMove(id, team); balanceRef.handlePlayersTeamChange(null); }, 2);
             } else {
                 applyMove(id, team);
+                balanceRef.handlePlayersTeamChange(null);
             }
         },
     };
+    let balanceRef;
     const createButtonHelpers = require(path.join(CORE, 'team', 'buttons'));
     const buttons = createButtonHelpers({ room: roomMock, state, Team, getRandomInt: () => 0 });
+    const createChoosingHelpers = require(path.join(CORE, 'team', 'choosing'));
+    const choosing = createChoosingHelpers({
+        room: roomMock, state, Team, HaxNotification: { CHAT: 1, MENTION: 2 },
+        announcementColor: 1, errorColor: 2, infoColor: 3, warningColor: 4,
+        chooseModeSlowMode: 1, chooseTime: 20, defaultSlowMode: 0.5, SMSet: new Set(), getRandomInt: () => 0,
+    });
     const balance = require(path.join(CORE, 'team', 'balance'))({
         room: roomMock, state, Team, State, HaxNotification: { CHAT: 1 },
         emptyPlayer: {}, infoColor: 5, scoreLimit: 3, teamSize: 4, timeLimit: 5,
-        activateChooseMode: () => {}, blueToSpecButton: buttons.blueToSpecButton, choosePlayer: () => {},
-        deactivateChooseMode: () => {}, endGame: () => {}, getRandomInt: () => 0,
-        getSpecList: () => {}, instantRestart: () => {}, randomButton: buttons.randomButton,
+        activateChooseMode: choosing.activateChooseMode, blueToSpecButton: buttons.blueToSpecButton,
+        choosePlayer: choosing.choosePlayer, deactivateChooseMode: choosing.deactivateChooseMode,
+        endGame: () => {}, getRandomInt: () => 0,
+        getSpecList: choosing.getSpecList, instantRestart: () => {}, randomButton: buttons.randomButton,
         redToSpecButton: buttons.redToSpecButton, resetButton: buttons.resetButton, resumeGame: () => {},
         stadiumCommand: () => {}, swapButton: buttons.swapButton, topButton: buttons.topButton,
     });
+    balanceRef = balance;
 
     balance.handlePlayersStop(null);
     (async () => {
         await new Promise((resolve) => setTimeout(resolve, 600));
-        check('reaches a clean 4v4 with only the genuine 1-player leftover, not stuck at 3v3', [state.teamRed.length, state.teamBlue.length, state.teamSpec.length], [4, 4, 1]);
+        check('RED (the winner) stayed intact despite the laggy bench landing', state.teamRed.map((p) => p.id).sort(), [1, 2]);
+        check('the genuine surplus is still correctly detected despite the lag: chooseMode activates', state.chooseMode, true);
+        check('a captain was auto-placed onto blue, not stuck at 2v0 from an undercounted decision', state.teamBlue.length, 1);
+        const captainId = state.teamBlue[0] && state.teamBlue[0].id;
+        check('that captain received a real "pick a player" prompt', sent.some((s) => s.msg.includes('Для выбора игрока') && s.id === captainId), true);
     })();
 }
 
-console.log('\n--- team/balance.js: an exact 4v4 finish (with genuine waiting spectators) benches the loser via WinStay and correctly switches to big, with chooseMode never touched ---');
+console.log('\n--- team/balance.js: a full house finish WITH a genuine spectator surplus activates real interactive picking, not silent auto-refill ---');
 {
-    // Companion to the shared-block check above (which only verifies
-    // activateChooseMode is never called, since that block stubs out the
-    // actual bench/refill functions) — this uses the REAL button
-    // implementations to confirm the full outcome: endGame() no longer
-    // defensively activates choose mode for a full-or-bigger house (see
-    // its own comment in entry.js), so handlePlayersStop's non-chooseMode
-    // path now handles exactly 8 (with genuine spectators already waiting
-    // — the realistic "9+" shape) via the same WinStay bench+refill logic
-    // already used for every other total: RED (the winner) stays intact,
-    // BLUE gets benched and refilled from the waiting spectators (not
-    // randomFillAll()'s from-scratch reshuffle, which only kicks in when
-    // teamSpec is genuinely empty), and the stadium still correctly
-    // asserts to 'big'.
+    // Reported live: the room's actual policy for a full-or-bigger house
+    // (>=2*teamSize) ending with MORE waiting spectators than needed to
+    // fill the benched side is that the benched side's captain (the first
+    // non-AFK spectator, auto-placed by choosePlayer()'s own empty-side
+    // guard) picks their own teammates from that surplus — same as
+    // choosing during ordinary mid-match growth. This briefly regressed
+    // to a silent auto-refill (no picking at all) when the dead
+    // chooseMode branch was deleted earlier this session and its
+    // "genuine surplus" case wasn't carried over into the replacement.
+    // RED (the winner) still stays intact via WinStay; only BLUE's
+    // refill goes through picking instead of an automatic pull.
     const State = { PLAY: 0, PAUSE: 1, STOP: 2 };
     const Team = { RED: 1, BLUE: 2, SPECTATORS: 0 };
     const players = [
@@ -2143,17 +2161,18 @@ console.log('\n--- team/balance.js: an exact 4v4 finish (with genuine waiting sp
     const state = {
         players, chooseMode: false, endGameVariable: true, lastWinner: Team.RED,
         currentStadium: 'classic', gameState: State.STOP,
+        redCaptainChoice: '', blueCaptainChoice: '', capLeft: false,
     };
     state.teamRed = players.filter((p) => p.team === Team.RED);
     state.teamBlue = players.filter((p) => p.team === Team.BLUE);
     state.teamSpec = players.filter((p) => p.team === Team.SPECTATORS);
 
-    const stadiumCalls = [];
-    const activateChooseModeCalls = [];
+    const sent = [];
     const roomMock = {
         getScores: () => ({ red: 0, blue: 0, scoreLimit: 3, time: 0, timeLimit: 3 }),
         setScoreLimit: () => {}, setTimeLimit: () => {}, setCustomStadium: () => {}, setDefaultStadium: () => {},
-        stopGame: () => {}, startGame: () => {}, pauseGame: () => {},
+        stopGame: () => {}, startGame: () => {}, pauseGame: () => {}, kickPlayer: () => {},
+        sendAnnouncement: (msg, id) => sent.push({ msg, id }),
         setPlayerTeam: (id, team) => {
             const player = state.players.find((p) => p.id === id);
             if (!player) return;
@@ -2161,28 +2180,43 @@ console.log('\n--- team/balance.js: an exact 4v4 finish (with genuine waiting sp
             state.teamRed = state.players.filter((p) => p.team === Team.RED);
             state.teamBlue = state.players.filter((p) => p.team === Team.BLUE);
             state.teamSpec = state.players.filter((p) => p.team === Team.SPECTATORS);
+            // Real room.setPlayerTeam fires room.onPlayerTeamChange
+            // synchronously -> handlePlayersTeamChange, which is what
+            // actually re-prompts the next captain after choosePlayer()'s
+            // own empty-side guard silently auto-places the first one.
+            balanceRef.handlePlayersTeamChange(null);
         },
     };
+    let balanceRef;
     const createButtonHelpers = require(path.join(CORE, 'team', 'buttons'));
     const buttons = createButtonHelpers({ room: roomMock, state, Team, getRandomInt: () => 0 });
+    const createChoosingHelpers = require(path.join(CORE, 'team', 'choosing'));
+    const choosing = createChoosingHelpers({
+        room: roomMock, state, Team, HaxNotification: { CHAT: 1, MENTION: 2 },
+        announcementColor: 1, errorColor: 2, infoColor: 3, warningColor: 4,
+        chooseModeSlowMode: 1, chooseTime: 20, defaultSlowMode: 0.5, SMSet: new Set(), getRandomInt: () => 0,
+    });
     const balance = require(path.join(CORE, 'team', 'balance'))({
         room: roomMock, state, Team, State, HaxNotification: { CHAT: 1 },
         emptyPlayer: {}, infoColor: 5, scoreLimit: 3, teamSize: 4, timeLimit: 5,
-        activateChooseMode: () => activateChooseModeCalls.push(1), blueToSpecButton: buttons.blueToSpecButton, choosePlayer: () => {},
-        deactivateChooseMode: () => {}, endGame: () => {}, getRandomInt: () => 0,
-        getSpecList: () => {}, instantRestart: () => {}, randomButton: buttons.randomButton,
+        activateChooseMode: choosing.activateChooseMode, blueToSpecButton: buttons.blueToSpecButton,
+        choosePlayer: choosing.choosePlayer, deactivateChooseMode: choosing.deactivateChooseMode,
+        endGame: () => {}, getRandomInt: () => 0,
+        getSpecList: choosing.getSpecList, instantRestart: () => {}, randomButton: buttons.randomButton,
         redToSpecButton: buttons.redToSpecButton, resetButton: buttons.resetButton, resumeGame: () => {},
-        stadiumCommand: (emptyPlayer, cmd) => { stadiumCalls.push(cmd); state.currentStadium = cmd.replace('!', ''); },
-        swapButton: buttons.swapButton, topButton: buttons.topButton,
+        stadiumCommand: () => {}, swapButton: buttons.swapButton, topButton: buttons.topButton,
     });
+    balanceRef = balance;
 
     balance.handlePlayersStop(null);
     (async () => {
-        await new Promise((resolve) => setTimeout(resolve, 400));
+        await new Promise((resolve) => setTimeout(resolve, 100));
         check('RED (the winner) stayed intact', state.teamRed.map((p) => p.id).sort(), [1, 2, 3, 4]);
-        check('BLUE got fully refilled back to 4', state.teamBlue.length, 4);
-        check('chooseMode was never activated for this', activateChooseModeCalls.length, 0);
-        check('the stadium correctly asserts to big for a 4v4', stadiumCalls.includes('!big'), true);
+        check('chooseMode activates for the genuine surplus instead of silently auto-refilling', state.chooseMode, true);
+        check('the first eligible spectator was auto-placed onto blue as its captain', state.teamBlue.length, 1);
+        const captainId = state.teamBlue[0] && state.teamBlue[0].id;
+        check('that captain then received a real "pick a player" prompt', sent.some((s) => s.msg.includes('Для выбора игрока') && s.id === captainId), true);
+        check('blue is NOT yet full — the captain still has to actually pick', state.teamBlue.length, 1);
     })();
 }
 
@@ -2312,27 +2346,17 @@ console.log('\n--- team/balance.js: a 1v1 finish with one genuinely-waiting spec
     }
 }
 
-console.log('\n--- team/balance.js: handlePlayersStop with MORE than a full house rebuilds cleanly, not 4v5 ---');
+console.log('\n--- team/balance.js: handlePlayersStop with MORE than a full house activates real picking, not a silent 4v5 refill ---');
 {
     // Reported live, only reachable with players.length > 2*teamSize (a
-    // full house PLUS extra waiting spectators): the refill used to count
-    // spectatorsToInsert as players to insert, one per scheduled call, but
-    // topButton() could insert 2 at once (its own pair branch, once
-    // red==blue mid-loop) — confirmed in practice this overfilled past
-    // 2*teamSize (4v5 instead of 4v4). Fixed by filling directly with
-    // safeMoveNextSpec (always exactly one player) instead of topButton()
-    // — now shared via pullSpectatorsToParity(), which every refill path
-    // in this file goes through.
-    //
-    // This used to also cover a second bug: reaching this branch with
-    // state.chooseMode still true (from endGame()'s own defensive
-    // activateChooseMode() — since removed, see its own comment) used to
-    // hit an entirely separate, near-identical copy of this branch that
-    // forgot to deactivate choose mode, letting a second, uncoordinated
-    // process react to every setPlayerTeam() call mid-rebuild. That whole
-    // copy — and the scenario that reached it — no longer exists:
-    // activateChooseMode() is never called defensively anymore, so
-    // chooseMode is always false by the time a match naturally ends.
+    // full house PLUS extra waiting spectators): a genuine surplus here
+    // follows the same room policy as an exact full house — the benched
+    // side's captain (the first non-AFK spectator, auto-placed by
+    // choosePlayer()'s own empty-side guard) picks their own teammates,
+    // rather than everything silently auto-refilling to 4v4 (which could
+    // also overfill past 2*teamSize — 4v5 instead of 4v4 — before this
+    // policy was restored, since a naive pull doesn't know to stop and
+    // hand off to picking once a real surplus is detected).
     const State = { PLAY: 0, PAUSE: 1, STOP: 2 };
     const Team = { RED: 1, BLUE: 2, SPECTATORS: 0 };
     // An uneven 4v3 was playing (the room's "keep playing uneven" policy),
@@ -2352,12 +2376,13 @@ console.log('\n--- team/balance.js: handlePlayersStop with MORE than a full hous
     state.teamBlue = players.filter((p) => p.team === Team.BLUE);
     state.teamSpec = players.filter((p) => p.team === Team.SPECTATORS);
 
-    const bogusPrompts = [];
+    const sent = [];
+    let kicked = false;
     const roomMock = {
         getScores: () => ({ red: 0, blue: 0, scoreLimit: 3, time: 0, timeLimit: 3 }),
         setScoreLimit: () => {}, setTimeLimit: () => {}, pauseGame: () => {}, startGame: () => {},
-        sendAnnouncement: (msg) => { if (msg.includes('Для выбора игрока')) bogusPrompts.push(msg); },
-        kickPlayer: () => bogusPrompts.push('KICK'),
+        sendAnnouncement: (msg, id) => sent.push({ msg, id }),
+        kickPlayer: () => { kicked = true; },
         setPlayerTeam: (id, team) => {
             const player = state.players.find((p) => p.id === id);
             if (!player) return;
@@ -2392,9 +2417,12 @@ console.log('\n--- team/balance.js: handlePlayersStop with MORE than a full hous
 
     (async () => {
         await new Promise((resolve) => setTimeout(resolve, 500));
-        check('more than a full house rebuilds to exactly 4v4, not 4v5', [state.teamRed.length, state.teamBlue.length], [4, 4]);
-        check('no bogus "pick a player" prompt or kick fires during the automatic rebuild', bogusPrompts, []);
-        check('chooseMode is off once the automatic rebuild settles', state.chooseMode, false);
+        check('the winners (BLUE, 5/6/7) stay together, now on the red side via WinStay', state.teamRed.map((p) => p.id).sort(), [5, 6, 7]);
+        check('chooseMode activates for the genuine surplus instead of silently auto-refilling to 4v5', state.chooseMode, true);
+        check('the first eligible spectator was auto-placed as blue\'s captain, not left unfilled', state.teamBlue.length, 1);
+        const captainId = state.teamBlue[0] && state.teamBlue[0].id;
+        check('that captain received a real "pick a player" prompt', sent.some((s) => s.msg.includes('Для выбора игрока') && s.id === captainId), true);
+        check('nobody got kicked during the handoff to picking', kicked, false);
     })();
 }
 
@@ -2655,20 +2683,84 @@ console.log('\n--- team/balance.js: handlePlayersStop at 5 players ends up with 
         check('5 players (3v2, still in choose mode — shrunk from a full house): nobody stays stuck in spectators', state3.teamSpec.length, 0);
         check('5 players (3v2, still in choose mode): all 5 are still accounted for', state3.teamRed.length + state3.teamBlue.length, 5);
 
-        // Bug: a full 4v4 (teamSize=4) plus MORE waiting spectators than
-        // room for (3 extra, 11 total) — endGame() activates choose mode
-        // defensively any time players >= 2*teamSize, so this is a mainline
-        // path, not an edge case. spectatorsToInsert used to equal
-        // state.teamSpec.length outright (7, after benching the losing
-        // side) instead of capping at how many actually fit up to teamSize
-        // per side (4) — draining every one of them regardless kept calling
-        // topButton() after both sides already reached teamSize, growing
-        // the match to 5v5 and beyond instead of stopping at a clean 4v4
-        // with the genuine extras left waiting.
-        const state4 = runScenario(4, 4, Team.RED, true, 3);
-        await wait(350);
-        check('11 players (4v4 full + 3 extra spectators): stops at a clean 4v4, does not overgrow', [state4.teamRed.length, state4.teamBlue.length], [4, 4]);
-        check('11 players (4v4 full + 3 extra spectators): the genuine extras are left waiting, not forced in', state4.teamSpec.length, 3);
+    })();
+}
+
+console.log('\n--- team/balance.js: 11 players (4v4 full + 3 extra spectators) activates real picking, does not silently overgrow past 4v4 ---');
+{
+    // A full 4v4 (teamSize=4) plus MORE waiting spectators than room for (3
+    // extra, 11 total): a genuine surplus this large used to (before
+    // choosePlayer()/activateChooseMode() were stubbed no-ops in this
+    // file's other 5-player scenarios above) risk spectatorsToInsert
+    // draining every waiting spectator regardless of parity, growing the
+    // match to 5v5 and beyond instead of stopping at a clean 4v4. Under the
+    // restored room policy this is moot either way: any genuine surplus at
+    // a full house hands off to real captain-picking rather than any kind
+    // of automatic pull, so this needs the real choosing helpers (not
+    // stubs) wired the same way as the other picking regression tests
+    // above, to actually verify a captain gets seated and prompted instead
+    // of the room silently overgrowing OR silently sitting stuck at 4v0.
+    const Team = { RED: 1, BLUE: 2, SPECTATORS: 0 };
+    const State = { PLAY: 0, PAUSE: 1, STOP: 2 };
+    const players = [];
+    let pid = 1;
+    for (let i = 0; i < 4; i++) players.push({ id: pid++, team: Team.RED });
+    for (let i = 0; i < 4; i++) players.push({ id: pid++, team: Team.BLUE });
+    for (let i = 0; i < 3; i++) players.push({ id: pid++, team: Team.SPECTATORS });
+    const state = {
+        players, chooseMode: false, endGameVariable: true, lastWinner: Team.RED,
+        currentStadium: 'big', gameState: State.STOP,
+        redCaptainChoice: '', blueCaptainChoice: '', capLeft: false,
+    };
+    state.teamRed = players.filter((p) => p.team === Team.RED);
+    state.teamBlue = players.filter((p) => p.team === Team.BLUE);
+    state.teamSpec = players.filter((p) => p.team === Team.SPECTATORS);
+
+    const sent = [];
+    const roomMock = {
+        getScores: () => ({ red: 0, blue: 0, scoreLimit: 3, time: 0, timeLimit: 3 }),
+        setScoreLimit: () => {}, setTimeLimit: () => {}, setCustomStadium: () => {}, setDefaultStadium: () => {},
+        stopGame: () => {}, startGame: () => {}, pauseGame: () => {}, kickPlayer: () => {},
+        sendAnnouncement: (msg, id) => sent.push({ msg, id }),
+        setPlayerTeam: (id, team) => {
+            const player = state.players.find((p) => p.id === id);
+            if (!player) return;
+            player.team = team;
+            state.teamRed = state.players.filter((p) => p.team === Team.RED);
+            state.teamBlue = state.players.filter((p) => p.team === Team.BLUE);
+            state.teamSpec = state.players.filter((p) => p.team === Team.SPECTATORS);
+            balanceRef.handlePlayersTeamChange(null);
+        },
+    };
+    let balanceRef;
+    const createButtonHelpers = require(path.join(CORE, 'team', 'buttons'));
+    const buttons = createButtonHelpers({ room: roomMock, state, Team, getRandomInt: () => 0 });
+    const createChoosingHelpers = require(path.join(CORE, 'team', 'choosing'));
+    const choosing = createChoosingHelpers({
+        room: roomMock, state, Team, HaxNotification: { CHAT: 1, MENTION: 2 },
+        announcementColor: 1, errorColor: 2, infoColor: 3, warningColor: 4,
+        chooseModeSlowMode: 1, chooseTime: 20, defaultSlowMode: 0.5, SMSet: new Set(), getRandomInt: () => 0,
+    });
+    const balance = require(path.join(CORE, 'team', 'balance'))({
+        room: roomMock, state, Team, State, HaxNotification: { CHAT: 1 },
+        emptyPlayer: {}, infoColor: 5, scoreLimit: 3, teamSize: 4, timeLimit: 5,
+        activateChooseMode: choosing.activateChooseMode, blueToSpecButton: buttons.blueToSpecButton,
+        choosePlayer: choosing.choosePlayer, deactivateChooseMode: choosing.deactivateChooseMode,
+        endGame: () => {}, getRandomInt: () => 0,
+        getSpecList: choosing.getSpecList, instantRestart: () => {}, randomButton: buttons.randomButton,
+        redToSpecButton: buttons.redToSpecButton, resetButton: buttons.resetButton, resumeGame: () => {},
+        stadiumCommand: () => {}, swapButton: buttons.swapButton, topButton: buttons.topButton,
+    });
+    balanceRef = balance;
+
+    balance.handlePlayersStop(null);
+    (async () => {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        check('RED (the winner) stayed intact', state.teamRed.map((p) => p.id).sort(), [1, 2, 3, 4]);
+        check('11 players (4v4 full + 3 extra spectators): chooseMode activates instead of silently overgrowing past 4v4', state.chooseMode, true);
+        check('11 players (4v4 full + 3 extra spectators): a captain was auto-placed onto blue, not left stuck at 4v0', state.teamBlue.length, 1);
+        const captainId = state.teamBlue[0] && state.teamBlue[0].id;
+        check('11 players (4v4 full + 3 extra spectators): that captain received a real "pick a player" prompt', sent.some((s) => s.msg.includes('Для выбора игрока') && s.id === captainId), true);
     })();
 }
 

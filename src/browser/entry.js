@@ -633,10 +633,13 @@ async function endGame(winner) {
     // mid-match PAUSED pick session, not starting a fresh post-match round)
     // — racing handlePlayersStop's own later, correct bench+refill+start
     // sequence and potentially starting the next round with the losing
-    // side still sitting in spectators. Real captain-choosing is reserved
-    // for a genuine full house reached via ordinary joins DURING an
-    // ongoing match (balanceTeams()'s own ordinary-growth branch) — that's
-    // the only place activateChooseMode() is called now.
+    // side still sitting in spectators. activateChooseMode() is still
+    // called for a genuine post-match surplus (WinStay bench leaves more
+    // waiting spectators than the benched side needs) — but only from
+    // INSIDE handlePlayersStop itself, once it's actually counted a real
+    // surplus to hand off to a captain, not defensively here before that's
+    // known. It's also called from balanceTeams()'s ordinary-growth branch
+    // for a full house reached via joins DURING an ongoing match.
     const scores = room.getScores();
     state.game.scores = scores;
     state.lastWinner = winner;
