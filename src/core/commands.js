@@ -5,6 +5,7 @@ module.exports = function createCommands({
     helpCommand,
     globalStatsCommand,
     renameCommand,
+    customColorsCommand,
     linkDiscordCommand,
     statsLeaderboardCommand,
     afkCommand,
@@ -97,6 +98,13 @@ module.exports = function createCommands({
         desc: `
         Эта команда позволяет вам переименовать себя для таблицы лидеров.`,
         function: renameCommand,
+    },
+    customcolors: {
+        aliases: [],
+        roles: Role.PLAYER,
+        desc: `
+        Эта команда переключает, видите ли ВЫ кастомные цвета клубов в чате. Не влияет на то, что видят другие игроки.`,
+        function: customColorsCommand,
     },
     discord: {
         aliases: [],

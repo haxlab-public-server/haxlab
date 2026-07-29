@@ -102,7 +102,7 @@ module.exports = function createClubCommands({
         state.clubMembers.push({ auth, clubId: club.id, playerName: player.name });
         room.sendAnnouncement(
             `🏆 Клуб "${club.name}" ${clubTag(club)} создан ! Приглашайте игроков командой "!clubinvite".`,
-            null,
+            player.id,
             announcementColor,
             'bold',
             HaxNotification.CHAT

@@ -103,6 +103,12 @@ function createDatabaseApi(options = {}) {
         getAllEquippedTrophies() {
             return sqlite.getAllEquippedTrophies();
         },
+        setHideCustomColors(auth, hidden) {
+            return sqlite.setHideCustomColors(auth, hidden);
+        },
+        getAllHiddenCustomColors() {
+            return sqlite.getAllHiddenCustomColors();
+        },
         getTopPlayers() {
             return sqlite.getTopPlayers();
         },

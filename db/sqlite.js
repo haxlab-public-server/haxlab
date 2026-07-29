@@ -201,6 +201,7 @@ function createSqliteDatabase(filePath = path.join(__dirname, 'haxlab.sqlite')) 
         addColumnIfMissing('player_stats', 'equipped_goal_animation TEXT');
         addColumnIfMissing('player_stats', 'equipped_size TEXT');
         addColumnIfMissing('player_stats', 'equipped_trophy TEXT');
+        addColumnIfMissing('player_stats', 'hide_custom_colors INTEGER NOT NULL DEFAULT 0');
         clubsStatement.run();
         clubMembersStatement.run();
         clubInvitesStatement.run();
@@ -540,6 +541,32 @@ function createSqliteDatabase(filePath = path.join(__dirname, 'haxlab.sqlite')) 
             .all();
     }
 
+    // !customcolors (see commands/player.js) — a player's own opt-out from
+    // seeing OTHER players' club custom colors in chat (the club prefix
+    // TEXT still shows either way, only the color falls back to default).
+    // Upserts rather than a plain UPDATE (unlike setEquipped) since a player
+    // toggling this may not have a player_stats row yet at all — nothing
+    // else about them needs to exist first.
+    function setHideCustomColors(auth, hidden) {
+        database
+            .prepare(
+                `INSERT INTO player_stats (auth, player_name, hide_custom_colors)
+                 VALUES (@auth, '', @hidden)
+                 ON CONFLICT(auth) DO UPDATE SET hide_custom_colors = @hidden`
+            )
+            .run({ auth, hidden: hidden ? 1 : 0 });
+    }
+
+    // Every auth that has opted out — loaded once at startup into
+    // state.hiddenCustomColorsSet (see entry.js), same in-memory-cache
+    // reasoning as equippedTrophies/clubs/adminList/vipList above.
+    function getAllHiddenCustomColors() {
+        return database
+            .prepare('SELECT auth FROM player_stats WHERE hide_custom_colors = 1')
+            .all()
+            .map((row) => row.auth);
+    }
+
     // Same >=5-player quorum as printRankings' leaderboards (see
     // roomStats.js) before anyone is "Top-3" at all — otherwise the first
     // few players in a fresh room would all hand themselves trophies off a
@@ -787,6 +814,8 @@ function createSqliteDatabase(filePath = path.join(__dirname, 'haxlab.sqlite')) 
         setEquipped,
         getEquipped,
         getAllEquippedTrophies,
+        setHideCustomColors,
+        getAllHiddenCustomColors,
         getTopPlayers,
         getClub,
         getAllClubs,

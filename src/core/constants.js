@@ -13,7 +13,7 @@ module.exports = {
     Trophies: {
         goals: 'голов',
         assists: 'ассистов',
-        cs: 'сухарей',
+        cs: 'GK',
         wr: 'WR',
         pt: 'PT',
     },

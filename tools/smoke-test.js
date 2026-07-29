@@ -341,6 +341,7 @@ console.log('\n--- db + roomStats.js/player.js: player data actually round-trips
         teamBlueStats: [{ id: 2, name: 'Bob' }],
         players: [1, 2, 3, 4, 5, 6, 7, 8],
         game: { scores: { time: 300, timeLimit: 300, red: 3, blue: 0, scoreLimit: 3 } },
+        hiddenCustomColorsSet: new Set(),
     };
     const perPlayerStat = { 1: { goals: 5, assists: 1, CS: 1, playtime: 300 }, 2: { goals: 1, assists: 2, CS: 0, playtime: 300 } };
 
@@ -402,6 +403,21 @@ console.log('\n--- db + roomStats.js/player.js: player data actually round-trips
     sent.length = 0;
     await player.renameCommand({ id: 3, name: 'NewPlayer' }, '!rename');
     check('renameCommand on a player with no games reports the error, not a crash', /еще не играли/.test(sent[0].msg), true);
+
+    // !customcolors: viewer-side toggle, works even for a brand new auth
+    // with no player_stats row yet (setHideCustomColors upserts).
+    check('AUTH_NEW_PLAYER starts without the flag', db.getAllHiddenCustomColors().includes('AUTH_NEW_PLAYER'), false);
+    sent.length = 0;
+    await player.customColorsCommand({ id: 3, name: 'NewPlayer' }, '!customcolors');
+    check('customColorsCommand confirms opting out', /больше не отображаются/.test(sent[0].msg), true);
+    check('the toggle is cached in state', state.hiddenCustomColorsSet.has('AUTH_NEW_PLAYER'), true);
+    check('the toggle is persisted to the db even with no prior row', db.getAllHiddenCustomColors().includes('AUTH_NEW_PLAYER'), true);
+
+    sent.length = 0;
+    await player.customColorsCommand({ id: 3, name: 'NewPlayer' }, '!customcolors');
+    check('running it again opts back in', /снова отображаются/.test(sent[0].msg), true);
+    check('the toggle is cleared from state', state.hiddenCustomColorsSet.has('AUTH_NEW_PLAYER'), false);
+    check('the toggle is cleared from the db', db.getAllHiddenCustomColors().includes('AUTH_NEW_PLAYER'), false);
 
     sent.length = 0;
     await player.linkDiscordCommand({ id: 1, name: 'Alice' }, '!discord 123456789012345678');
@@ -552,6 +568,7 @@ console.log('\n--- core/commands/club.js: create/invite/join/kick/leave/disband/
     sent.length = 0;
     await club.clubCreateCommand(alice, '!clubcreate Falcons FLC');
     check('clubcreate succeeds once the owner can afford it', /создан/.test(sent[0].msg), true);
+    check('the creation confirmation is private to the owner, not broadcast', sent[0].id, alice.id);
     check('the cost was deducted', db.getBalance('AUTH_OWNER'), 0);
     check('the club is cached in state', state.clubs.length, 1);
     check('the owner is registered as a member', state.clubMembers.length, 1);
@@ -1052,13 +1069,23 @@ console.log('\n--- discord.js: message/interaction-handling logic (no live Disco
     db.close();
 })();
 
-console.log('\n--- events/activity.js: MASTER/ADMIN/VIP get a chat prefix, regular players don\'t ---');
+console.log('\n--- events/activity.js: every chat message goes through room.sendAnnouncement, only a role earns bold ---');
 {
     const Role = { PLAYER: 0, VIP: 1, ADMIN_TEMP: 2, ADMIN_PERM: 3, MASTER: 4 };
     const State = { PLAY: 0, PAUSE: 1, STOP: 2 };
     const { Trophies } = require(path.join(CORE, 'constants'));
     const { formatTrophyLabel } = require(path.join(CORE, 'utils'));
-    const state = { gameState: State.STOP, chooseMode: false, slowMode: 0, clubs: [], clubMembers: [], topPlayers: {}, equippedTrophies: {} };
+    const state = {
+        gameState: State.STOP, chooseMode: false, slowMode: 0, clubs: [], clubMembers: [], topPlayers: {}, equippedTrophies: {},
+        hiddenCustomColorsSet: new Set(),
+        // A club-colored message is sent once per entry here (see the
+        // per-viewer !customcolors handling in activity.js) — every player
+        // used below (ids 1-5) needs a matching entry.
+        playersAll: [
+            { id: 1, name: 'Boss' }, { id: 2, name: 'Mod' }, { id: 3, name: 'Donor' },
+            { id: 4, name: 'Regular' }, { id: 5, name: 'Clubbed' },
+        ],
+    };
     const authArray = [];
     authArray[1] = ['AUTH_MASTER'];
     authArray[2] = ['AUTH_ADMIN'];
@@ -1086,56 +1113,88 @@ console.log('\n--- events/activity.js: MASTER/ADMIN/VIP get a chat prefix, regul
     sent.length = 0;
     const masterResult = activity.onPlayerChat({ id: 1, name: 'Boss', team: Team.SPECTATORS, admin: true }, 'hello everyone');
     check('MASTER chat is suppressed (native bubble replaced)', masterResult, false);
-    check('MASTER gets a [СЗД] prefix', sent[0], { msg: '👑 [СЗД] Boss: hello everyone', id: null, style: 'bold' });
+    check('MASTER gets a [СЗД] prefix, bold', sent[0], { msg: '[👑СЗД] Boss: hello everyone', id: null, style: 'bold' });
 
     sent.length = 0;
     const adminResult = activity.onPlayerChat({ id: 2, name: 'Mod', team: Team.SPECTATORS, admin: true }, 'hi');
     check('ADMIN chat is suppressed', adminResult, false);
-    check('ADMIN gets an [АДМ] prefix', sent[0], { msg: '🛡️ [АДМ] Mod: hi', id: null, style: 'bold' });
+    check('ADMIN gets an [АДМ] prefix, bold', sent[0], { msg: '[🛡️АДМ] Mod: hi', id: null, style: 'bold' });
 
     sent.length = 0;
     const vipResult = activity.onPlayerChat({ id: 3, name: 'Donor', team: Team.SPECTATORS, admin: false }, 'yo');
     check('VIP chat is suppressed', vipResult, false);
-    check('VIP gets a [ВИП] prefix', sent[0], { msg: '⭐ [ВИП] Donor: yo', id: null, style: 'bold' });
+    check('VIP gets a [ВИП] prefix, bold', sent[0], { msg: '[⭐ВИП] Donor: yo', id: null, style: 'bold' });
 
+    // A plain player, with no role/club/trophy at all, now ALSO goes through
+    // sendAnnouncement (never the native chat bubble) — just their bare name,
+    // in the normal (non-bold) style.
     sent.length = 0;
     const plainResult = activity.onPlayerChat({ id: 4, name: 'Regular', team: Team.SPECTATORS, admin: false }, 'sup');
-    check('a regular player is untouched: no announcement is sent', sent, []);
-    check('a regular player\'s message falls through to the native chat bubble', plainResult, undefined);
+    check('a plain player is intercepted too, not left to the native bubble', plainResult, false);
+    check('a plain player gets no prefix and the normal style', sent[0], { msg: 'Regular: sup', id: null, style: 'normal' });
 
     check('all four messages were still logged to Discord', discordLogs.length, 4);
 
-    // !hide (commands/admin.js) — suppresses just the MASTER/ADMIN prefix,
-    // native chat bubble takes over same as a regular player would get.
+    // !hide (commands/admin.js) — suppresses just the MASTER/ADMIN prefix;
+    // the message itself still goes through sendAnnouncement like anyone
+    // else's, just unprefixed and in the normal style.
     hiddenAdminsSetMock.add(1);
     sent.length = 0;
     const hiddenMasterResult = activity.onPlayerChat({ id: 1, name: 'Boss', team: Team.SPECTATORS, admin: true }, 'sneaky');
-    check('a hidden MASTER gets no prefix announcement', sent, []);
-    check('a hidden MASTER\'s message falls through to the native chat bubble', hiddenMasterResult, undefined);
+    check('a hidden MASTER is still intercepted', hiddenMasterResult, false);
+    check('a hidden MASTER gets no prefix and the normal style', sent[0], { msg: 'Boss: sneaky', id: null, style: 'normal' });
     hiddenAdminsSetMock.delete(1);
 
     // Club prefix (core/commands/club.js) — a regular player in a club gets
     // intercepted just like a VIP/ADMIN/MASTER would, but with the club's
-    // own custom color; a role holder who's ALSO in a club keeps their role
-    // prefix's color and just gets the club tag appended alongside it.
+    // own custom color and the normal style (a club alone isn't a role); a
+    // role holder who's ALSO in a club keeps their role's bold style and
+    // just gains the club tag alongside it.
     state.clubs = [{ id: 1, name: 'Falcons', prefix: 'FLC', ownerAuth: 'AUTH_CLUBBED', color: 0xff8800, slots: 5 }];
     state.clubMembers = [{ auth: 'AUTH_CLUBBED', clubId: 1, playerName: 'Clubbed' }, { auth: 'AUTH_VIP', clubId: 1, playerName: 'Donor' }];
 
     sent.length = 0;
     const clubResult = activity.onPlayerChat({ id: 5, name: 'Clubbed', team: Team.SPECTATORS, admin: false }, 'gg');
     check('a plain club member is intercepted too', clubResult, false);
-    check('a plain club member gets just the club prefix', sent[0], { msg: '[FLC] Clubbed: gg', id: null, style: 'bold' });
+    // A message using the club's OWN color (no role overriding it) is sent
+    // once per player in the room instead of one broadcast — that's what
+    // lets !customcolors give each viewer a different color for it.
+    check('a club-colored message is sent once per player in the room', sent.length, state.playersAll.length);
+    check('every viewer gets the identical prefix text and normal style', sent.every((s) => s.msg === '[FLC] Clubbed: gg' && s.style === 'normal'), true);
 
     sent.length = 0;
     const vipClubResult = activity.onPlayerChat({ id: 3, name: 'Donor', team: Team.SPECTATORS, admin: false }, 'yo');
     check('a VIP who is also in a club keeps the VIP prefix and gains the club tag', vipClubResult, false);
-    check('the combined prefix shows the club tag before the role prefix', sent[0], { msg: '[FLC] ⭐ [ВИП] Donor: yo', id: null, style: 'bold' });
+    check('the combined prefix keeps the bold style (a role is present)', sent[0], { msg: '[FLC] [⭐ВИП] Donor: yo', id: null, style: 'bold' });
 
     state.clubs[0].emoji = '🔥';
     sent.length = 0;
     const clubEmojiResult = activity.onPlayerChat({ id: 5, name: 'Clubbed', team: Team.SPECTATORS, admin: false }, 'gg');
     check('a club with an emoji set shows it in front of the letters', clubEmojiResult, false);
-    check('the emoji lands inside the brackets, before the prefix letters', sent[0], { msg: '[🔥FLC] Clubbed: gg', id: null, style: 'bold' });
+    check('the emoji lands inside the brackets, before the prefix letters', sent.every((s) => s.msg === '[🔥FLC] Clubbed: gg' && s.style === 'normal'), true);
+
+    // !customcolors (commands/player.js): a per-viewer opt-out from seeing
+    // club custom colors — needs `color` captured, which the shared `sent`
+    // mock above doesn't bother with, so swap in a local one just for this.
+    const originalSendAnnouncement = room.sendAnnouncement;
+    const sentWithColor = [];
+    room.sendAnnouncement = (msg, id, color, style) => sentWithColor.push({ msg, id, color, style });
+    state.playersAll = [...state.playersAll, { id: 6, name: 'Hider' }, { id: 7, name: 'Seer' }];
+    authArray[6] = ['AUTH_HIDER'];
+    authArray[7] = ['AUTH_SEER'];
+    state.hiddenCustomColorsSet = new Set(['AUTH_HIDER']);
+
+    sentWithColor.length = 0;
+    const optOutResult = activity.onPlayerChat({ id: 5, name: 'Clubbed', team: Team.SPECTATORS, admin: false }, 'hey');
+    check('onPlayerChat still returns false with viewer opt-outs in play', optOutResult, false);
+    check('a viewer who has NOT opted out sees the club color', sentWithColor.find((s) => s.id === 7).color, 0xff8800);
+    check('a viewer who HAS opted out sees the default color instead', sentWithColor.find((s) => s.id === 6).color, null);
+    check('the sender (not opted out) still sees their own club color normally', sentWithColor.find((s) => s.id === 5).color, 0xff8800);
+    check('every viewer still gets the identical prefix text', sentWithColor.every((s) => s.msg === '[🔥FLC] Clubbed: hey'), true);
+
+    room.sendAnnouncement = originalSendAnnouncement;
+    state.playersAll = state.playersAll.slice(0, 5);
+    state.hiddenCustomColorsSet = new Set();
 
     state.clubs = [];
     state.clubMembers = [];
@@ -1144,14 +1203,15 @@ console.log('\n--- events/activity.js: MASTER/ADMIN/VIP get a chat prefix, regul
     // state.topPlayers still agrees the player holds a top-3 spot; an
     // equipped-but-lost trophy silently stops appearing instead of lying.
     // The medal always reflects the player's ACTUAL current rank (their
-    // index in the array), not whatever it was when last equipped.
+    // index in the array), not whatever it was when last equipped. A
+    // trophy alone (no role) is still the normal style.
     state.equippedTrophies = { AUTH_PLAIN: 'goals' };
     state.topPlayers = { goals: [{ auth: 'AUTH_PLAIN' }, { auth: 'AUTH_OTHER' }] };
 
     sent.length = 0;
     const trophyResult = activity.onPlayerChat({ id: 4, name: 'Regular', team: Team.SPECTATORS, admin: false }, 'nice');
     check('a plain player currently ranked #1 gets their equipped trophy shown', trophyResult, false);
-    check('the trophy prefix is the gold-medal rank-1 label', sent[0], { msg: '[🥇Топ-1 голов] Regular: nice', id: null, style: 'bold' });
+    check('the trophy prefix is the gold-medal rank-1 label, normal style', sent[0], { msg: '[🥇Топ-1 голов] Regular: nice', id: null, style: 'normal' });
 
     // Same equipped category, but now ranked 2nd (someone else took 1st) —
     // the medal updates to silver on its own, no need to !trophy again.
@@ -1159,26 +1219,26 @@ console.log('\n--- events/activity.js: MASTER/ADMIN/VIP get a chat prefix, regul
     sent.length = 0;
     const silverResult = activity.onPlayerChat({ id: 4, name: 'Regular', team: Team.SPECTATORS, admin: false }, 'still here');
     check('dropping to rank 2 is still intercepted', silverResult, false);
-    check('the medal automatically becomes silver at rank 2', sent[0], { msg: '[🥈Топ-2 голов] Regular: still here', id: null, style: 'bold' });
+    check('the medal automatically becomes silver at rank 2', sent[0], { msg: '[🥈Топ-2 голов] Regular: still here', id: null, style: 'normal' });
 
     state.topPlayers = { goals: [{ auth: 'AUTH_X' }, { auth: 'AUTH_Y' }, { auth: 'AUTH_PLAIN' }] };
     sent.length = 0;
     const bronzeResult = activity.onPlayerChat({ id: 4, name: 'Regular', team: Team.SPECTATORS, admin: false }, 'barely' );
     check('dropping to rank 3 is still intercepted', bronzeResult, false);
-    check('the medal automatically becomes bronze at rank 3', sent[0], { msg: '[🥉Топ-3 голов] Regular: barely', id: null, style: 'bold' });
+    check('the medal automatically becomes bronze at rank 3', sent[0], { msg: '[🥉Топ-3 голов] Regular: barely', id: null, style: 'normal' });
 
     state.topPlayers = { goals: [{ auth: 'AUTH_X' }, { auth: 'AUTH_Y' }, { auth: 'AUTH_Z' }] };
     sent.length = 0;
     const lostTrophyResult = activity.onPlayerChat({ id: 4, name: 'Regular', team: Team.SPECTATORS, admin: false }, 'aw');
-    check('falling out of the top 3 falls through to the native chat bubble again', sent, []);
-    check('a lost trophy is simply not shown, not an error', lostTrophyResult, undefined);
+    check('falling out of the top 3 is still intercepted (everyone is, now)', lostTrophyResult, false);
+    check('a lost trophy is simply not shown, leaving just the bare name', sent[0], { msg: 'Regular: aw', id: null, style: 'normal' });
 
     state.topPlayers = { goals: [{ auth: 'AUTH_MASTER' }] };
     state.equippedTrophies = { AUTH_MASTER: 'goals' };
     sent.length = 0;
     const masterTrophyResult = activity.onPlayerChat({ id: 1, name: 'Boss', team: Team.SPECTATORS, admin: true }, 'gg');
     check('a MASTER holding #1 shows the trophy before the role prefix', masterTrophyResult, false);
-    check('order is [трофей] then [роль], matching [клуб] [трофей] [роль]', sent[0], { msg: '[🥇Топ-1 голов] 👑 [СЗД] Boss: gg', id: null, style: 'bold' });
+    check('order is [трофей] then [роль], and the role keeps it bold', sent[0], { msg: '[🥇Топ-1 голов] [👑СЗД] Boss: gg', id: null, style: 'bold' });
 
     state.topPlayers = {};
     state.equippedTrophies = {};

@@ -41,6 +41,8 @@ const BRIDGED_METHODS = [
     'setEquipped',
     'getEquipped',
     'getAllEquippedTrophies',
+    'setHideCustomColors',
+    'getAllHiddenCustomColors',
     'getTopPlayers',
     'getClub',
     'getAllClubs',

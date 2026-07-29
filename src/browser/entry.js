@@ -384,6 +384,12 @@ state.equippedTrophies = (await db.getAllEquippedTrophies()).reduce((acc, row) =
     return acc;
 }, {});
 
+// !customcolors (see core/commands/player.js) — auths who've opted out of
+// SEEING other players' club custom colors (events/activity.js sends them
+// the default color instead, per-viewer, on messages that would otherwise
+// use a club's color). Same in-memory-cache reasoning as the above.
+state.hiddenCustomColorsSet = new Set(await db.getAllHiddenCustomColors());
+
 /* GAME */
 
 state.lastTouches = Array(2).fill(null);
@@ -1041,6 +1047,7 @@ const {
     helpCommand,
     globalStatsCommand,
     renameCommand,
+    customColorsCommand,
     linkDiscordCommand,
     statsLeaderboardCommand,
     afkCommand,
@@ -1130,6 +1137,7 @@ const commands = createCommands({
     helpCommand,
     globalStatsCommand,
     renameCommand,
+    customColorsCommand,
     linkDiscordCommand,
     statsLeaderboardCommand,
     afkCommand,

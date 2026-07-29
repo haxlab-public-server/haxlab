@@ -136,6 +136,38 @@ module.exports = function createPlayerCommands({
         }
     }
 
+    // Toggles whether THIS player sees other club members' custom chat
+    // colors (see commands/club.js's !clubcolor) — the club prefix TEXT
+    // still shows either way, only the color falls back to default for
+    // whoever has opted out. Purely a viewer-side preference: it has no
+    // effect on what anyone else sees, including the toggling player's own
+    // messages as seen by others.
+    async function customColorsCommand(player, message) {
+        const auth = authArray[player.id][0];
+        const hidden = state.hiddenCustomColorsSet.has(auth);
+        if (hidden) {
+            state.hiddenCustomColorsSet.delete(auth);
+            await db.setHideCustomColors(auth, false);
+            room.sendAnnouncement(
+                `✔️ Кастомные цвета клубов снова отображаются для вас в чате !`,
+                player.id,
+                successColor,
+                'bold',
+                HaxNotification.CHAT
+            );
+        } else {
+            state.hiddenCustomColorsSet.add(auth);
+            await db.setHideCustomColors(auth, true);
+            room.sendAnnouncement(
+                `✔️ Кастомные цвета клубов больше не отображаются для вас в чате !`,
+                player.id,
+                successColor,
+                'bold',
+                HaxNotification.CHAT
+            );
+        }
+    }
+
     async function linkDiscordCommand(player, message) {
         const discordId = message.split(/ +/)[1];
         if (!discordId || !/^\d{15,20}$/.test(discordId)) {
@@ -289,6 +321,7 @@ module.exports = function createPlayerCommands({
         helpCommand,
         globalStatsCommand,
         renameCommand,
+        customColorsCommand,
         linkDiscordCommand,
         statsLeaderboardCommand,
         afkCommand,

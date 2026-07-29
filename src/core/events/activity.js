@@ -90,26 +90,26 @@ module.exports = function createActivityEvents({
             return false;
         }
 
-        // MASTER/ADMIN/VIP get a role prefix on ordinary chat — HaxBall's
-        // default chat bubble can't show one, so it's suppressed (return
-        // false) in favor of a custom sendAnnouncement, same trick teamChat/
-        // playerChat already use above. Regular players are untouched and
-        // keep the native chat bubble. !hide (commands/admin.js) suppresses
-        // just the MASTER/ADMIN prefix — role/permissions are untouched, so
-        // a hidden VIP-flagged admin would still fall through to the VIP
-        // prefix rather than none at all.
+        // Every chat message is sent through room.sendAnnouncement, never
+        // left to HaxBall's native chat bubble — same trick teamChat/
+        // playerChat already use above. MASTER/ADMIN/VIP get a role prefix
+        // and keep the bold style; everyone else (including plain players
+        // and club/trophy-only prefixes) renders in the normal style.
+        // !hide (commands/admin.js) suppresses just the MASTER/ADMIN prefix
+        // — role/permissions are untouched, so a hidden VIP-flagged admin
+        // would still fall through to the VIP prefix rather than none at all.
         const role = getRole(player);
         const showAdminPrefix = !hiddenAdminsSet.has(player.id);
         let rolePrefix = null;
         let prefixColor = null;
         if (showAdminPrefix && role == Role.MASTER) {
-            rolePrefix = '👑 [СЗД]';
+            rolePrefix = '[👑СЗД]';
             prefixColor = masterChatColor;
         } else if (showAdminPrefix && role >= Role.ADMIN_TEMP) {
-            rolePrefix = '🛡️ [АДМ]';
+            rolePrefix = '[🛡️АДМ]';
             prefixColor = adminChatColor;
         } else if (role == Role.VIP) {
-            rolePrefix = '⭐ [ВИП]';
+            rolePrefix = '[⭐ВИП]';
             prefixColor = vipChatColor;
         }
         // Full prefix order is [клуб] [трофей] [роль] — club tag first, then
@@ -124,7 +124,14 @@ module.exports = function createActivityEvents({
         const membership = state.clubMembers.find((m) => m.auth == auth);
         const club = membership && state.clubs.find((c) => c.id == membership.clubId);
         const clubPrefix = club ? `[${club.emoji ?? ''}${club.prefix}]` : null;
-        if (club && prefixColor == null) prefixColor = club.color;
+        // Tracked separately from prefixColor itself: only a color that
+        // actually came from the club is a per-viewer preference
+        // (!customcolors, see commands/player.js) — a role's color never is.
+        let usesClubColor = false;
+        if (club && prefixColor == null) {
+            prefixColor = club.color;
+            usesClubColor = club.color != null;
+        }
         // A trophy only actually shows while state.topPlayers still agrees
         // the player holds a top-3 spot — an equipped-but-since-lost trophy
         // silently stops appearing rather than lying (see commands/trophies.js).
@@ -137,17 +144,28 @@ module.exports = function createActivityEvents({
         const trophyPrefix = equippedRankIndex !== -1
             ? `[${formatTrophyLabel(Trophies, equippedTrophyKey, equippedRankIndex + 1)}]`
             : null;
-        const prefix = [clubPrefix, trophyPrefix, rolePrefix].filter((p) => p != null).join(' ') || null;
-        if (prefix != null) {
-            room.sendAnnouncement(
-                `${prefix} ${player.name}: ${message}`,
-                null,
-                prefixColor,
-                'bold',
-                null
-            );
-            return false;
+        const prefix = [clubPrefix, trophyPrefix, rolePrefix].filter((p) => p != null).join(' ');
+        const displayName = prefix ? `${prefix} ${player.name}` : player.name;
+        // Only a role (MASTER/ADMIN/VIP) earns the bold style — club/trophy
+        // prefixes alone don't, same as a plain player with no prefix at all.
+        const style = rolePrefix != null ? 'bold' : 'normal';
+        const text = `${displayName}: ${message}`;
+        if (usesClubColor) {
+            // !customcolors (commands/player.js) is a per-VIEWER preference:
+            // whoever has opted out sees this specific message in the
+            // default color instead — everyone else still sees the club's
+            // chosen color, and the prefix TEXT is identical for both. Only
+            // a genuinely per-message loop (rather than one broadcast) can
+            // give two viewers different colors for the same line.
+            for (const viewer of state.playersAll) {
+                const viewerAuth = authArray[viewer.id][0];
+                const viewerColor = state.hiddenCustomColorsSet.has(viewerAuth) ? null : prefixColor;
+                room.sendAnnouncement(text, viewer.id, viewerColor, style, null);
+            }
+        } else {
+            room.sendAnnouncement(text, null, prefixColor, style, null);
         }
+        return false;
     }
 
     function onPlayerActivity(player) {
