@@ -96,6 +96,18 @@ function formatCoins(amount) {
     return `${amount} ${word}`;
 }
 
+const TROPHY_MEDALS = { 1: '🥇', 2: '🥈', 3: '🥉' };
+
+// `trophies` is constants.js's Trophies map (category -> stat-name
+// fragment, e.g. { goals: 'голов', ... }); `rank` is the player's ACTUAL
+// current position (1-3) in that category — never stored, always looked up
+// fresh against state.topPlayers, so !trophy (commands/trophies.js) and the
+// chat prefix (events/activity.js) render the exact same label for a given
+// (category, rank) and it updates the moment the underlying rank does.
+function formatTrophyLabel(trophies, category, rank) {
+    return `${TROPHY_MEDALS[rank]}Топ-${rank} ${trophies[category]}`;
+}
+
 module.exports = {
     getDate,
     getRandomInt,
@@ -115,4 +127,5 @@ module.exports = {
     generateRoomPassword,
     formatBanRemaining,
     formatCoins,
+    formatTrophyLabel,
 };

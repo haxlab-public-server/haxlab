@@ -6,11 +6,19 @@
  */
 module.exports = function createPrintStats({
     getTimeStats,
+    db,
 }) {
-    function printPlayerStats(stats) {
-        return `${stats.playerName}: Игры: ${stats.games}, Победы: ${stats.wins} (${stats.winrate}), ` +
-            `Время игры: ${getTimeStats(stats.playtime)}, Голы: ${stats.goals}, Ассисты: ${stats.assists}, ` +
-            `Сухие матчи: ${stats.CS}, Автоголы: ${stats.ownGoals}`;
+    async function printPlayerStats(stats) {
+        const goalsRank = await db.getStatRank('goals', stats.goals);
+        const assistsRank = await db.getStatRank('assists', stats.assists);
+        const csRank = await db.getStatRank('CS', stats.CS);
+        const playtimeRank = await db.getStatRank('playtime', stats.playtime);
+        return `${stats.playerName} ` +
+            `[🏆 ${stats.winrate} побед, 🕹️ ${stats.games} игр] ` +
+            `[🏅 Ранг по голам: ${goalsRank.rank}/${goalsRank.total}(${stats.goals}), ` +
+            `ассистам: ${assistsRank.rank}/${assistsRank.total}(${stats.assists}), ` +
+            `сухим матчам: ${csRank.rank}/${csRank.total}(${stats.CS}), ` +
+            `времени игры: ${playtimeRank.rank}/${playtimeRank.total}(${getTimeStats(stats.playtime)})]`;
     }
 
     return {

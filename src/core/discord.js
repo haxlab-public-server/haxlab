@@ -146,12 +146,12 @@ async function handleIncomingMessage(message, { discordOwnerId, discordAdminRole
             if (!auth) return 'Ваш аккаунт Discord не привязан. Используйте "!discord <ваш ID Discord>" в комнате, или "!stats <имя игрока>" здесь.';
             const stats = db.getPlayerStats(auth);
             if (!stats) return "Вы еще не играли в квалификационные игры.";
-            return getPrintPlayerStats()(stats);
+            return await getPrintPlayerStats()(stats);
         }
 
         const stats = resolveStatsByName(name, { db, state, getAuthArray });
         if (!stats) return `Статистика для "${name}" не найдена.`;
-        return getPrintPlayerStats()(stats);
+        return await getPrintPlayerStats()(stats);
     }
 
     return null;

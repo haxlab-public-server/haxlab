@@ -14,6 +14,7 @@ module.exports = function createActivityEvents({
     Situation,
     State,
     Team,
+    Trophies,
     adminChatColor,
     commands,
     discordBot,
@@ -24,6 +25,7 @@ module.exports = function createActivityEvents({
     vipChatColor,
     checkGoalKickTouch,
     chooseModeFunction,
+    formatTrophyLabel,
     getCommand,
     getDate,
     getGoalGame,
@@ -98,18 +100,44 @@ module.exports = function createActivityEvents({
         // prefix rather than none at all.
         const role = getRole(player);
         const showAdminPrefix = !hiddenAdminsSet.has(player.id);
-        let prefix = null;
+        let rolePrefix = null;
         let prefixColor = null;
         if (showAdminPrefix && role == Role.MASTER) {
-            prefix = '👑 [ВЛАДЕЛЕЦ]';
+            rolePrefix = '👑 [СЗД]';
             prefixColor = masterChatColor;
         } else if (showAdminPrefix && role >= Role.ADMIN_TEMP) {
-            prefix = '🛡️ [АДМИН]';
+            rolePrefix = '🛡️ [АДМ]';
             prefixColor = adminChatColor;
         } else if (role == Role.VIP) {
-            prefix = '⭐ [ВИП]';
+            rolePrefix = '⭐ [ВИП]';
             prefixColor = vipChatColor;
         }
+        // Full prefix order is [клуб] [трофей] [роль] — club tag first, then
+        // the equipped trophy (!trophy, see commands/trophies.js), then the
+        // role prefix last. They stack rather than one replacing another
+        // (e.g. an admin who's also in a club shows both) — the role's own
+        // color always wins over the club's custom one, since a role is
+        // never "hidden" here whereas a club member with no custom color set
+        // just falls back to the default chat color (see constants.js's
+        // defaultColor/null semantics in room.sendAnnouncement).
+        const auth = authArray[player.id][0];
+        const membership = state.clubMembers.find((m) => m.auth == auth);
+        const club = membership && state.clubs.find((c) => c.id == membership.clubId);
+        const clubPrefix = club ? `[${club.emoji ?? ''}${club.prefix}]` : null;
+        if (club && prefixColor == null) prefixColor = club.color;
+        // A trophy only actually shows while state.topPlayers still agrees
+        // the player holds a top-3 spot — an equipped-but-since-lost trophy
+        // silently stops appearing rather than lying (see commands/trophies.js).
+        // The medal (🥇/🥈/🥉) always reflects the player's ACTUAL current
+        // rank, never whatever it was when they last ran !trophy.
+        const equippedTrophyKey = state.equippedTrophies[auth];
+        const equippedRankIndex = equippedTrophyKey
+            ? (state.topPlayers[equippedTrophyKey] ?? []).findIndex((e) => e.auth == auth)
+            : -1;
+        const trophyPrefix = equippedRankIndex !== -1
+            ? `[${formatTrophyLabel(Trophies, equippedTrophyKey, equippedRankIndex + 1)}]`
+            : null;
+        const prefix = [clubPrefix, trophyPrefix, rolePrefix].filter((p) => p != null).join(' ') || null;
         if (prefix != null) {
             room.sendAnnouncement(
                 `${prefix} ${player.name}: ${message}`,

@@ -101,7 +101,7 @@ module.exports = function createPlayerCommands({
 
     async function globalStatsCommand(player, message) {
         const stats = (await db.getPlayerStats(authArray[player.id][0])) ?? new HaxStatistics(player.name);
-        const statsString = printPlayerStats(stats);
+        const statsString = await printPlayerStats(stats);
         room.sendAnnouncement(
             statsString,
             player.id,

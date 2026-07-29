@@ -125,6 +125,52 @@ function createSqliteDatabase(filePath = path.join(__dirname, 'haxlab.sqlite')) 
         );
     `);
 
+    // Player clubs (!clubcreate/!clubinvite/etc., see core/commands/club.js).
+    // owner_auth is redundant with a club_members row (the owner is always
+    // also a member), but kept as its own column since ownership checks
+    // ("are you allowed to !clubkick/!clubcolor/etc.") happen far more often
+    // than membership listing, and this avoids a join for every one of them.
+    // color is nullable — NULL means "no custom color set", falls back to
+    // the default chat color (see events/activity.js).
+    const clubsStatement = database.prepare(`
+        CREATE TABLE IF NOT EXISTS clubs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            prefix TEXT NOT NULL,
+            owner_auth TEXT NOT NULL,
+            color INTEGER,
+            slots INTEGER NOT NULL DEFAULT 5,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+    `);
+
+    // auth is the PRIMARY KEY, not (club_id, auth) — a player can only ever
+    // be in one club at a time, enforced directly by the schema rather than
+    // just by application logic.
+    const clubMembersStatement = database.prepare(`
+        CREATE TABLE IF NOT EXISTS club_members (
+            auth TEXT PRIMARY KEY,
+            club_id INTEGER NOT NULL,
+            player_name TEXT NOT NULL,
+            joined_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+    `);
+
+    // Unlike club_members, a player CAN hold invites from more than one club
+    // at once (they just can't accept more than one) — so this is keyed by
+    // (club_id, auth), not auth alone. expires_at is mandatory (unlike
+    // auth_bans' nullable one) — every club invite always expires, there is
+    // no permanent-invite case.
+    const clubInvitesStatement = database.prepare(`
+        CREATE TABLE IF NOT EXISTS club_invites (
+            club_id INTEGER NOT NULL,
+            auth TEXT NOT NULL,
+            invited_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            expires_at TEXT NOT NULL,
+            PRIMARY KEY (club_id, auth)
+        );
+    `);
+
     // SQLite has no "ADD COLUMN IF NOT EXISTS" — a DB created before a given
     // feature already has the table without that column, and CREATE TABLE IF
     // NOT EXISTS above is a no-op against an existing table. Catching the
@@ -154,6 +200,12 @@ function createSqliteDatabase(filePath = path.join(__dirname, 'haxlab.sqlite')) 
         addColumnIfMissing('player_stats', 'equipped_form TEXT');
         addColumnIfMissing('player_stats', 'equipped_goal_animation TEXT');
         addColumnIfMissing('player_stats', 'equipped_size TEXT');
+        addColumnIfMissing('player_stats', 'equipped_trophy TEXT');
+        clubsStatement.run();
+        clubMembersStatement.run();
+        clubInvitesStatement.run();
+        addColumnIfMissing('clubs', 'emoji TEXT');
+        addColumnIfMissing('clubs', 'assistant_auth TEXT');
         return true;
     }
 
@@ -264,6 +316,22 @@ function createSqliteDatabase(filePath = path.join(__dirname, 'haxlab.sqlite')) 
             .all(limit);
 
         return rows.map((row) => ({ playerName: row.player_name, value: row.value }));
+    }
+
+    // Rank of a given stat value among all players (1-indexed, ties share the
+    // same rank via COUNT(*)+1 rather than a window function — node:sqlite's
+    // bundled SQLite may not have RANK() available). `total` is the player
+    // count the rank is out of, for a "n/m" display.
+    function getStatRank(statKey, value) {
+        const column = LEADERBOARD_COLUMNS[statKey];
+        if (!column) throw new Error(`getStatRank: unknown statKey "${statKey}"`);
+
+        const rank = database
+            .prepare(`SELECT COUNT(*) + 1 AS rank FROM player_stats WHERE ${column} > ?`)
+            .get(value).rank;
+        const total = database.prepare('SELECT COUNT(*) AS total FROM player_stats').get().total;
+
+        return { rank, total };
     }
 
     // Masters are configured out-of-band (see scripts/add-master.js), never by
@@ -439,13 +507,15 @@ function createSqliteDatabase(filePath = path.join(__dirname, 'haxlab.sqlite')) 
         return true;
     }
 
-    // slot is 'form', 'goalAnimation' or 'size' — validated by the caller
-    // (core/economy.js), which is also the only place that knows the shop
-    // catalog and can check ownership before calling this.
+    // slot is 'form', 'goalAnimation' or 'size' (validated by the caller,
+    // core/economy.js, which is also the only place that knows the shop
+    // catalog and can check ownership before calling this) or 'trophy'
+    // (validated by core/commands/trophies.js the same way).
     const EQUIPPED_SLOT_COLUMNS = {
         form: 'equipped_form',
         goalAnimation: 'equipped_goal_animation',
         size: 'equipped_size',
+        trophy: 'equipped_trophy',
     };
 
     function setEquipped(auth, slot, itemId) {
@@ -455,9 +525,210 @@ function createSqliteDatabase(filePath = path.join(__dirname, 'haxlab.sqlite')) 
 
     function getEquipped(auth) {
         const row = database
-            .prepare('SELECT equipped_form AS form, equipped_goal_animation AS goalAnimation, equipped_size AS size FROM player_stats WHERE auth = ?')
+            .prepare('SELECT equipped_form AS form, equipped_goal_animation AS goalAnimation, equipped_size AS size, equipped_trophy AS trophy FROM player_stats WHERE auth = ?')
             .get(auth);
-        return row ? row : { form: null, goalAnimation: null, size: null };
+        return row ? row : { form: null, goalAnimation: null, size: null, trophy: null };
+    }
+
+    // Every auth with a trophy currently equipped — loaded once at startup
+    // into state.equippedTrophies (see entry.js), same in-memory-cache
+    // reasoning as adminList/vipList/clubs: the per-message chat prefix
+    // (events/activity.js) can't afford a DB round trip on every message.
+    function getAllEquippedTrophies() {
+        return database
+            .prepare('SELECT auth, equipped_trophy AS trophy FROM player_stats WHERE equipped_trophy IS NOT NULL')
+            .all();
+    }
+
+    // Same >=5-player quorum as printRankings' leaderboards (see
+    // roomStats.js) before anyone is "Top-3" at all — otherwise the first
+    // few players in a fresh room would all hand themselves trophies off a
+    // near-empty table. Refreshed once per completed match (roomStats.js's
+    // updateStats()), not per chat message — see state.topPlayers. Each
+    // category holds up to 3 entries, ordered rank 1st/2nd/3rd — a player's
+    // actual rank (and so which medal they get, see utils.js's
+    // formatTrophyLabel) is just their index in that array.
+    const TROPHY_QUORUM = 5;
+    const TROPHY_RANKS = 3;
+    function getTopPlayers() {
+        const total = database.prepare('SELECT COUNT(*) AS n FROM player_stats').get().n;
+        if (total < TROPHY_QUORUM) {
+            return { goals: [], assists: [], cs: [], wr: [], pt: [] };
+        }
+        function topByColumn(column) {
+            return database
+                .prepare(`SELECT auth, player_name AS playerName, ${column} AS value FROM player_stats ORDER BY ${column} DESC LIMIT ?`)
+                .all(TROPHY_RANKS);
+        }
+        const topWinrate = database
+            .prepare(
+                `SELECT auth, player_name AS playerName, (CAST(wins AS REAL) / games) AS value
+                 FROM player_stats WHERE games > 0 ORDER BY value DESC, games DESC LIMIT ?`
+            )
+            .all(TROPHY_RANKS);
+        return {
+            goals: topByColumn('goals'),
+            assists: topByColumn('assists'),
+            cs: topByColumn('clean_sheets'),
+            wr: topWinrate,
+            pt: topByColumn('playtime'),
+        };
+    }
+
+    /* CLUBS */
+
+    function rowToClub(row) {
+        if (!row) return null;
+        return { id: row.id, name: row.name, prefix: row.prefix, emoji: row.emoji, ownerAuth: row.ownerAuth, assistantAuth: row.assistantAuth, color: row.color, slots: row.slots };
+    }
+
+    const CLUB_COLUMNS = 'id, name, prefix, emoji, owner_auth AS ownerAuth, assistant_auth AS assistantAuth, color, slots';
+
+    function getClub(clubId) {
+        return rowToClub(database.prepare(`SELECT ${CLUB_COLUMNS} FROM clubs WHERE id = ?`).get(clubId));
+    }
+
+    function getAllClubs() {
+        return database.prepare(`SELECT ${CLUB_COLUMNS} FROM clubs`).all().map(rowToClub);
+    }
+
+    function getAllClubMembers() {
+        return database
+            .prepare('SELECT auth, club_id AS clubId, player_name AS playerName FROM club_members')
+            .all();
+    }
+
+    function getClubMembership(auth) {
+        const row = database.prepare('SELECT club_id AS clubId FROM club_members WHERE auth = ?').get(auth);
+        return row ? row.clubId : null;
+    }
+
+    function getClubMemberCount(clubId) {
+        return database.prepare('SELECT COUNT(*) AS n FROM club_members WHERE club_id = ?').get(clubId).n;
+    }
+
+    // Atomic: re-checks the owner isn't already in a club and has enough
+    // coins, then deducts the cost and creates the club + owner membership
+    // all inside one synchronous call — same "DatabaseSync runs everything
+    // synchronously, nothing else can interleave" reasoning as buyItem.
+    // Returns null (no charge, nothing created) rather than throwing, so the
+    // caller reports "insufficient funds"/"already in a club" the same way
+    // buyItem's `false` return does.
+    function createClub(ownerAuth, ownerName, name, prefix, cost) {
+        if (getClubMembership(ownerAuth) != null) return null;
+        if (getBalance(ownerAuth) < cost) return null;
+        database
+            .prepare(
+                `INSERT INTO player_stats (auth, player_name, balance)
+                 VALUES (@auth, @playerName, -@cost)
+                 ON CONFLICT(auth) DO UPDATE SET balance = balance - @cost`
+            )
+            .run({ auth: ownerAuth, playerName: ownerName ?? '', cost });
+        const result = database
+            .prepare('INSERT INTO clubs (name, prefix, owner_auth) VALUES (?, ?, ?)')
+            .run(name, prefix, ownerAuth);
+        const clubId = Number(result.lastInsertRowid);
+        database
+            .prepare('INSERT INTO club_members (auth, club_id, player_name) VALUES (?, ?, ?)')
+            .run(ownerAuth, clubId, ownerName ?? '');
+        return getClub(clubId);
+    }
+
+    // Re-inviting the same player refreshes their expiry (upsert on
+    // (club_id, auth) rather than DO NOTHING) — sending a second invite is a
+    // reasonable way to give someone more time, not a no-op.
+    function inviteToClub(clubId, auth, durationSeconds) {
+        const expiresAt = new Date(Date.now() + durationSeconds * 1000).toISOString();
+        database
+            .prepare(
+                `INSERT INTO club_invites (club_id, auth, expires_at) VALUES (?, ?, ?)
+                 ON CONFLICT(club_id, auth) DO UPDATE SET invited_at = CURRENT_TIMESTAMP, expires_at = excluded.expires_at`
+            )
+            .run(clubId, auth, expiresAt);
+    }
+
+    // Sweeps every expired invite (not just this auth's) before reading —
+    // same "delete past-expiry rows instead of just filtering them out"
+    // approach as getAuthBans, so an expired invite never needs a separate
+    // cleanup job.
+    function getClubInvites(auth) {
+        const nowIso = new Date().toISOString();
+        database.prepare('DELETE FROM club_invites WHERE expires_at <= ?').run(nowIso);
+        return database
+            .prepare(
+                `SELECT ci.club_id AS clubId, c.name AS clubName, c.prefix AS clubPrefix, c.emoji AS clubEmoji
+                 FROM club_invites ci JOIN clubs c ON c.id = ci.club_id
+                 WHERE ci.auth = ? ORDER BY ci.invited_at ASC`
+            )
+            .all(auth);
+    }
+
+    // Called once a player accepts ANY invite — every other pending invite
+    // for them is now moot (they can only ever be in one club), so all of
+    // them are cleared rather than leaving stale rows behind.
+    function removeAllClubInvites(auth) {
+        database.prepare('DELETE FROM club_invites WHERE auth = ?').run(auth);
+    }
+
+    // Atomic: re-checks the invite still exists, the player still isn't in
+    // any club, and the club still has a free slot — all inside the same
+    // synchronous call, same reasoning as createClub/buyItem. Returns false
+    // on any of those failing, so the caller can't double-join by retrying.
+    function joinClub(auth, playerName, clubId) {
+        const invite = database
+            .prepare('SELECT 1 FROM club_invites WHERE club_id = ? AND auth = ? AND expires_at > ?')
+            .get(clubId, auth, new Date().toISOString());
+        if (!invite) return false;
+        if (getClubMembership(auth) != null) return false;
+        const club = getClub(clubId);
+        if (!club) return false;
+        if (getClubMemberCount(clubId) >= club.slots) return false;
+        database
+            .prepare('INSERT INTO club_members (auth, club_id, player_name) VALUES (?, ?, ?)')
+            .run(auth, clubId, playerName ?? '');
+        removeAllClubInvites(auth);
+        return true;
+    }
+
+    function removeClubMember(auth) {
+        database.prepare('DELETE FROM club_members WHERE auth = ?').run(auth);
+    }
+
+    function disbandClub(clubId) {
+        database.prepare('DELETE FROM club_members WHERE club_id = ?').run(clubId);
+        database.prepare('DELETE FROM club_invites WHERE club_id = ?').run(clubId);
+        database.prepare('DELETE FROM clubs WHERE id = ?').run(clubId);
+    }
+
+    function setClubColor(clubId, color) {
+        database.prepare('UPDATE clubs SET color = ? WHERE id = ?').run(color, clubId);
+    }
+
+    function setClubEmoji(clubId, emoji) {
+        database.prepare('UPDATE clubs SET emoji = ? WHERE id = ?').run(emoji, clubId);
+    }
+
+    // auth may be null to clear the assistant (e.g. !clubassistent with no
+    // argument, or the caller clearing it after the assistant leaves/is
+    // kicked — see commands/club.js).
+    function setClubAssistant(clubId, auth) {
+        database.prepare('UPDATE clubs SET assistant_auth = ? WHERE id = ?').run(auth, clubId);
+    }
+
+    // Atomic in the same sense as buyItem: checks the buyer's balance and
+    // deducts it in the same synchronous call that grants the slot, so a
+    // retry after a false return can never double-charge.
+    function buyClubSlot(auth, clubId, cost) {
+        if (getBalance(auth) < cost) return false;
+        database
+            .prepare(
+                `INSERT INTO player_stats (auth, player_name, balance)
+                 VALUES (@auth, '', -@cost)
+                 ON CONFLICT(auth) DO UPDATE SET balance = balance - @cost`
+            )
+            .run({ auth, cost });
+        database.prepare('UPDATE clubs SET slots = slots + 1 WHERE id = ?').run(clubId);
+        return true;
     }
 
     // VACUUM INTO takes a consistent, atomic snapshot even while the DB is
@@ -486,6 +757,7 @@ function createSqliteDatabase(filePath = path.join(__dirname, 'haxlab.sqlite')) 
         init,
         getPlayerStats,
         getPlayerStatsByName,
+        getStatRank,
         savePlayerStats,
         getLeaderboard,
         getMasters,
@@ -514,6 +786,22 @@ function createSqliteDatabase(filePath = path.join(__dirname, 'haxlab.sqlite')) 
         buyItem,
         setEquipped,
         getEquipped,
+        getAllEquippedTrophies,
+        getTopPlayers,
+        getClub,
+        getAllClubs,
+        getAllClubMembers,
+        getClubMembership,
+        createClub,
+        inviteToClub,
+        getClubInvites,
+        joinClub,
+        removeClubMember,
+        disbandClub,
+        setClubColor,
+        setClubEmoji,
+        setClubAssistant,
+        buyClubSlot,
         close,
     };
 }

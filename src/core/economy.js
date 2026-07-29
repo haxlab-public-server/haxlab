@@ -46,12 +46,34 @@ module.exports = function createEconomy({
     const PLAYTIME_INTERVAL_SECONDS = 10 * 60;
     const PLAYTIME_COINS = 10;
     const GOAL_CELEBRATION_DURATION_MS = 3000;
+    // Two clubmates (see commands/club.js) on the same side get a coin
+    // bonus — applies uniformly to every payout (win, loss, playtime tick).
+    const CLUB_TEAMMATE_MULTIPLIER = 1.25;
 
     const itemsById = new Map(items.map((item) => [item.id, item]));
-    const CATEGORY_LABELS = { form: 'Формы', size: 'Размер', goalAnimation: 'Анимации гола' };
+    const CATEGORY_LABELS = { form: 'Формы', size: 'Размер шара после гола', goalAnimation: 'Аватарка после гола' };
 
     function getAuth(player) {
         return authArray[player.id][0];
+    }
+
+    function getClubId(auth) {
+        const membership = state.clubMembers.find((m) => m.auth === auth);
+        return membership ? membership.clubId : null;
+    }
+
+    // True if `player` shares a club with at least one other player on
+    // `sidePlayers` (their own side's roster) — a fresh lookup every payout
+    // rather than a cached flag, since who's on which side changes far more
+    // often than club membership itself.
+    function hasClubmateOnSide(player, sidePlayers) {
+        const clubId = getClubId(getAuth(player));
+        if (clubId == null) return false;
+        return sidePlayers.some((p) => p.id !== player.id && getClubId(getAuth(p)) === clubId);
+    }
+
+    function applyClubBonus(amount, player, sidePlayers) {
+        return hasClubmateOnSide(player, sidePlayers) ? Math.round(amount * CLUB_TEAMMATE_MULTIPLIER) : amount;
     }
 
     // Private to the player only (id, not null) — nobody else needs to see
@@ -75,21 +97,25 @@ module.exports = function createEconomy({
     // meant to reward any play. A draw (Team.SPECTATORS) pays everyone the
     // loss rate — nobody "won", so nobody gets the win rate either.
     async function awardMatchCoins(winner) {
-        async function payAndNotify(player, amount) {
+        async function payAndNotify(player, amount, sidePlayers) {
             const auth = getAuth(player);
-            await db.addCoins(auth, player.name, amount);
+            const boosted = applyClubBonus(amount, player, sidePlayers);
+            await db.addCoins(auth, player.name, boosted);
             const newBalance = await db.getBalance(auth);
-            notifyCoinsEarned(player, amount, newBalance);
+            notifyCoinsEarned(player, boosted, newBalance);
         }
         if (winner === Team.SPECTATORS) {
-            await Promise.all([...state.teamRed, ...state.teamBlue].map((player) => payAndNotify(player, LOSS_COINS)));
+            await Promise.all([
+                ...state.teamRed.map((player) => payAndNotify(player, LOSS_COINS, state.teamRed)),
+                ...state.teamBlue.map((player) => payAndNotify(player, LOSS_COINS, state.teamBlue)),
+            ]);
             return;
         }
         const winners = winner === Team.RED ? state.teamRed : state.teamBlue;
         const losers = winner === Team.RED ? state.teamBlue : state.teamRed;
         await Promise.all([
-            ...winners.map((player) => payAndNotify(player, WIN_COINS)),
-            ...losers.map((player) => payAndNotify(player, LOSS_COINS)),
+            ...winners.map((player) => payAndNotify(player, WIN_COINS, winners)),
+            ...losers.map((player) => payAndNotify(player, LOSS_COINS, losers)),
         ]);
     }
 
@@ -103,17 +129,20 @@ module.exports = function createEconomy({
     const playtimeSecondsSinceLastPayout = new Map();
     function tickPlaytime(elapsedSeconds) {
         if (state.gameState !== State.PLAY) return;
-        for (const player of [...state.teamRed, ...state.teamBlue]) {
-            const auth = getAuth(player);
-            const accumulated = (playtimeSecondsSinceLastPayout.get(auth) ?? 0) + elapsedSeconds;
-            if (accumulated >= PLAYTIME_INTERVAL_SECONDS) {
-                db.addCoins(auth, player.name, PLAYTIME_COINS)
-                    .then(() => db.getBalance(auth))
-                    .then((newBalance) => notifyCoinsEarned(player, PLAYTIME_COINS, newBalance))
-                    .catch((err) => console.error('[economy] addCoins (playtime) failed:', err));
-                playtimeSecondsSinceLastPayout.set(auth, accumulated - PLAYTIME_INTERVAL_SECONDS);
-            } else {
-                playtimeSecondsSinceLastPayout.set(auth, accumulated);
+        for (const side of [state.teamRed, state.teamBlue]) {
+            for (const player of side) {
+                const auth = getAuth(player);
+                const accumulated = (playtimeSecondsSinceLastPayout.get(auth) ?? 0) + elapsedSeconds;
+                if (accumulated >= PLAYTIME_INTERVAL_SECONDS) {
+                    const amount = applyClubBonus(PLAYTIME_COINS, player, side);
+                    db.addCoins(auth, player.name, amount)
+                        .then(() => db.getBalance(auth))
+                        .then((newBalance) => notifyCoinsEarned(player, amount, newBalance))
+                        .catch((err) => console.error('[economy] addCoins (playtime) failed:', err));
+                    playtimeSecondsSinceLastPayout.set(auth, accumulated - PLAYTIME_INTERVAL_SECONDS);
+                } else {
+                    playtimeSecondsSinceLastPayout.set(auth, accumulated);
+                }
             }
         }
     }

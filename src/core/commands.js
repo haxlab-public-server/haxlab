@@ -38,6 +38,19 @@ module.exports = function createCommands({
     unequipCommand,
     addCoinsCommand,
     balanceCommand,
+    clubCreateCommand,
+    clubInviteCommand,
+    clubJoinCommand,
+    clubLeaveCommand,
+    clubKickCommand,
+    clubAssistantCommand,
+    clubDisbandCommand,
+    clubColorCommand,
+    clubEmojiCommand,
+    clubSlotsCommand,
+    clubInfoCommand,
+    clubHelpCommand,
+    trophiesCommand,
 }) {
     return {
 
@@ -432,6 +445,89 @@ module.exports = function createCommands({
     Аргумент 2: <количество> сколько монеток начислить — можно отрицательное число, чтобы списать.
     Пример: !addcoins #3 500 начислит 500 монет игроку с id 3.`,
         function: addCoinsCommand,
+    },
+    clubcreate: {
+        aliases: [],
+        roles: Role.PLAYER,
+        desc: `Смотрите "!clubhelp" для информации.`,
+        function: clubCreateCommand,
+    },
+    clubinvite: {
+        aliases: [],
+        roles: Role.PLAYER,
+        desc: `Смотрите "!clubhelp" для информации.`,
+        function: clubInviteCommand,
+    },
+    clubjoin: {
+        aliases: [],
+        roles: Role.PLAYER,
+        desc: `Смотрите "!clubhelp" для информации.`,
+        function: clubJoinCommand,
+    },
+    clubleave: {
+        aliases: [],
+        roles: Role.PLAYER,
+        desc: `Смотрите "!clubhelp" для информации.`,
+        function: clubLeaveCommand,
+    },
+    clubkick: {
+        aliases: [],
+        roles: Role.PLAYER,
+        desc: `Смотрите "!clubhelp" для информации.`,
+        function: clubKickCommand,
+    },
+    clubassistent: {
+        aliases: [],
+        roles: Role.PLAYER,
+        desc: `Смотрите "!clubhelp" для информации.`,
+        function: clubAssistantCommand,
+    },
+    clubdisband: {
+        aliases: [],
+        roles: Role.PLAYER,
+        desc: `Смотрите "!clubhelp" для информации.`,
+        function: clubDisbandCommand,
+    },
+    clubcolor: {
+        aliases: [],
+        roles: Role.PLAYER,
+        desc: `Смотрите "!clubhelp" для информации.`,
+        function: clubColorCommand,
+    },
+    clubemoji: {
+        aliases: [],
+        roles: Role.PLAYER,
+        desc: `Смотрите "!clubhelp" для информации.`,
+        function: clubEmojiCommand,
+    },
+    clubslots: {
+        aliases: [],
+        roles: Role.PLAYER,
+        desc: `Смотрите "!clubhelp" для информации.`,
+        function: clubSlotsCommand,
+    },
+    club: {
+        aliases: [],
+        roles: Role.PLAYER,
+        desc: `Смотрите "!clubhelp" для информации.`,
+        function: clubInfoCommand,
+    },
+    clubhelp: {
+        aliases: [],
+        roles: Role.PLAYER,
+        desc: `
+        Эта команда показывает все команды клуба и как ими пользоваться.`,
+        function: clubHelpCommand,
+    },
+    trophy: {
+        aliases: [],
+        roles: Role.PLAYER,
+        desc: `
+        Эта команда показывает ваши трофеи (за топ-3 место в статистике) и позволяет экипировать один из них в качестве префикса в чате.
+    Она принимает 1 аргумент (опционально):
+    Аргумент 1: <трофей> где <трофей> один из: goals, assists, cs, wr, pt. Или "none", чтобы снять текущий трофей.
+    Пример: !trophy goals экипирует трофей "🥇Топ-1 голов" (или 🥈/🥉 в зависимости от вашего текущего места), если вы сейчас в топ-3 по голам.`,
+        function: trophiesCommand,
     },
 
     };

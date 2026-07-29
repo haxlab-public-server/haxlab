@@ -54,6 +54,11 @@ module.exports = function createRoomStats({
             for (let player of state.teamBlueStats) {
                 await updatePlayerStats(player, Team.BLUE);
             }
+            // Refreshes the "who currently holds #1" snapshot trophies
+            // (commands/trophies.js) and the chat prefix read off of —
+            // once per completed match, since that's the only time these
+            // stats actually change, not per chat message.
+            state.topPlayers = await db.getTopPlayers();
         }
     }
 
@@ -92,7 +97,7 @@ module.exports = function createRoomStats({
         room.sendAnnouncement(
             rankingString,
             id,
-            infoColor,
+            null,
             'bold',
             HaxNotification.CHAT
         );

@@ -13,6 +13,9 @@ function createDatabaseApi(options = {}) {
         getPlayerStatsByName(playerName) {
             return sqlite.getPlayerStatsByName(playerName);
         },
+        getStatRank(statKey, value) {
+            return sqlite.getStatRank(statKey, value);
+        },
         savePlayerStats(auth, stats) {
             return sqlite.savePlayerStats(auth, stats);
         },
@@ -96,6 +99,54 @@ function createDatabaseApi(options = {}) {
         },
         getEquipped(auth) {
             return sqlite.getEquipped(auth);
+        },
+        getAllEquippedTrophies() {
+            return sqlite.getAllEquippedTrophies();
+        },
+        getTopPlayers() {
+            return sqlite.getTopPlayers();
+        },
+        getClub(clubId) {
+            return sqlite.getClub(clubId);
+        },
+        getAllClubs() {
+            return sqlite.getAllClubs();
+        },
+        getAllClubMembers() {
+            return sqlite.getAllClubMembers();
+        },
+        getClubMembership(auth) {
+            return sqlite.getClubMembership(auth);
+        },
+        createClub(ownerAuth, ownerName, name, prefix, cost) {
+            return sqlite.createClub(ownerAuth, ownerName, name, prefix, cost);
+        },
+        inviteToClub(clubId, auth, durationSeconds) {
+            return sqlite.inviteToClub(clubId, auth, durationSeconds);
+        },
+        getClubInvites(auth) {
+            return sqlite.getClubInvites(auth);
+        },
+        joinClub(auth, playerName, clubId) {
+            return sqlite.joinClub(auth, playerName, clubId);
+        },
+        removeClubMember(auth) {
+            return sqlite.removeClubMember(auth);
+        },
+        disbandClub(clubId) {
+            return sqlite.disbandClub(clubId);
+        },
+        setClubColor(clubId, color) {
+            return sqlite.setClubColor(clubId, color);
+        },
+        setClubEmoji(clubId, emoji) {
+            return sqlite.setClubEmoji(clubId, emoji);
+        },
+        setClubAssistant(clubId, auth) {
+            return sqlite.setClubAssistant(clubId, auth);
+        },
+        buyClubSlot(auth, clubId, cost) {
+            return sqlite.buyClubSlot(auth, clubId, cost);
         },
         close() {
             return sqlite.close();

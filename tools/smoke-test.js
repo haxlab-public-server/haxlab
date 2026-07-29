@@ -42,23 +42,24 @@ const room = {
 };
 
 console.log('--- stats/print.js: !stats shows the full stat block ---');
-{
+(async () => {
     const createPrintStats = require(path.join(CORE, 'stats', 'print'));
-    const printStats = createPrintStats({ getTimeStats: (seconds) => `${Math.floor(seconds / 60)}m` });
+    const RANKS = { goals: 3, assists: 5, CS: 2, playtime: 7 };
+    const db = { getStatRank: async (statKey) => ({ rank: RANKS[statKey], total: 20 }) };
+    const printStats = createPrintStats({ getTimeStats: (seconds) => `${Math.floor(seconds / 60)}m`, db });
     const stats = {
         playerName: 'Alice', games: 10, wins: 7, winrate: '70.0%', playtime: 600,
         goals: 25, assists: 12, CS: 3, ownGoals: 1,
     };
-    const output = printStats.printPlayerStats(stats);
+    const output = await printStats.printPlayerStats(stats);
     check('shows the player name', output.includes('Alice'), true);
-    check('shows games', output.includes('Игры: 10'), true);
-    check('shows wins and winrate', output.includes('Победы: 7 (70.0%)'), true);
-    check('shows playtime', output.includes('Время игры: 10m'), true);
-    check('shows goals', output.includes('Голы: 25'), true);
-    check('shows assists', output.includes('Ассисты: 12'), true);
-    check('shows clean sheets', output.includes('Сухие матчи: 3'), true);
-    check('shows own goals', output.includes('Автоголы: 1'), true);
-}
+    check('shows winrate', output.includes('🏆 70.0% побед'), true);
+    check('shows games', output.includes('🕹️ 10 игр'), true);
+    check('shows goals rank', output.includes('Ранг по голам: 3/20(25)'), true);
+    check('shows assists rank', output.includes('ассистам: 5/20(12)'), true);
+    check('shows clean sheets rank', output.includes('сухим матчам: 2/20(3)'), true);
+    check('shows playtime rank', output.includes('времени игры: 7/20(10m)'), true);
+})();
 
 console.log('\n--- chat.js: helpers must see state populated AFTER wiring ---');
 {
@@ -473,15 +474,15 @@ console.log('\n--- db + roomStats.js/player.js: player data actually round-trips
     check('buyItem refuses to sell the same item twice', db.buyItem('AUTH_NEWBIE', 'Newbie', 'fire', 50), false);
     check('a rejected duplicate purchase does not double-charge', db.getBalance('AUTH_NEWBIE'), 25);
 
-    check('getEquipped starts with all three slots empty', db.getEquipped('AUTH_NEWBIE'), { form: null, goalAnimation: null, size: null });
+    check('getEquipped starts with all slots empty', db.getEquipped('AUTH_NEWBIE'), { form: null, goalAnimation: null, size: null, trophy: null });
     db.setEquipped('AUTH_NEWBIE', 'goalAnimation', 'fire');
-    check('setEquipped fills only the targeted slot', db.getEquipped('AUTH_NEWBIE'), { form: null, goalAnimation: 'fire', size: null });
+    check('setEquipped fills only the targeted slot', db.getEquipped('AUTH_NEWBIE'), { form: null, goalAnimation: 'fire', size: null, trophy: null });
     db.buyItem('AUTH_NEWBIE', 'Newbie', 'gold', 0);
     db.setEquipped('AUTH_NEWBIE', 'form', 'gold');
-    check('setEquipped on a second slot leaves the first untouched', db.getEquipped('AUTH_NEWBIE'), { form: 'gold', goalAnimation: 'fire', size: null });
+    check('setEquipped on a second slot leaves the first untouched', db.getEquipped('AUTH_NEWBIE'), { form: 'gold', goalAnimation: 'fire', size: null, trophy: null });
     db.buyItem('AUTH_NEWBIE', 'Newbie', 'small', 0);
     db.setEquipped('AUTH_NEWBIE', 'size', 'small');
-    check('setEquipped on the size slot leaves the other two untouched', db.getEquipped('AUTH_NEWBIE'), { form: 'gold', goalAnimation: 'fire', size: 'small' });
+    check('setEquipped on the size slot leaves the other two untouched', db.getEquipped('AUTH_NEWBIE'), { form: 'gold', goalAnimation: 'fire', size: 'small', trophy: null });
 
     // backup() must take a consistent, queryable snapshot (VACUUM INTO) even
     // though the source db here is a live, still-open :memory: database.
@@ -501,6 +502,352 @@ console.log('\n--- db + roomStats.js/player.js: player data actually round-trips
     check('setSetting/getSetting round-trips a value', db.getSetting('statusMessageId'), '111222333');
     db.setSetting('statusMessageId', '999888777');
     check('setSetting upserts rather than duplicating', db.getSetting('statusMessageId'), '999888777');
+
+    db.close();
+})();
+
+console.log('\n--- core/commands/club.js: create/invite/join/kick/leave/disband/color/slots against a real sqlite db ---');
+(async () => {
+    const { createSqliteDatabase } = require(path.join(__dirname, '..', 'db', 'sqlite'));
+    const { formatCoins } = require(path.join(CORE, 'utils'));
+    const db = createSqliteDatabase(':memory:');
+    db.init();
+
+    const sent = [];
+    const room = { sendAnnouncement: (msg, id, color, style) => sent.push({ msg, id, color }) };
+    const authArray = { 1: ['AUTH_OWNER'], 2: ['AUTH_MEMBER'], 3: ['AUTH_OUTSIDER'] };
+    const state = {
+        playersAll: [{ id: 1, name: 'Alice' }, { id: 2, name: 'Bob' }, { id: 3, name: 'Carol' }],
+        clubs: [],
+        clubMembers: [],
+    };
+
+    const club = require(path.join(CORE, 'commands', 'club'))({
+        room, state, authArray, db,
+        announcementColor: 1, errorColor: 2, successColor: 3, HaxNotification,
+        formatCoins,
+    });
+    const alice = { id: 1, name: 'Alice' };
+    const bob = { id: 2, name: 'Bob' };
+    const carol = { id: 3, name: 'Carol' };
+
+    sent.length = 0;
+    await club.clubCreateCommand(alice, '!clubcreate');
+    check('clubcreate without both args shows usage', /Использование/.test(sent[0].msg), true);
+
+    sent.length = 0;
+    await club.clubCreateCommand(alice, '!clubcreate Wolves WLF');
+    check('clubcreate fails without enough coins', /Недостаточно монет/.test(sent[0].msg), true);
+    check('a failed creation does not register a club', state.clubs.length, 0);
+
+    sent.length = 0;
+    await club.clubCreateCommand(alice, '!clubcreate Wolves W1F');
+    check('clubcreate rejects a prefix with a digit', /1-4 букв/.test(sent[0].msg), true);
+
+    sent.length = 0;
+    await club.clubCreateCommand(alice, '!clubcreate Wolves TOOLONG');
+    check('clubcreate rejects a prefix longer than 4 letters', /1-4 букв/.test(sent[0].msg), true);
+
+    db.addCoins('AUTH_OWNER', 'Alice', 1000);
+    sent.length = 0;
+    await club.clubCreateCommand(alice, '!clubcreate Falcons FLC');
+    check('clubcreate succeeds once the owner can afford it', /создан/.test(sent[0].msg), true);
+    check('the cost was deducted', db.getBalance('AUTH_OWNER'), 0);
+    check('the club is cached in state', state.clubs.length, 1);
+    check('the owner is registered as a member', state.clubMembers.length, 1);
+    const clubId = state.clubs[0].id;
+    check('the created club has the right name/prefix/owner', { name: state.clubs[0].name, prefix: state.clubs[0].prefix, ownerAuth: state.clubs[0].ownerAuth }, { name: 'Falcons', prefix: 'FLC', ownerAuth: 'AUTH_OWNER' });
+    check('the base slot count is 5', state.clubs[0].slots, 5);
+
+    sent.length = 0;
+    await club.clubCreateCommand(alice, '!clubcreate Wolves WLF');
+    check('a player already in a club cannot create another', /уже состоите/.test(sent[0].msg), true);
+
+    sent.length = 0;
+    club.clubInfoCommand(alice, '!club');
+    check('!club shows the requested "name (members/limit): captain (c)" format', sent[0].msg, 'Falcons (1/5): Alice (c)');
+
+    sent.length = 0;
+    await club.clubInviteCommand(bob, '!clubinvite #1');
+    check('a non-member cannot invite', /не состоите/.test(sent[0].msg), true);
+
+    sent.length = 0;
+    await club.clubInviteCommand(alice, '!clubinvite #2');
+    check('the invite is announced to the whole room', sent[0].id, null);
+    check('the broadcast names both the inviter and the invitee', /Alice пригласил Bob в клуб "Falcons"/.test(sent[0].msg), true);
+    check('bob gets a private invite notification', sent[1].id, 2);
+    check('the invite notification names the club and the 60s window', /Falcons/.test(sent[1].msg) && /60 секунд/.test(sent[1].msg), true);
+
+    sent.length = 0;
+    await club.clubJoinCommand(carol, '!clubjoin');
+    check('clubjoin with no pending invite is rejected', /нет приглашений/.test(sent[0].msg), true);
+
+    sent.length = 0;
+    await club.clubJoinCommand(bob, '!clubjoin');
+    check('bob accepts the invite', /вступил/.test(sent[0].msg), true);
+    check('bob is now cached as a member', state.clubMembers.some((m) => m.auth === 'AUTH_MEMBER'), true);
+
+    sent.length = 0;
+    await club.clubJoinCommand(bob, '!clubjoin');
+    check('a player already in a club cannot join another', /уже состоите/.test(sent[0].msg), true);
+
+    sent.length = 0;
+    await club.clubLeaveCommand(alice, '!clubleave');
+    check('the owner cannot !clubleave — must !clubdisband', /clubdisband/.test(sent[0].msg), true);
+
+    sent.length = 0;
+    await club.clubKickCommand(bob, '!clubkick #1');
+    check('a non-owner cannot kick', /Только владелец/.test(sent[0].msg), true);
+
+    sent.length = 0;
+    await club.clubKickCommand(alice, '!clubkick #1');
+    check('the owner cannot kick themselves', /самого себя/.test(sent[0].msg), true);
+
+    sent.length = 0;
+    await club.clubKickCommand(alice, '!clubkick #2');
+    check('the owner kicks bob', /выгнан/.test(sent[0].msg), true);
+    check('bob is no longer cached as a member', state.clubMembers.some((m) => m.auth === 'AUTH_MEMBER'), false);
+
+    sent.length = 0;
+    await club.clubColorCommand(alice, '!clubcolor zz');
+    check('clubcolor rejects a non-hex value', /Использование/.test(sent[0].msg), true);
+
+    sent.length = 0;
+    await club.clubColorCommand(alice, '!clubcolor ff8800');
+    check('clubcolor accepts a valid hex value', /обновлен/.test(sent[0].msg), true);
+    check('the color is cached in state', state.clubs[0].color, 0xff8800);
+    check('the color is persisted to the db', db.getClub(clubId).color, 0xff8800);
+
+    sent.length = 0;
+    await club.clubEmojiCommand(bob, '!clubemoji 🔥');
+    check('a non-member cannot set the emoji', /не состоите/.test(sent[0].msg), true);
+
+    sent.length = 0;
+    await club.clubEmojiCommand(alice, '!clubemoji ABC');
+    check('clubemoji rejects plain text', /Использование/.test(sent[0].msg), true);
+
+    sent.length = 0;
+    await club.clubEmojiCommand(alice, '!clubemoji 🔥');
+    check('clubemoji accepts a real emoji', /обновлен/.test(sent[0].msg), true);
+    check('the emoji is cached in state', state.clubs[0].emoji, '🔥');
+    check('the emoji is persisted to the db', db.getClub(clubId).emoji, '🔥');
+
+    sent.length = 0;
+    await club.clubEmojiCommand(alice, '!clubemoji');
+    check('clubemoji with no argument clears it', /убран/.test(sent[0].msg), true);
+    check('the cleared emoji is reflected in state', state.clubs[0].emoji, null);
+
+    // Assistant: the one non-owner club role, whose only extra power is
+    // being allowed to !clubinvite. Bob was kicked earlier, so he's free to
+    // be re-invited here as the assistant-sent-invite target.
+    await club.clubInviteCommand(alice, '!clubinvite #3');
+    await club.clubJoinCommand(carol, '!clubjoin');
+    check('carol joined the club for the assistant tests', state.clubMembers.some((m) => m.auth === 'AUTH_OUTSIDER'), true);
+
+    sent.length = 0;
+    club.clubInfoCommand(alice, '!club');
+    check('!club lists a second regular member after the captain', sent[0].msg, 'Falcons (2/5): Alice (c), Carol');
+
+    sent.length = 0;
+    await club.clubAssistantCommand(carol, '!clubassistent Carol');
+    check('a non-owner cannot assign an assistant', /Только владелец/.test(sent[0].msg), true);
+
+    sent.length = 0;
+    await club.clubAssistantCommand(alice, '!clubassistent Alice');
+    check('the owner cannot make themselves the assistant', /не может быть ассистентом/.test(sent[0].msg), true);
+
+    sent.length = 0;
+    await club.clubAssistantCommand(alice, '!clubassistent Nobody');
+    check('assigning a non-member as assistant is rejected', /нет в вашем клубе/.test(sent[0].msg), true);
+
+    sent.length = 0;
+    await club.clubAssistantCommand(alice, '!clubassistent Carol');
+    check('the owner assigns carol as assistant', /теперь ассистент/.test(sent[0].msg), true);
+    check('the assistant is cached in state', state.clubs[0].assistantAuth, 'AUTH_OUTSIDER');
+    check('the assistant is persisted to the db', db.getClub(clubId).assistantAuth, 'AUTH_OUTSIDER');
+
+    sent.length = 0;
+    club.clubInfoCommand(alice, '!club');
+    check('!club lists the assistant with (a) right after the captain', sent[0].msg, 'Falcons (2/5): Alice (c), Carol (a)');
+
+    sent.length = 0;
+    await club.clubInviteCommand(carol, '!clubinvite #2');
+    check('the assistant can invite players too', sent[0].id, null);
+    check('the assistant-sent invite names carol as the inviter', /Carol пригласил Bob/.test(sent[0].msg), true);
+
+    sent.length = 0;
+    await club.clubAssistantCommand(alice, '!clubassistent');
+    check('the owner clears the assistant with no argument', /снят/.test(sent[0].msg), true);
+    check('the cleared assistant is reflected in state', state.clubs[0].assistantAuth, null);
+
+    sent.length = 0;
+    await club.clubInviteCommand(carol, '!clubinvite #2');
+    check('a demoted assistant can no longer invite', /Только владелец или ассистент/.test(sent[0].msg), true);
+
+    sent.length = 0;
+    await club.clubSlotsCommand(alice, '!clubslots');
+    check('clubslots without "buy" shows usage', /Использование/.test(sent[0].msg), true);
+
+    sent.length = 0;
+    await club.clubSlotsCommand(alice, '!clubslots buy');
+    check('clubslots buy fails without enough coins', /Недостаточно монет/.test(sent[0].msg), true);
+    check('the first slot costs 500', /500/.test(sent[0].msg), true);
+
+    db.addCoins('AUTH_OWNER', 'Alice', 500);
+    sent.length = 0;
+    await club.clubSlotsCommand(alice, '!clubslots buy');
+    check('clubslots buy succeeds once affordable', /Куплен/.test(sent[0].msg), true);
+    check('slots went from 5 to 6', state.clubs[0].slots, 6);
+    check('the 500 cost was deducted', db.getBalance('AUTH_OWNER'), 0);
+
+    db.addCoins('AUTH_OWNER', 'Alice', 600);
+    sent.length = 0;
+    await club.clubSlotsCommand(alice, '!clubslots buy');
+    check('the second slot costs 100 more than the first (600)', db.getBalance('AUTH_OWNER'), 0);
+    check('slots went from 6 to 7', state.clubs[0].slots, 7);
+
+    sent.length = 0;
+    await club.clubDisbandCommand(bob, '!clubdisband');
+    check('a non-member cannot disband', /не состоите/.test(sent[0].msg), true);
+
+    sent.length = 0;
+    await club.clubDisbandCommand(carol, '!clubdisband');
+    check('a regular member (not the owner) cannot disband', /Только владелец/.test(sent[0].msg), true);
+
+    sent.length = 0;
+    await club.clubDisbandCommand(alice, '!clubdisband');
+    check('the owner disbands the club', /расформирован/.test(sent[0].msg), true);
+    check('the club is removed from state', state.clubs.length, 0);
+    check('every membership is removed from state', state.clubMembers.length, 0);
+    check('the club is removed from the db', db.getClub(clubId), null);
+
+    sent.length = 0;
+    club.clubInfoCommand(alice, '!club');
+    check('!club after disbanding reports no club', /не состоите/.test(sent[0].msg), true);
+
+    sent.length = 0;
+    club.clubHelpCommand(alice, '!clubhelp');
+    check('!clubhelp lists the club commands', /Команды клуба/.test(sent[0].msg), true);
+    check('!clubhelp documents the slot price', /500 монеток/.test(sent[0].msg), true);
+
+    db.close();
+})();
+
+console.log('\n--- core/commands/trophies.js + db.getTopPlayers(): top-3 trophies against a real sqlite db ---');
+(async () => {
+    const { createSqliteDatabase } = require(path.join(__dirname, '..', 'db', 'sqlite'));
+    const { Trophies } = require(path.join(CORE, 'constants'));
+    const { formatTrophyLabel } = require(path.join(CORE, 'utils'));
+    const { HaxStatistics } = require(path.join(CORE, 'models'));
+    const db = createSqliteDatabase(':memory:');
+    db.init();
+
+    db.savePlayerStats('AUTH_1', Object.assign(new HaxStatistics('P1'), { games: 10, wins: 9, goals: 20, assists: 1, CS: 1, playtime: 100 }));
+    check('getTopPlayers requires a >=5-player quorum before awarding anything', db.getTopPlayers(), { goals: [], assists: [], cs: [], wr: [], pt: [] });
+
+    // Distinct values per category, and AUTH_5 last everywhere, so each
+    // category's top-3 order is unambiguous (no tie-breaking to worry about).
+    db.savePlayerStats('AUTH_2', Object.assign(new HaxStatistics('P2'), { games: 10, wins: 1, goals: 15, assists: 20, CS: 2, playtime: 90 }));
+    db.savePlayerStats('AUTH_3', Object.assign(new HaxStatistics('P3'), { games: 10, wins: 2, goals: 10, assists: 15, CS: 20, playtime: 80 }));
+    db.savePlayerStats('AUTH_4', Object.assign(new HaxStatistics('P4'), { games: 10, wins: 8, goals: 5, assists: 10, CS: 15, playtime: 500 }));
+    db.savePlayerStats('AUTH_5', Object.assign(new HaxStatistics('P5'), { games: 10, wins: 0, goals: 1, assists: 1, CS: 1, playtime: 1 }));
+
+    const top = db.getTopPlayers();
+    check('goals top-3, in order, once 5 players exist', top.goals.map((e) => e.auth), ['AUTH_1', 'AUTH_2', 'AUTH_3']);
+    check('assists top-3, in order', top.assists.map((e) => e.auth), ['AUTH_2', 'AUTH_3', 'AUTH_4']);
+    check('clean-sheets top-3, in order', top.cs.map((e) => e.auth), ['AUTH_3', 'AUTH_4', 'AUTH_2']);
+    check('playtime top-3, in order', top.pt.map((e) => e.auth), ['AUTH_4', 'AUTH_1', 'AUTH_2']);
+    check('winrate top-3, in order (90/80/20%)', top.wr.map((e) => e.auth), ['AUTH_1', 'AUTH_4', 'AUTH_3']);
+    check('only the top 3 are returned, not every player', top.goals.length, 3);
+
+    check('getEquipped starts with no trophy', db.getEquipped('AUTH_1').trophy, null);
+    db.setEquipped('AUTH_1', 'trophy', 'goals');
+    check('setEquipped/getEquipped round-trips the trophy slot', db.getEquipped('AUTH_1').trophy, 'goals');
+    check('getAllEquippedTrophies lists only auths with one equipped', db.getAllEquippedTrophies(), [{ auth: 'AUTH_1', trophy: 'goals' }]);
+
+    // trophiesCommand itself never queries the db for rank — it only ever
+    // reads state.topPlayers (the once-per-match cache roomStats.js
+    // maintains), so it's driven here with a directly-set snapshot rather
+    // than needing a full match simulation.
+    const sent = [];
+    const room = { sendAnnouncement: (msg, id, color, style) => sent.push({ msg, id }) };
+    const authArray = { 1: ['AUTH_TOP'], 2: ['AUTH_SECOND'], 3: ['AUTH_NOT_TOP'] };
+    // setEquipped is an UPDATE, not an upsert (see db/sqlite.js) — a
+    // player_stats row has to already exist for it to take effect, same as
+    // economy.js's equip flow relies on buyItem having created one first.
+    db.addCoins('AUTH_TOP', 'TopScorer', 0);
+    db.addCoins('AUTH_SECOND', 'SecondScorer', 0);
+    db.addCoins('AUTH_NOT_TOP', 'Regular', 0);
+    const state = {
+        topPlayers: { goals: [{ auth: 'AUTH_TOP' }, { auth: 'AUTH_SECOND' }], assists: [], cs: [], wr: [], pt: [] },
+        equippedTrophies: {},
+    };
+    const trophies = require(path.join(CORE, 'commands', 'trophies'))({
+        room, state, authArray, db, Trophies, formatTrophyLabel, announcementColor: 1, errorColor: 2, HaxNotification,
+    });
+    const topPlayer = { id: 1, name: 'TopScorer' };
+    const secondPlayer = { id: 2, name: 'SecondScorer' };
+    const notTopPlayer = { id: 3, name: 'Regular' };
+
+    sent.length = 0;
+    await trophies.trophiesCommand(topPlayer, '!trophy');
+    check('!trophy with no argument lists owned trophies with the gold medal', /🥇Топ-1 голов/.test(sent[0].msg), true);
+    check('!trophy with no argument shows nothing equipped yet', /не выбран/.test(sent[0].msg), true);
+
+    sent.length = 0;
+    await trophies.trophiesCommand(secondPlayer, '!trophy');
+    check('rank 2 is listed with the silver medal', /🥈Топ-2 голов/.test(sent[0].msg), true);
+
+    sent.length = 0;
+    await trophies.trophiesCommand(notTopPlayer, '!trophy goals');
+    check('equipping a trophy you do not hold (outside the top 3) is rejected', /не в топ-3/.test(sent[0].msg), true);
+    check('a rejected equip does not touch state.equippedTrophies', state.equippedTrophies['AUTH_NOT_TOP'], undefined);
+
+    sent.length = 0;
+    await trophies.trophiesCommand(topPlayer, '!trophy nonsense');
+    check('an unknown trophy key shows usage', /Использование/.test(sent[0].msg), true);
+
+    sent.length = 0;
+    await trophies.trophiesCommand(secondPlayer, '!trophy goals');
+    check('rank 2 can equip the same category as rank 1', /Экипирован/.test(sent[0].msg), true);
+    check('the confirmation shows the silver medal for rank 2', /🥈Топ-2 голов/.test(sent[0].msg), true);
+
+    sent.length = 0;
+    await trophies.trophiesCommand(topPlayer, '!trophy goals');
+    check('equipping a trophy you currently hold succeeds', /Экипирован/.test(sent[0].msg), true);
+    check('the equip is cached in state', state.equippedTrophies['AUTH_TOP'], 'goals');
+    check('the equip is persisted to the db', db.getEquipped('AUTH_TOP').trophy, 'goals');
+
+    sent.length = 0;
+    await trophies.trophiesCommand(topPlayer, '!trophy');
+    check('!trophy now shows the equipped trophy with its medal', /Экипирован: 🥇Топ-1 голов/.test(sent[0].msg), true);
+
+    sent.length = 0;
+    await trophies.trophiesCommand(topPlayer, '!trophy none');
+    check('!trophy none clears the equipped trophy', /снят/.test(sent[0].msg), true);
+    check('the clear is cached in state', state.equippedTrophies['AUTH_TOP'], undefined);
+    check('the clear is persisted to the db', db.getEquipped('AUTH_TOP').trophy, null);
+
+    // roomStats.js's updateStats() is the only thing that actually refreshes
+    // state.topPlayers (once per completed match, never per chat message) —
+    // confirm it really calls through to db.getTopPlayers() rather than
+    // leaving the snapshot stale.
+    const rsState = {
+        lastWinner: Team.RED,
+        teamRedStats: [{ id: 1, name: 'P1' }],
+        teamBlueStats: [{ id: 2, name: 'P2' }],
+        players: [1, 2],
+        game: { scores: { time: 300, timeLimit: 300, red: 3, blue: 0, scoreLimit: 3 } },
+    };
+    const rsAuthArray = { 1: ['AUTH_1'], 2: ['AUTH_2'] };
+    const roomStats = require(path.join(CORE, 'stats', 'roomStats'))({
+        room, state: rsState, Team, authArray: rsAuthArray, db, HaxStatistics, HaxNotification,
+        errorColor: 2, infoColor: 1, teamSize: 1,
+        getAssistsPlayer: () => 0, getCSPlayer: () => 0, getGametimePlayer: () => 0, getGoalsPlayer: () => 0,
+        getOwnGoalsPlayer: () => 0, getPlayerComp: (p) => p, getTimeStats: (s) => `${s}s`,
+    });
+    await roomStats.updateStats();
+    check('updateStats() refreshes state.topPlayers via db.getTopPlayers()', rsState.topPlayers.goals[0].auth, 'AUTH_1');
 
     db.close();
 })();
@@ -709,25 +1056,28 @@ console.log('\n--- events/activity.js: MASTER/ADMIN/VIP get a chat prefix, regul
 {
     const Role = { PLAYER: 0, VIP: 1, ADMIN_TEMP: 2, ADMIN_PERM: 3, MASTER: 4 };
     const State = { PLAY: 0, PAUSE: 1, STOP: 2 };
-    const state = { gameState: State.STOP, chooseMode: false, slowMode: 0 };
+    const { Trophies } = require(path.join(CORE, 'constants'));
+    const { formatTrophyLabel } = require(path.join(CORE, 'utils'));
+    const state = { gameState: State.STOP, chooseMode: false, slowMode: 0, clubs: [], clubMembers: [], topPlayers: {}, equippedTrophies: {} };
     const authArray = [];
     authArray[1] = ['AUTH_MASTER'];
     authArray[2] = ['AUTH_ADMIN'];
     authArray[3] = ['AUTH_VIP'];
     authArray[4] = ['AUTH_PLAIN'];
+    authArray[5] = ['AUTH_CLUBBED'];
     // getRole is mocked here (rather than reusing index.js's real hierarchy)
     // since this test only exercises activity.js's own branching logic.
-    const roles = { 1: Role.MASTER, 2: Role.ADMIN_TEMP, 3: Role.VIP, 4: Role.PLAYER };
+    const roles = { 1: Role.MASTER, 2: Role.ADMIN_TEMP, 3: Role.VIP, 4: Role.PLAYER, 5: Role.PLAYER };
     const discordLogs = [];
     const hiddenAdminsSetMock = new Set();
     const activity = require(path.join(CORE, 'events', 'activity'))({
         room, state, authArray, BallTouch: class {}, HaxNotification, Role,
-        Situation: {}, State, Team,
+        Situation: {}, State, Team, Trophies,
         adminChatColor: 'ADMIN_COLOR', masterChatColor: 'MASTER_COLOR', vipChatColor: 'VIP_COLOR',
         commands: {}, discordBot: { sendLog: (m) => discordLogs.push(m) }, errorColor: 2,
         hiddenAdminsSet: hiddenAdminsSetMock,
         muteArray: { getByAuth: () => null },
-        checkGoalKickTouch: () => null, chooseModeFunction: () => false,
+        checkGoalKickTouch: () => null, chooseModeFunction: () => false, formatTrophyLabel,
         getCommand: () => false, getDate: () => 'DATE', getGoalGame: () => null,
         getPlayerComp: () => null, getRole: (p) => roles[p.id],
         playerChat: () => {}, slowModeFunction: () => false, teamChat: () => {},
@@ -736,12 +1086,12 @@ console.log('\n--- events/activity.js: MASTER/ADMIN/VIP get a chat prefix, regul
     sent.length = 0;
     const masterResult = activity.onPlayerChat({ id: 1, name: 'Boss', team: Team.SPECTATORS, admin: true }, 'hello everyone');
     check('MASTER chat is suppressed (native bubble replaced)', masterResult, false);
-    check('MASTER gets a [ВЛАДЕЛЕЦ] prefix', sent[0], { msg: '👑 [ВЛАДЕЛЕЦ] Boss: hello everyone', id: null, style: 'bold' });
+    check('MASTER gets a [СЗД] prefix', sent[0], { msg: '👑 [СЗД] Boss: hello everyone', id: null, style: 'bold' });
 
     sent.length = 0;
     const adminResult = activity.onPlayerChat({ id: 2, name: 'Mod', team: Team.SPECTATORS, admin: true }, 'hi');
     check('ADMIN chat is suppressed', adminResult, false);
-    check('ADMIN gets an [АДМИН] prefix', sent[0], { msg: '🛡️ [АДМИН] Mod: hi', id: null, style: 'bold' });
+    check('ADMIN gets an [АДМ] prefix', sent[0], { msg: '🛡️ [АДМ] Mod: hi', id: null, style: 'bold' });
 
     sent.length = 0;
     const vipResult = activity.onPlayerChat({ id: 3, name: 'Donor', team: Team.SPECTATORS, admin: false }, 'yo');
@@ -763,6 +1113,75 @@ console.log('\n--- events/activity.js: MASTER/ADMIN/VIP get a chat prefix, regul
     check('a hidden MASTER gets no prefix announcement', sent, []);
     check('a hidden MASTER\'s message falls through to the native chat bubble', hiddenMasterResult, undefined);
     hiddenAdminsSetMock.delete(1);
+
+    // Club prefix (core/commands/club.js) — a regular player in a club gets
+    // intercepted just like a VIP/ADMIN/MASTER would, but with the club's
+    // own custom color; a role holder who's ALSO in a club keeps their role
+    // prefix's color and just gets the club tag appended alongside it.
+    state.clubs = [{ id: 1, name: 'Falcons', prefix: 'FLC', ownerAuth: 'AUTH_CLUBBED', color: 0xff8800, slots: 5 }];
+    state.clubMembers = [{ auth: 'AUTH_CLUBBED', clubId: 1, playerName: 'Clubbed' }, { auth: 'AUTH_VIP', clubId: 1, playerName: 'Donor' }];
+
+    sent.length = 0;
+    const clubResult = activity.onPlayerChat({ id: 5, name: 'Clubbed', team: Team.SPECTATORS, admin: false }, 'gg');
+    check('a plain club member is intercepted too', clubResult, false);
+    check('a plain club member gets just the club prefix', sent[0], { msg: '[FLC] Clubbed: gg', id: null, style: 'bold' });
+
+    sent.length = 0;
+    const vipClubResult = activity.onPlayerChat({ id: 3, name: 'Donor', team: Team.SPECTATORS, admin: false }, 'yo');
+    check('a VIP who is also in a club keeps the VIP prefix and gains the club tag', vipClubResult, false);
+    check('the combined prefix shows the club tag before the role prefix', sent[0], { msg: '[FLC] ⭐ [ВИП] Donor: yo', id: null, style: 'bold' });
+
+    state.clubs[0].emoji = '🔥';
+    sent.length = 0;
+    const clubEmojiResult = activity.onPlayerChat({ id: 5, name: 'Clubbed', team: Team.SPECTATORS, admin: false }, 'gg');
+    check('a club with an emoji set shows it in front of the letters', clubEmojiResult, false);
+    check('the emoji lands inside the brackets, before the prefix letters', sent[0], { msg: '[🔥FLC] Clubbed: gg', id: null, style: 'bold' });
+
+    state.clubs = [];
+    state.clubMembers = [];
+
+    // Trophy prefix (core/commands/trophies.js) — only shows while
+    // state.topPlayers still agrees the player holds a top-3 spot; an
+    // equipped-but-lost trophy silently stops appearing instead of lying.
+    // The medal always reflects the player's ACTUAL current rank (their
+    // index in the array), not whatever it was when last equipped.
+    state.equippedTrophies = { AUTH_PLAIN: 'goals' };
+    state.topPlayers = { goals: [{ auth: 'AUTH_PLAIN' }, { auth: 'AUTH_OTHER' }] };
+
+    sent.length = 0;
+    const trophyResult = activity.onPlayerChat({ id: 4, name: 'Regular', team: Team.SPECTATORS, admin: false }, 'nice');
+    check('a plain player currently ranked #1 gets their equipped trophy shown', trophyResult, false);
+    check('the trophy prefix is the gold-medal rank-1 label', sent[0], { msg: '[🥇Топ-1 голов] Regular: nice', id: null, style: 'bold' });
+
+    // Same equipped category, but now ranked 2nd (someone else took 1st) —
+    // the medal updates to silver on its own, no need to !trophy again.
+    state.topPlayers = { goals: [{ auth: 'AUTH_OTHER' }, { auth: 'AUTH_PLAIN' }] };
+    sent.length = 0;
+    const silverResult = activity.onPlayerChat({ id: 4, name: 'Regular', team: Team.SPECTATORS, admin: false }, 'still here');
+    check('dropping to rank 2 is still intercepted', silverResult, false);
+    check('the medal automatically becomes silver at rank 2', sent[0], { msg: '[🥈Топ-2 голов] Regular: still here', id: null, style: 'bold' });
+
+    state.topPlayers = { goals: [{ auth: 'AUTH_X' }, { auth: 'AUTH_Y' }, { auth: 'AUTH_PLAIN' }] };
+    sent.length = 0;
+    const bronzeResult = activity.onPlayerChat({ id: 4, name: 'Regular', team: Team.SPECTATORS, admin: false }, 'barely' );
+    check('dropping to rank 3 is still intercepted', bronzeResult, false);
+    check('the medal automatically becomes bronze at rank 3', sent[0], { msg: '[🥉Топ-3 голов] Regular: barely', id: null, style: 'bold' });
+
+    state.topPlayers = { goals: [{ auth: 'AUTH_X' }, { auth: 'AUTH_Y' }, { auth: 'AUTH_Z' }] };
+    sent.length = 0;
+    const lostTrophyResult = activity.onPlayerChat({ id: 4, name: 'Regular', team: Team.SPECTATORS, admin: false }, 'aw');
+    check('falling out of the top 3 falls through to the native chat bubble again', sent, []);
+    check('a lost trophy is simply not shown, not an error', lostTrophyResult, undefined);
+
+    state.topPlayers = { goals: [{ auth: 'AUTH_MASTER' }] };
+    state.equippedTrophies = { AUTH_MASTER: 'goals' };
+    sent.length = 0;
+    const masterTrophyResult = activity.onPlayerChat({ id: 1, name: 'Boss', team: Team.SPECTATORS, admin: true }, 'gg');
+    check('a MASTER holding #1 shows the trophy before the role prefix', masterTrophyResult, false);
+    check('order is [трофей] then [роль], matching [клуб] [трофей] [роль]', sent[0], { msg: '[🥇Топ-1 голов] 👑 [СЗД] Boss: gg', id: null, style: 'bold' });
+
+    state.topPlayers = {};
+    state.equippedTrophies = {};
 }
 
 console.log('\n--- events/movement.js: auth-bans block a join regardless of connection, small-font auth broadcast on join/leave ---');
@@ -2220,6 +2639,83 @@ console.log('\n--- team/balance.js: a full house finish WITH a genuine spectator
     })();
 }
 
+console.log('\n--- team/balance.js: a genuine surplus hands off to picking on the map a 4v4 needs, not whatever map the just-finished small match was on ---');
+{
+    // Reported live, after a server restart: the first match to finish can
+    // easily be small (e.g. a quick 2v2 on classic, started before
+    // everyone reconnected) while a crowd has ALREADY flooded in as
+    // waiting spectators during it — reaching a genuine 4v4-worth surplus
+    // while the room is still on 'classic'. The surplus/no-surplus
+    // decision only counts players, it doesn't know what map the match was
+    // actually played on — left unguarded, captains would be handed a pick
+    // session on a map that can't actually host 4v4.
+    const State = { PLAY: 0, PAUSE: 1, STOP: 2 };
+    const Team = { RED: 1, BLUE: 2, SPECTATORS: 0 };
+    const players = [
+        { id: 1, team: Team.RED }, { id: 2, team: Team.RED },
+        { id: 3, team: Team.BLUE }, { id: 4, team: Team.BLUE },
+        { id: 5, team: Team.SPECTATORS }, { id: 6, team: Team.SPECTATORS },
+        { id: 7, team: Team.SPECTATORS }, { id: 8, team: Team.SPECTATORS }, { id: 9, team: Team.SPECTATORS },
+    ];
+    const state = {
+        players, chooseMode: false, endGameVariable: true, lastWinner: Team.RED,
+        currentStadium: 'classic', gameState: State.STOP,
+        redCaptainChoice: '', blueCaptainChoice: '', capLeft: false,
+    };
+    state.teamRed = players.filter((p) => p.team === Team.RED);
+    state.teamBlue = players.filter((p) => p.team === Team.BLUE);
+    state.teamSpec = players.filter((p) => p.team === Team.SPECTATORS);
+
+    const stadiumCalls = [];
+    const roomMock = {
+        getScores: () => ({ red: 0, blue: 0, scoreLimit: 3, time: 0, timeLimit: 3 }),
+        setScoreLimit: () => {}, setTimeLimit: () => {}, setCustomStadium: () => {}, setDefaultStadium: () => {},
+        stopGame: () => {}, startGame: () => {}, pauseGame: () => {}, kickPlayer: () => {},
+        sendAnnouncement: () => {},
+        setPlayerTeam: (id, team) => {
+            const player = state.players.find((p) => p.id === id);
+            if (!player) return;
+            player.team = team;
+            state.teamRed = state.players.filter((p) => p.team === Team.RED);
+            state.teamBlue = state.players.filter((p) => p.team === Team.BLUE);
+            state.teamSpec = state.players.filter((p) => p.team === Team.SPECTATORS);
+            balanceRef.handlePlayersTeamChange(null);
+        },
+    };
+    let balanceRef;
+    const stadiumCommand = (emptyPlayer, cmd) => {
+        stadiumCalls.push(cmd);
+        state.currentStadium = cmd.replace('!', '');
+    };
+    const createButtonHelpers = require(path.join(CORE, 'team', 'buttons'));
+    const buttons = createButtonHelpers({ room: roomMock, state, Team, getRandomInt: () => 0 });
+    const createChoosingHelpers = require(path.join(CORE, 'team', 'choosing'));
+    const choosing = createChoosingHelpers({
+        room: roomMock, state, Team, HaxNotification: { CHAT: 1, MENTION: 2 },
+        announcementColor: 1, errorColor: 2, infoColor: 3, warningColor: 4,
+        chooseModeSlowMode: 1, chooseTime: 20, defaultSlowMode: 0.5, SMSet: new Set(), getRandomInt: () => 0,
+    });
+    const balance = require(path.join(CORE, 'team', 'balance'))({
+        room: roomMock, state, Team, State, HaxNotification: { CHAT: 1 },
+        emptyPlayer: {}, infoColor: 5, scoreLimit: 3, teamSize: 4, timeLimit: 5,
+        activateChooseMode: choosing.activateChooseMode, blueToSpecButton: buttons.blueToSpecButton,
+        choosePlayer: choosing.choosePlayer, deactivateChooseMode: choosing.deactivateChooseMode,
+        endGame: () => {}, getRandomInt: () => 0,
+        getSpecList: choosing.getSpecList, instantRestart: () => {}, randomButton: buttons.randomButton,
+        redToSpecButton: buttons.redToSpecButton, resetButton: buttons.resetButton, resumeGame: () => {},
+        stadiumCommand, swapButton: buttons.swapButton, topButton: buttons.topButton,
+    });
+    balanceRef = balance;
+
+    balance.handlePlayersStop(null);
+    (async () => {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        check('chooseMode activates for the genuine surplus', state.chooseMode, true);
+        check('the stadium is switched to big BEFORE/as picking starts, not left on classic', state.currentStadium, 'big');
+        check('the switch actually went through room.stadiumCommand', stadiumCalls, ['!big']);
+    })();
+}
+
 console.log('\n--- team/balance.js: a 2v1 finish with zero spectators reshuffles WHO sits out, not the same loser every time ---');
 {
     // Reported bug: "игра если закончилась 2x1, начнется 2x1... надо
@@ -3395,6 +3891,7 @@ console.log('\n--- core/economy.js: coin awards, playtime ticker, shop/inventory
         teamRed: [{ id: 1, name: 'Red1' }],
         teamBlue: [{ id: 2, name: 'Blue1' }],
         playersAll: [{ id: 1, name: 'Red1' }, { id: 2, name: 'Blue1' }],
+        clubMembers: [],
     };
 
     const db = makeDbMock();
@@ -3438,6 +3935,39 @@ console.log('\n--- core/economy.js: coin awards, playtime ticker, shop/inventory
     economy.tickPlaytime(600);
     check('playtime never accrues while the game is not actually playing', await db.getBalance('AUTH_RED1'), 85);
     state.gameState = State.PLAY;
+
+    // Club-teammate coin bonus (state.clubMembers, populated by
+    // commands/club.js) — +25%, rounded, on every payout when at least one
+    // clubmate shares the player's own side. Uses its own temporary roster
+    // so it doesn't disturb AUTH_RED1/AUTH_BLUE1's running balances, which
+    // the shop tests below still depend on.
+    const savedTeamRed = state.teamRed;
+    const savedTeamBlue = state.teamBlue;
+    authArray[4] = ['AUTH_CLUBBED_A'];
+    authArray[5] = ['AUTH_CLUBBED_B'];
+    authArray[6] = ['AUTH_SOLO'];
+    state.clubMembers = [
+        { auth: 'AUTH_CLUBBED_A', clubId: 1, playerName: 'ClubbedA' },
+        { auth: 'AUTH_CLUBBED_B', clubId: 1, playerName: 'ClubbedB' },
+    ];
+    state.teamRed = [{ id: 4, name: 'ClubbedA' }, { id: 5, name: 'ClubbedB' }];
+    state.teamBlue = [{ id: 6, name: 'Solo' }];
+
+    sentLocal.length = 0;
+    await economy.awardMatchCoins(Team.RED);
+    check('two clubmates on the same winning side both get +25%', await db.getBalance('AUTH_CLUBBED_A'), 63);
+    check('+25% applies to the other clubmate too', await db.getBalance('AUTH_CLUBBED_B'), 63);
+    check('a player with no clubmate on their own side gets the plain rate', await db.getBalance('AUTH_SOLO'), 25);
+
+    sentLocal.length = 0;
+    economy.tickPlaytime(600);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    check('the playtime bonus also applies to clubmates on the field together', await db.getBalance('AUTH_CLUBBED_A'), 63 + 13);
+    check('a solo player\'s playtime payout is unboosted', await db.getBalance('AUTH_SOLO'), 25 + 10);
+
+    state.teamRed = savedTeamRed;
+    state.teamBlue = savedTeamBlue;
+    state.clubMembers = [];
 
     // !balance: a plain, on-demand balance check.
     sentLocal.length = 0;

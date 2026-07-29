@@ -59,6 +59,7 @@ const {
     Role,
     HaxNotification,
     Situation,
+    Trophies,
     welcomeColor,
     announcementColor,
     infoColor,
@@ -101,6 +102,7 @@ const {
     generateRoomPassword,
     formatBanRemaining,
     formatCoins,
+    formatTrophyLabel,
 } = require('../core/utils');
 const {
     getIdReport,
@@ -364,6 +366,23 @@ state.streak = 0;
 state.adminList = (await db.getAdmins()).map((a) => [a.auth, a.playerName]);
 state.vipList = (await db.getVips()).map((v) => [v.auth, v.playerName]);
 const masterList = await db.getMasters();
+
+// Player clubs (see core/commands/club.js) — same in-memory cache pattern
+// as adminList/vipList above, so the chat prefix (events/activity.js) never
+// needs a DB round trip per message.
+state.clubs = await db.getAllClubs();
+state.clubMembers = await db.getAllClubMembers();
+
+// Trophies (!trophy, see core/commands/trophies.js) — state.topPlayers is
+// who currently ranks top-3 in each stat (refreshed once per completed
+// match, see stats/roomStats.js's updateStats()); state.equippedTrophies is
+// each player's own chosen category (auth -> trophy key), same
+// in-memory-cache reasoning as clubs/adminList/vipList above.
+state.topPlayers = await db.getTopPlayers();
+state.equippedTrophies = (await db.getAllEquippedTrophies()).reduce((acc, row) => {
+    acc[row.auth] = row.trophy;
+    return acc;
+}, {});
 
 /* GAME */
 
@@ -950,6 +969,7 @@ const {
     printPlayerStats,
 } = createPrintStats({
     getTimeStats,
+    db,
 });
 
 /* FETCH FUNCTIONS */
@@ -1054,6 +1074,49 @@ const {
     getCommands: () => commands,
 });
 
+/* CLUBS */
+
+const createClubCommands = require('../core/commands/club');
+const {
+    clubCreateCommand,
+    clubInviteCommand,
+    clubJoinCommand,
+    clubLeaveCommand,
+    clubKickCommand,
+    clubAssistantCommand,
+    clubDisbandCommand,
+    clubColorCommand,
+    clubEmojiCommand,
+    clubSlotsCommand,
+    clubInfoCommand,
+    clubHelpCommand,
+} = createClubCommands({
+    room,
+    state,
+    authArray,
+    db,
+    announcementColor,
+    errorColor,
+    successColor,
+    HaxNotification,
+    formatCoins,
+});
+
+/* TROPHIES */
+
+const createTrophyCommands = require('../core/commands/trophies');
+const { trophiesCommand } = createTrophyCommands({
+    room,
+    state,
+    authArray,
+    db,
+    Trophies,
+    formatTrophyLabel,
+    announcementColor,
+    errorColor,
+    HaxNotification,
+});
+
 /* COMMANDS */
 
 // Built last: the command table refers to the handlers above, and helpCommand
@@ -1100,6 +1163,19 @@ const commands = createCommands({
     unequipCommand,
     addCoinsCommand,
     balanceCommand,
+    clubCreateCommand,
+    clubInviteCommand,
+    clubJoinCommand,
+    clubLeaveCommand,
+    clubKickCommand,
+    clubAssistantCommand,
+    clubDisbandCommand,
+    clubColorCommand,
+    clubEmojiCommand,
+    clubSlotsCommand,
+    clubInfoCommand,
+    clubHelpCommand,
+    trophiesCommand,
 });
 
 stadiumCommand(emptyPlayer, "!training");
@@ -1162,6 +1238,7 @@ Object.assign(room, wrapEventHandlers(createActivityEvents({
     Situation,
     State,
     Team,
+    Trophies,
     adminChatColor,
     commands,
     discordBot,
@@ -1172,6 +1249,7 @@ Object.assign(room, wrapEventHandlers(createActivityEvents({
     vipChatColor,
     checkGoalKickTouch,
     chooseModeFunction,
+    formatTrophyLabel,
     getCommand,
     getDate,
     getGoalGame,

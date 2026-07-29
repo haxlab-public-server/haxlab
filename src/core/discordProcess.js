@@ -46,7 +46,7 @@ const db = createDatabaseApi();
 db.init();
 
 const createPrintStats = require('./stats/print');
-const { printPlayerStats } = createPrintStats({ getTimeStats });
+const { printPlayerStats } = createPrintStats({ getTimeStats, db });
 
 // Mirrors the room's live roster, kept in sync via 'roster' messages from
 // the parent (sent on every join/leave) — this process has no direct access

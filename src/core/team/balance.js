@@ -846,6 +846,31 @@ module.exports = function createTeamBalance({
                             // it explicitly instead of waiting out its timer.
                             clearTimeout(state.removingTimeout);
                             state.removingPlayers = false;
+                            // Bug (reported live, after a server restart): a
+                            // genuine surplus is detected purely by count —
+                            // it doesn't care what map the just-concluded
+                            // match was actually played on. Right after a
+                            // restart, the first match to finish can easily
+                            // be small (e.g. a quick 2v2 on classic, started
+                            // before everyone reconnected) while a crowd has
+                            // ALREADY flooded in as waiting spectators during
+                            // it — reaching a genuine 4v4-worth surplus while
+                            // the room is still on 'classic'. Left alone,
+                            // captains would pick on a map that can't
+                            // actually host 4v4 (reported live: "капитанский
+                            // режим на classic"). Switch to the map a real
+                            // full house needs FIRST, same as the exact-4/
+                            // exact-6 branches below already do before their
+                            // own rebuild — safe here since the match has
+                            // already fully stopped, unlike balanceTeams()'s
+                            // own identical pick branch (which can't do this:
+                            // that one fires mid-LIVE-match, where switching
+                            // stadium would cut the game off).
+                            if (state.currentStadium != desiredStadiumFor(teamSize)) {
+                                setTimeout(() => {
+                                    stadiumCommand(emptyPlayer, `!${desiredStadiumFor(teamSize)}`);
+                                }, 5);
+                            }
                             activateChooseMode();
                             choosePlayer();
                             return;
