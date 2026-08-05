@@ -7,8 +7,8 @@
  * config.js, read by the orchestrator — see src/index.js) and get injected
  * into the page separately as window.__secrets, rather than living here.
  */
-const roomName = '🧪 HaxLab | Добавлена экономика !shop 🧪'; // room name
-const maxPlayers = 16;
+const roomName = '🧪 HaxLab | Новый сезон 🧪'; // room name
+const maxPlayers = 20;
 const roomPublic = true;
 const geo = { code: 'RU', lat: 55.7558, lon: 37.6173 }; // Moscow — shown as the room's flag/location
 
@@ -22,9 +22,13 @@ const HAXBALL_TOKEN_LENGTH = 39;
 // specifically so this function works identically whether called from the
 // orchestrator (old bootstrap, pre-migration) or from inside the page,
 // where it's called with whatever token window.__secrets carried in.
-function buildGameConfig(token) {
+// testMode is the same story — set via TEST_MODE (see npm run test /
+// HaxBot_test.js), which only exists as process.env on the orchestrator
+// side, so it has to cross into the page as a plain boolean too rather than
+// being read here directly.
+function buildGameConfig(token, testMode = false) {
     const gameConfig = {
-        roomName,
+        roomName: testMode ? `[TEST] ${roomName}` : roomName,
         maxPlayers,
         public: roomPublic,
         noPlayer: true,

@@ -84,6 +84,15 @@ function formatBanRemaining(expiresAt) {
     return `${minutesLeft} мин.`;
 }
 
+// Same rounding-up reasoning as formatBanRemaining, but in days — used by
+// !setvip/!vips (see commands/master.js), which grant VIP for a number of
+// days rather than minutes.
+function formatVipRemaining(expiresAt) {
+    if (!expiresAt) return 'навсегда';
+    const daysLeft = Math.max(1, Math.ceil((new Date(expiresAt).getTime() - Date.now()) / (24 * 60 * 60000)));
+    return `${daysLeft} дн.`;
+}
+
 // Russian noun pluralization for the coin economy (!shop/!inventory/etc.) —
 // монетка (1, 21, 31...), монетки (2-4, 22-24...), монеток (0, 5-20, 25-30...).
 function formatCoins(amount) {
@@ -100,12 +109,46 @@ const TROPHY_MEDALS = { 1: '🥇', 2: '🥈', 3: '🥉' };
 
 // `trophies` is constants.js's Trophies map (category -> stat-name
 // fragment, e.g. { goals: 'голов', ... }); `rank` is the player's ACTUAL
-// current position (1-3) in that category — never stored, always looked up
-// fresh against state.topPlayers, so !trophy (commands/trophies.js) and the
-// chat prefix (events/activity.js) render the exact same label for a given
-// (category, rank) and it updates the moment the underlying rank does.
-function formatTrophyLabel(trophies, category, rank) {
-    return `${TROPHY_MEDALS[rank]}Топ-${rank} ${trophies[category]}`;
+// current position (1-3) in that category. `season` is always shown (see
+// commands/trophies.js) — S0, S1, ... — so a frozen past-season title (see
+// resolveTrophyRank below) reads distinctly from a live current-season one
+// even when the category/rank happen to match.
+function formatTrophyLabel(trophies, category, rank, season) {
+    return `${TROPHY_MEDALS[rank]}Топ-${rank} ${trophies[category]} S${season}`;
+}
+
+// commands/trophies.js stores a player's !trophy pick as either a bare
+// category ("goals" — the LIVE current-season standing, re-checked every
+// render against state.topPlayers) or "legacy:<season>:<category>" (a
+// specific already-CLOSED season's frozen result, read from
+// state.seasonTrophies instead — see db.closeSeason/getSeasonTrophies).
+// Returns null for an empty/missing key.
+function parseEquippedTrophy(key) {
+    if (!key) return null;
+    const match = /^legacy:(\d+):(.+)$/.exec(key);
+    return match ? { legacy: true, season: Number(match[1]), category: match[2] } : { legacy: false, category: key };
+}
+
+function encodeLegacyTrophyKey(season, category) {
+    return `legacy:${season}:${category}`;
+}
+
+// Resolves a stored !trophy pick (see parseEquippedTrophy) to the actual
+// { season, category, rank } to display right now — or null if it no longer
+// applies (a live pick the player has since fallen out of top-3 for) or
+// never applied (a legacy pick for a season/category/auth combo with no
+// matching row at all). Shared by commands/trophies.js (the !trophy summary)
+// and events/activity.js (the per-message chat prefix) so the two can never
+// disagree on what a given equipped_trophy value currently means.
+function resolveTrophyRank(key, auth, currentSeason, topPlayers, seasonTrophies) {
+    const parsed = parseEquippedTrophy(key);
+    if (!parsed) return null;
+    if (!parsed.legacy) {
+        const index = (topPlayers[parsed.category] ?? []).findIndex((e) => e.auth === auth);
+        return index === -1 ? null : { season: currentSeason, category: parsed.category, rank: index + 1 };
+    }
+    const row = seasonTrophies.find((t) => t.season === parsed.season && t.category === parsed.category && t.auth === auth);
+    return row ? { season: row.season, category: row.category, rank: row.rank } : null;
 }
 
 module.exports = {
@@ -126,6 +169,10 @@ module.exports = {
     findFirstNumberCharString,
     generateRoomPassword,
     formatBanRemaining,
+    formatVipRemaining,
     formatCoins,
     formatTrophyLabel,
+    parseEquippedTrophy,
+    encodeLegacyTrophyKey,
+    resolveTrophyRank,
 };

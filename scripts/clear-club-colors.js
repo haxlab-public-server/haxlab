@@ -1,8 +1,8 @@
 /*
  * Clears every club's custom chat color back to the default — leaves
- * everything else (the !clubcolors buy unlock, prefix, emoji, members,
+ * everything else (the !club color buy unlock, prefix, emoji, members,
  * slots) untouched, so a club that already paid to unlock custom colors
- * can just set a new one with !clubcolor rather than buying the unlock
+ * can just set a new one with !club color rather than buying the unlock
  * again. No in-game command for this on purpose: it's a blunt, all-clubs
  * reset, not something a single club owner should be able to trigger for
  * everyone else's club too.

@@ -15,11 +15,14 @@
  * changes the real physics collision radius, so making it a standing equip
  * would mean spending coins to change the game's balance. Confined to the
  * celebration window, it never affects ongoing play (see playGoalSizeEffect).
- * 'small'/'big' are further upgradeable — 5 levels each, ±2 radius per
- * level off the default 15, priced 100 more per level (see shopItems.js's
- * `upgradeable` items and priceForLevel/radiusForLevel below) — !shop <id>
- * on an already-owned tiered item upgrades it in place rather than
- * rejecting "already owned".
+ * 'small'/'big' are further upgradeable — 10 levels each, ±1 radius per
+ * level off the default 15, priced 1000 more per level (level N costs
+ * N*1000 — see shopItems.js's `upgradeable` items and
+ * priceForLevel/radiusForLevel below) — !shop <id> on an already-owned
+ * tiered item upgrades it in place rather than rejecting "already owned".
+ * (Was 5 levels of ±2 before — see scripts/migrate-size-levels.js for the
+ * one-time level-doubling that kept existing owners' actual radius the
+ * same across that change.)
  *
  * 'form' is NOT personal — it's a whole-SIDE decision, applied with a single
  * room.setTeamColors(team, angle, textColor, colors) call per side rather
@@ -29,6 +32,13 @@
  * determineSideForm). If both sides land on the same form, red wears its
  * home color and blue switches to its away color so they're never identical
  * (see applyTeamForms).
+ * Some forms are `vipOnly` (see shopItems.js) — these outrank a non-VIP
+ * captain's own pick entirely: if ANY current VIP on a side has one
+ * equipped, that's what the side wears (randomly chosen if more than one
+ * VIP on the same side has one), before the captain's own choice is even
+ * considered. Re-checked live on every call, not cached — a VIP form drops
+ * out of consideration the instant its wearer's VIP itself lapses, same as
+ * goalAnimation's access gate (see hasGoalAnimationAccess).
  *
  * Mutable room state is reached through `state`, never captured by value.
  */
@@ -45,18 +55,64 @@ module.exports = function createEconomy({
     errorColor,
     formatCoins,
     getRandomInt,
+    playSmokeAnimation,
+    playFireworksAnimation,
+    Role,
+    getRole,
 }) {
-    const WIN_COINS = 50;
-    const LOSS_COINS = 25;
+    const WIN_COINS = 10;
+    const LOSS_COINS = 5;
     const PLAYTIME_INTERVAL_SECONDS = 10 * 60;
-    const PLAYTIME_COINS = 10;
+    const PLAYTIME_COINS = 1;
     const GOAL_CELEBRATION_DURATION_MS = 3000;
+    // Daily login streak (see claimDailyBonus, called from
+    // events/movement.js's onPlayerJoin): day N pays N*DAILY_BONUS_STEP,
+    // capping at day DAILY_MAX_STREAK — one more day after that wraps back
+    // around to day 1 instead of growing forever.
+    const DAILY_BONUS_STEP = 5;
+    const DAILY_MAX_STREAK = 30;
     // Two clubmates (see commands/club.js) on the same side get a coin
     // bonus — applies uniformly to every payout (win, loss, playtime tick).
     const CLUB_TEAMMATE_MULTIPLIER = 1.25;
 
     const itemsById = new Map(items.map((item) => [item.id, item]));
-    const CATEGORY_LABELS = { form: 'Формы', size: 'Размер шара после гола', goalAnimation: 'Аватарка после гола' };
+    // !shop display split only — item.type stays 'goalAnimation' for both
+    // (access gating, equip slot, everything else) since smoke/fireworks
+    // are still that same VIP-gated slot underneath. This just separates
+    // the simple avatar-flash items from the bigger disc-based spectacle
+    // ones ("Аватарка после гола" was misleading for a full smoke/fireworks
+    // burst — neither touches the avatar at all) into their own listed
+    // section, purely for readability.
+    const isBigGoalAnimation = (item) => item.type === 'goalAnimation' && (item.smokeColor || item.smokeFamily || item.fireworks);
+    const CATEGORY_LABELS = {
+        form: 'Формы',
+        size: 'Размер шара после гола',
+        goalAnimation: 'Аватарка после гола',
+        bigGoalAnimation: 'Анимации после гола',
+    };
+
+    // goalAnimation items (see shopItems.js) are a VIP perk — free for any
+    // VIP+, or unlocked for anyone the moment they own the smoke bundle or
+    // fireworks (see shopItems.js's `grantsAccess` and the smoke family's
+    // `smokeFamily`/`hidden` items) — there's no separate standalone unlock
+    // purchase anymore, buying either of those IS the unlock.
+    const SMOKE_COLOR_ITEM_IDS = items.filter((item) => item.smokeColor).map((item) => item.id);
+    const ACCESS_GRANTING_ITEM_IDS = items.filter((item) => item.grantsAccess).map((item) => item.id);
+
+    async function hasGoalAnimationAccess(player) {
+        if (getRole(player) >= Role.VIP) return true;
+        const auth = getAuth(player);
+        const checks = [SMOKE_COLOR_ITEM_IDS[0], ...ACCESS_GRANTING_ITEM_IDS].map((id) => db.ownsItem(auth, id));
+        return (await Promise.all(checks)).some(Boolean);
+    }
+
+    // Whether `auth` owns the smoke family — checked via a single
+    // representative color rather than the (never actually owned, see
+    // shopCommand's smokeFamily branch) bundle id itself, since buying any
+    // one smoke color always grants every sibling atomically.
+    function ownsSmokeFamily(auth) {
+        return db.ownsItem(auth, SMOKE_COLOR_ITEM_IDS[0]);
+    }
 
     // Level N's price/radius for an `upgradeable` size item (see
     // shopItems.js) — level 1 is the first purchase (level 0 -> 1), up
@@ -162,32 +218,74 @@ module.exports = function createEconomy({
         }
     }
 
+    // Called once per player from onPlayerJoin (see events/movement.js) —
+    // db.claimDailyBonus itself is what actually decides, atomically, whether
+    // today's already been claimed and what the resulting streak/amount is;
+    // this just reports the outcome. A silent no-op (no message at all) if
+    // they already claimed today, so reconnecting/ghost-kick-rejoining never
+    // spams the same player with "already claimed" noise.
+    async function claimDailyBonus(player) {
+        const auth = getAuth(player);
+        const result = await db.claimDailyBonus(auth, player.name, DAILY_BONUS_STEP, DAILY_MAX_STREAK);
+        if (!result) return;
+        room.sendAnnouncement(
+            `🎁 Ежедневный бонус: день ${result.streak}/${DAILY_MAX_STREAK}, +${formatCoins(result.amount)} ! Баланс: ${formatCoins(result.newBalance)}`,
+            player.id,
+            announcementColor,
+            'bold',
+            HaxNotification.CHAT
+        );
+    }
+
     /* COSMETIC APPLICATION */
 
     // A side's form isn't a personal choice — it's whichever form item its
     // captain (state.teamRed[0]/state.teamBlue[0], the same "captain" concept
     // team/choosing.js already uses for picking) has equipped, or — if the
     // captain hasn't equipped one — a random pick among teammates who have.
+    // `vipOnly` forms (see shopItems.js) outrank all of that: if any CURRENT
+    // VIP on the side has one equipped, it wins outright, before the
+    // captain's own pick is even looked at — a non-VIP captain's ordinary
+    // form never overrides a teammate's VIP one. Everything is fetched and
+    // filtered fresh on every call (no caching) specifically so a lapsed VIP
+    // grant makes their vipOnly form stop counting immediately, without
+    // needing to be re-equipped — same live-recheck reasoning as
+    // hasGoalAnimationAccess.
     // Returns { item, sourcePlayer } (not just a color) — the caller still
     // needs to decide home/away, and announceTeamForms below needs to credit
     // whoever the form actually came from.
     async function determineSideForm(teamPlayers) {
         if (teamPlayers.length === 0) return null;
         const captain = teamPlayers[0];
-        const captainEquipped = await db.getEquipped(getAuth(captain));
-        if (captainEquipped.form) {
-            const item = itemsById.get(captainEquipped.form);
-            return item ? { item, sourcePlayer: captain } : null;
-        }
-
         const equippedList = await Promise.all(teamPlayers.map((p) => db.getEquipped(getAuth(p))));
         const candidates = teamPlayers
-            .map((player, i) => ({ player, formId: equippedList[i].form }))
-            .filter((c) => c.formId);
-        if (candidates.length === 0) return null;
-        const chosen = candidates[getRandomInt(candidates.length)];
-        const item = itemsById.get(chosen.formId);
-        return item ? { item, sourcePlayer: chosen.player } : null;
+            .map((player, i) => ({ player, item: itemsById.get(equippedList[i].form) }))
+            .filter((c) => c.item);
+
+        const vipCandidates = candidates.filter((c) => c.item.vipOnly && getRole(c.player) >= Role.VIP);
+        if (vipCandidates.length > 0) {
+            const chosen = vipCandidates[getRandomInt(vipCandidates.length)];
+            return { item: chosen.item, sourcePlayer: chosen.player };
+        }
+
+        // Non-VIP-only candidates only from here — a vipOnly form equipped
+        // by someone whose VIP has lapsed is simply invisible to the rest of
+        // this function too, not just excluded from the priority tier above.
+        const plainCandidates = candidates.filter((c) => !c.item.vipOnly);
+        // Current-season forms outrank retired ones (see shopItems.js's
+        // `retired`) the same way vipOnly outranks plain above: if ANYONE on
+        // the side has a current form equipped, it's used — even over the
+        // CAPTAIN's own retired one — and a retired form is only ever shown
+        // when nobody on the side has a current one at all.
+        const newCandidates = plainCandidates.filter((c) => !c.item.retired);
+        const pickFrom = newCandidates.length > 0 ? newCandidates : plainCandidates.filter((c) => c.item.retired);
+
+        const captainChoice = pickFrom.find((c) => c.player.id === captain.id);
+        if (captainChoice) return { item: captainChoice.item, sourcePlayer: captain };
+
+        if (pickFrom.length === 0) return null;
+        const chosen = pickFrom[getRandomInt(pickFrom.length)];
+        return { item: chosen.item, sourcePlayer: chosen.player };
     }
 
     // room.setTeamColors(team, angle, textColor, colors) sets a whole side's
@@ -199,6 +297,26 @@ module.exports = function createEconomy({
     // form-owner left/switched (setTeamColors doesn't auto-revert on its own).
     const DEFAULT_RED_KIT = { colors: [0xe56e56], textColor: 0xffffff, angle: 0 };
     const DEFAULT_BLUE_KIT = { colors: [0x6a8ef5], textColor: 0xffffff, angle: 0 };
+
+    // Same ranking determineSideForm's own tiers already imply: vipOnly >
+    // current-season plain > retired. Only used to break a TIE between two
+    // DIFFERENT forms flagged as clashing (see clashesWith below) — it has
+    // no bearing on which form a side picked in the first place.
+    function formPriority(item) {
+        if (item.vipOnly) return 2;
+        if (item.retired) return 0;
+        return 1;
+    }
+
+    // Whether two DIFFERENT forms are flagged as visually clashing (see
+    // shopItems.js's `clashesWith`) — curated by hand per pair, same
+    // reasoning as clashesWithDefault below (real color-distance math would
+    // be its own can of worms; a short manually-checked list is simpler and
+    // has no false positives). Checked symmetrically since the flag only
+    // needs to live on one side of a pair.
+    function formsClash(a, b) {
+        return Boolean(a.clashesWith?.includes(b.id) || b.clashesWith?.includes(a.id));
+    }
 
     // Recomputes and re-applies BOTH sides' colors — call this on any roster
     // change to either team (a new captain, a teammate joining/leaving that
@@ -218,6 +336,17 @@ module.exports = function createEconomy({
         // home, blue switches to its away variant so they're never twinning.
         if (red && blue && red.item.id === blue.item.id) {
             blueKit = blue.item.away;
+        } else if (red && blue && formsClash(red.item, blue.item)) {
+            // Two DIFFERENT forms that are specifically flagged as visually
+            // clashing (see shopItems.js's `clashesWith`) — e.g. a retired
+            // form vs a current one, or a plain form vs a near-identical
+            // vipOnly one. ONLY the flagged pairs defer like this; two
+            // different forms that just happen to both be old (or both be
+            // current) never force each other away. The lower-priority side
+            // (see formPriority: vipOnly > current > retired; red wins an
+            // exact tie, same as the same-form case above) wears away.
+            if (formPriority(red.item) < formPriority(blue.item)) redKit = red.item.away;
+            else blueKit = blue.item.away;
         } else {
             // The other side isn't wearing a form at all here (it's about to
             // fall back to DEFAULT_RED_KIT/DEFAULT_BLUE_KIT below) — a form
@@ -257,11 +386,32 @@ module.exports = function createEconomy({
 
     // Not a persistent look — briefly swaps the scorer's avatar in, then back
     // out, so it reads as a "goal animation" rather than a permanent skin.
+    // A `smokeColor` item (see shopItems.js) is a different kind of
+    // celebration entirely — a disc-based smoke burst at the goal instead
+    // of an avatar swap (see smokeAnimation.js) — and returns early rather
+    // than falling through to the avatar logic below.
     async function playGoalAnimation(player) {
         const equipped = await db.getEquipped(getAuth(player));
         if (!equipped.goalAnimation) return;
         const item = itemsById.get(equipped.goalAnimation);
         if (!item) return;
+        // Re-checked live, not just at buy/equip time: a VIP grant can lapse
+        // mid-session (see !setvip) without the player ever unequipping —
+        // their goalAnimation stays wearable-in-the-db but simply stops
+        // firing the moment VIP (or a permanent 'unlock' purchase) is gone.
+        if (!(await hasGoalAnimationAccess(player))) return;
+        if (item.smokeColor) {
+            // player.team is guaranteed to be the scoring side here — the
+            // caller (gameManagement.js's onTeamGoal) only ever invokes
+            // playGoalAnimation for a genuine goal (scorer.team === team),
+            // never an own goal.
+            await playSmokeAnimation({ room, Team, stadium: state.currentStadium, team: player.team, colorName: item.smokeColor });
+            return;
+        }
+        if (item.fireworks) {
+            await playFireworksAnimation({ room, Team, stadium: state.currentStadium, team: player.team });
+            return;
+        }
         room.setPlayerAvatar(player.id, item.avatar);
         setTimeout(() => {
             // The scorer may have left in the meantime — only revert if
@@ -304,9 +454,17 @@ module.exports = function createEconomy({
     /* COMMANDS */
 
     // `level` is only meaningful (and only ever passed) for upgradeable
-    // items — everything else still just shows its flat price.
+    // items — everything else still just shows its flat price. `retired`
+    // items (see shopItems.js) never show a price at all — showing their old
+    // price would read as "still buyable at this price", which is exactly
+    // wrong (see shopCommand's unconditional retired rejection). This only
+    // ever actually renders for an existing owner, in !inventory — retired
+    // items are excluded from formatCatalogSection's !shop listing entirely.
     function formatItemLine(item, owned, equippedId, level) {
         const tag = !owned ? '' : item.id === equippedId ? ' [надето]' : ' [куплено]';
+        if (item.retired) {
+            return `${item.id} — ${item.name} (снят с продажи)${tag}`;
+        }
         if (item.upgradeable) {
             const currentLevel = level ?? 0;
             const progress = `уровень ${currentLevel}/${item.maxLevel}`;
@@ -315,12 +473,32 @@ module.exports = function createEconomy({
                 : `след.: ${formatCoins(priceForLevel(item, currentLevel + 1))}`;
             return `${item.id} — ${item.name} (${progress}, ${nextStep})${tag}`;
         }
-        return `${item.id} — ${item.name} (${formatCoins(item.price)})${tag}`;
+        return `${item.id} — ${item.name} (${item.price === 0 ? 'бесплатно' : formatCoins(item.price)})${tag}`;
     }
 
-    function formatCatalogSection(type, owned, equipped, levels) {
-        const lines = items.filter((i) => i.type === type).map((i) => formatItemLine(i, owned.includes(i.id), equipped[type], levels[i.id]));
-        return `${CATEGORY_LABELS[type]}:\n${lines.join('\n')}`;
+    // The smoke bundle (see shopItems.js's `smokeFamily`) is never itself
+    // recorded as owned (see shopCommand's smokeFamily branch below) — its
+    // "owned" status for display purposes is really "owns the family",
+    // checked via any one representative color instead.
+    function isOwned(item, owned) {
+        return item.smokeFamily ? SMOKE_COLOR_ITEM_IDS.some((id) => owned.includes(id)) : owned.includes(item.id);
+    }
+
+    function formatCatalogSection(sectionKey, owned, equipped, levels) {
+        // `hidden` items (the smoke family's individual colors — see
+        // shopItems.js) aren't independent catalog entries anymore, just
+        // !equip targets once the smoke bundle above is owned. `retired`
+        // items (past seasons' now-unbuyable forms) are the same story —
+        // still fully equippable by whoever already owns one, just no
+        // longer worth advertising in a list of things you CAN buy.
+        // 'bigGoalAnimation'/'goalAnimation' both draw from the same real
+        // item.type ('goalAnimation') — see isBigGoalAnimation above — so
+        // equipped[i.type] (not equipped[sectionKey]) is the real slot key.
+        const matchesSection = (i) => sectionKey === 'bigGoalAnimation'
+            ? isBigGoalAnimation(i)
+            : i.type === sectionKey && !isBigGoalAnimation(i);
+        const lines = items.filter((i) => matchesSection(i) && !i.hidden && !i.retired).map((i) => formatItemLine(i, isOwned(i, owned), equipped[i.type], levels[i.id]));
+        return `${CATEGORY_LABELS[sectionKey]}:\n${lines.join('\n')}`;
     }
 
     // Every upgradeable item's current level for this auth, keyed by id —
@@ -338,7 +516,7 @@ module.exports = function createEconomy({
         if (msgArray.length === 0) {
             const [balance, owned, equipped] = await Promise.all([db.getBalance(auth), db.getOwnedItemIds(auth), db.getEquipped(auth)]);
             const levels = await getUpgradeableLevels(auth, items);
-            const sections = ['form', 'size', 'goalAnimation'].map((type) => formatCatalogSection(type, owned, equipped, levels)).join('\n');
+            const sections = ['form', 'size', 'goalAnimation', 'bigGoalAnimation'].map((key) => formatCatalogSection(key, owned, equipped, levels)).join('\n');
             room.sendAnnouncement(
                 `🛒 Магазин (баланс: ${formatCoins(balance)})\n${sections}\nКупить/улучшить: !shop <id>. Надеть: !equip <id>.`,
                 player.id,
@@ -352,6 +530,69 @@ module.exports = function createEconomy({
         const item = itemsById.get(msgArray[0]);
         if (!item) {
             room.sendAnnouncement(`Нет такого товара. Введите "!shop" для списка.`, player.id, errorColor, 'bold', HaxNotification.CHAT);
+            return;
+        }
+
+        // Retired items (see shopItems.js's `retired`) stay in the catalog
+        // array forever — existing owners keep them, fully equippable,
+        // exactly like any other item — but can never be bought again by
+        // anyone, owner or not. Checked before every other purchase branch
+        // below, unconditionally.
+        if (item.retired) {
+            room.sendAnnouncement(`"${item.name}" — предмет прошлого сезона, он больше не продаётся.`, player.id, errorColor, 'bold', HaxNotification.CHAT);
+            return;
+        }
+
+        // The smoke bundle is the way IN to goalAnimation access for a
+        // non-VIP (see shopItems.js's `smokeFamily`) — handled entirely on
+        // its own, before the access gate below, since buying it must work
+        // even with zero prior access.
+        if (item.smokeFamily) {
+            if (await ownsSmokeFamily(auth)) {
+                room.sendAnnouncement(`У вас уже есть "${item.name}".`, player.id, errorColor, 'bold', HaxNotification.CHAT);
+                return;
+            }
+            const spent = await db.spendCoins(auth, player.name, item.price);
+            if (!spent) {
+                const balance = await db.getBalance(auth);
+                room.sendAnnouncement(`Недостаточно монет. Нужно ${formatCoins(item.price)}, у вас ${formatCoins(balance)}.`, player.id, errorColor, 'bold', HaxNotification.CHAT);
+                return;
+            }
+            await Promise.all(SMOKE_COLOR_ITEM_IDS.map((id) => db.buyItem(auth, player.name, id, 0)));
+            room.sendAnnouncement(
+                `✔️ Куплено: ${item.name} за ${formatCoins(item.price)} ! Открыты все цвета дыма и анимации после гола — выберите цвет командой "!equip smoke-<цвет>".`,
+                player.id,
+                announcementColor,
+                'bold',
+                HaxNotification.CHAT
+            );
+            return;
+        }
+
+        // Gate new purchases only — an item already owned always falls
+        // through to buyItem below, which reports "already have it" instead
+        // (a lapsed VIP shouldn't be told they can't afford something they
+        // already bought; see equipCommand for the separate, stricter check
+        // that DOES apply even to already-owned items). `grantsAccess` items
+        // (fireworks — see shopItems.js) are exempt from this gate too, same
+        // reasoning as the smoke bundle above: buying one of them IS how a
+        // non-VIP gets goalAnimation access in the first place.
+        if (item.type === 'goalAnimation' && !item.grantsAccess && !(await db.ownsItem(auth, item.id)) && !(await hasGoalAnimationAccess(player))) {
+            room.sendAnnouncement(
+                `Анимации после гола доступны только VIP, либо после покупки "Дым" (!shop smoke) или "Фейерверк" (!shop fireworks).`,
+                player.id,
+                errorColor,
+                'bold',
+                HaxNotification.CHAT
+            );
+            return;
+        }
+
+        // vipOnly forms have no coin-bought bypass at all, unlike
+        // goalAnimation — this is a hard role check, not an ownsItem escape
+        // hatch. Still only gates a NEW purchase, same reasoning as above.
+        if (item.vipOnly && !(await db.ownsItem(auth, item.id)) && getRole(player) < Role.VIP) {
+            room.sendAnnouncement(`"${item.name}" — эксклюзивная форма для VIP.`, player.id, errorColor, 'bold', HaxNotification.CHAT);
             return;
         }
 
@@ -393,7 +634,27 @@ module.exports = function createEconomy({
             );
             return;
         }
-        room.sendAnnouncement(`✔️ Куплено: ${item.name} за ${formatCoins(item.price)} !`, player.id, announcementColor, 'bold', HaxNotification.CHAT);
+
+        if (item.smokeColor) {
+            // Buying any one smoke color unlocks the whole family at once —
+            // the player still picks which one to actually wear via !equip.
+            // Siblings are granted at cost 0 (already paid for via `item`
+            // itself); each buyItem call is independently a harmless no-op
+            // if that sibling was somehow already owned.
+            const siblings = items.filter((i) => i.smokeColor && i.id !== item.id);
+            await Promise.all(siblings.map((sibling) => db.buyItem(auth, player.name, sibling.id, 0)));
+            room.sendAnnouncement(
+                `✔️ Куплено: ${item.name} за ${formatCoins(item.price)} ! Открыты все цвета дыма — выберите нужный командой "!equip <id>".`,
+                player.id,
+                announcementColor,
+                'bold',
+                HaxNotification.CHAT
+            );
+            return;
+        }
+
+        const priceText = item.price === 0 ? 'бесплатно' : `за ${formatCoins(item.price)}`;
+        room.sendAnnouncement(`✔️ Куплено: ${item.name} ${priceText} !`, player.id, announcementColor, 'bold', HaxNotification.CHAT);
     }
 
     async function balanceCommand(player, message) {
@@ -415,11 +676,16 @@ module.exports = function createEconomy({
         room.sendAnnouncement(`🎒 Ваши аксессуары:\n${lines.join('\n')}`, player.id, announcementColor, 'bold', HaxNotification.CHAT);
     }
 
+    // Toggle: running this again on whatever's currently equipped for that
+    // slot unequips it instead (absorbs the old standalone !unequip command
+    // — same db.setEquipped(auth, item.type, null) path, just reached from
+    // here now). Checked by item id, not just slot, so equipping a
+    // DIFFERENT item in the same slot always replaces rather than toggling.
     async function equipCommand(player, message) {
         const msgArray = message.split(/ +/).slice(1);
         const itemId = msgArray[0];
         if (!itemId) {
-            room.sendAnnouncement(`Использование: !equip <id>. Список ваших аксессуаров — "!inventory".`, player.id, errorColor, 'bold', HaxNotification.CHAT);
+            room.sendAnnouncement(`Использование: !equip <id>. Список ваших аксессуаров — "!inventory". Повторный ввод для уже надетого аксессуара снимает его.`, player.id, errorColor, 'bold', HaxNotification.CHAT);
             return;
         }
         const item = itemsById.get(itemId);
@@ -433,6 +699,31 @@ module.exports = function createEconomy({
             room.sendAnnouncement(`Вы еще не купили "${item.name}". Загляните в "!shop".`, player.id, errorColor, 'bold', HaxNotification.CHAT);
             return;
         }
+        const equipped = await db.getEquipped(auth);
+        if (equipped[item.type] === item.id) {
+            await db.setEquipped(auth, item.type, null);
+            // Same reasoning as the equip path below: a form is a whole-side
+            // decision, so unequipping one needs both sides recomputed
+            // (falls back to a teammate's form, or the default kit) — not
+            // just this player's own state.
+            if (item.type === 'form') await applyTeamForms();
+            room.sendAnnouncement(`✔️ Снято: ${item.name} !`, player.id, announcementColor, 'bold', HaxNotification.CHAT);
+            return;
+        }
+        if (item.type === 'goalAnimation' && !(await hasGoalAnimationAccess(player))) {
+            room.sendAnnouncement(
+                `Анимации после гола доступны только VIP, либо после покупки "Дым" (!shop smoke) или "Фейерверк" (!shop fireworks).`,
+                player.id,
+                errorColor,
+                'bold',
+                HaxNotification.CHAT
+            );
+            return;
+        }
+        if (item.vipOnly && getRole(player) < Role.VIP) {
+            room.sendAnnouncement(`"${item.name}" — эксклюзивная форма для VIP.`, player.id, errorColor, 'bold', HaxNotification.CHAT);
+            return;
+        }
         await db.setEquipped(auth, item.type, item.id);
         // A form is a whole-side decision, not personal — equipping one can
         // change what the player's ENTIRE team wears (if they're the
@@ -442,33 +733,6 @@ module.exports = function createEconomy({
         // this player's next goal (see playGoalSizeEffect).
         if (item.type === 'form') await applyTeamForms();
         room.sendAnnouncement(`✔️ Надето: ${item.name} !`, player.id, announcementColor, 'bold', HaxNotification.CHAT);
-    }
-
-    async function unequipCommand(player, message) {
-        const msgArray = message.split(/ +/).slice(1);
-        const itemId = msgArray[0];
-        if (!itemId) {
-            room.sendAnnouncement(`Использование: !unequip <id>. Список ваших аксессуаров — "!inventory".`, player.id, errorColor, 'bold', HaxNotification.CHAT);
-            return;
-        }
-        const item = itemsById.get(itemId);
-        if (!item) {
-            room.sendAnnouncement(`Нет такого аксессуара.`, player.id, errorColor, 'bold', HaxNotification.CHAT);
-            return;
-        }
-        const auth = getAuth(player);
-        const equipped = await db.getEquipped(auth);
-        if (equipped[item.type] !== item.id) {
-            room.sendAnnouncement(`У вас не надето "${item.name}".`, player.id, errorColor, 'bold', HaxNotification.CHAT);
-            return;
-        }
-        await db.setEquipped(auth, item.type, null);
-        // Same reasoning as equipCommand above: a form is a whole-side
-        // decision, so unequipping one needs both sides recomputed (falls
-        // back to a teammate's form, or the default kit) — not just this
-        // player's own state.
-        if (item.type === 'form') await applyTeamForms();
-        room.sendAnnouncement(`✔️ Снято: ${item.name} !`, player.id, announcementColor, 'bold', HaxNotification.CHAT);
     }
 
     // Testing/support tool, not a player-facing command — gated to
@@ -515,6 +779,7 @@ module.exports = function createEconomy({
     return {
         awardMatchCoins,
         tickPlaytime,
+        claimDailyBonus,
         applyTeamForms,
         announceTeamForms,
         playGoalAnimation,
@@ -522,7 +787,6 @@ module.exports = function createEconomy({
         shopCommand,
         inventoryCommand,
         equipCommand,
-        unequipCommand,
         addCoinsCommand,
         balanceCommand,
     };

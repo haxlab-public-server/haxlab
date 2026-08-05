@@ -47,11 +47,11 @@ const authArray = [];
 
 // window.__secrets is set by the orchestrator (src/index.js) via
 // page.evaluate() right after navigation, before this bundle is injected —
-// carries the two things that come from process.env on the orchestrator
-// side (HAXBALL_TOKEN, ROOM_PASSWORD) and therefore can't live in
+// carries the things that come from process.env on the orchestrator side
+// (HAXBALL_TOKEN, ROOM_PASSWORD, TEST_MODE) and therefore can't live in
 // roomConstants.js, which has to stay safe to bundle into a context with no
 // `process` at all.
-const room = HBInit(buildGameConfig(window.__secrets.token));
+const room = HBInit(buildGameConfig(window.__secrets.token, window.__secrets.testMode));
 
 const {
     Team,
@@ -101,8 +101,11 @@ const {
     findFirstNumberCharString,
     generateRoomPassword,
     formatBanRemaining,
+    formatVipRemaining,
     formatCoins,
     formatTrophyLabel,
+    encodeLegacyTrophyKey,
+    resolveTrophyRank,
 } = require('../core/utils');
 const {
     getIdReport,
@@ -203,10 +206,13 @@ setInterval(() => {
 
 /* OVERFLOW PASSWORD */
 
-// Reserves the last 2 slots below capacity for people who know the password
-// (shared to Discord) rather than anyone who has the room link — see
+// Reserves every slot past 14 for people who know the password (shared to
+// Discord) rather than anyone who has the room link — see
 // core/overflowPassword.js for the activate/rotate/deactivate lifecycle.
-const passwordThreshold = maxPlayers - 2;
+// Fixed at 15 regardless of maxPlayers (currently 20, see roomConstants.js)
+// — NOT maxPlayers-N, which would silently shrink/grow the password-gated
+// zone every time maxPlayers changes.
+const passwordThreshold = 15;
 const createOverflowPassword = require('../core/overflowPassword');
 // Read once at startup, before the room can have refilled past the
 // threshold — lets a restart reuse whatever password was last posted to
@@ -233,10 +239,13 @@ const { checkOverflowPassword } = createOverflowPassword({
 // goal animations) worn via !equip — see core/economy.js and
 // core/shopItems.js (the editable catalog).
 const shopItems = require('../core/shopItems');
+const { playSmokeAnimation } = require('../core/smokeAnimation');
+const { playFireworksAnimation } = require('../core/fireworksAnimation');
 const createEconomy = require('../core/economy');
 const {
     awardMatchCoins,
     tickPlaytime,
+    claimDailyBonus,
     applyTeamForms,
     announceTeamForms,
     playGoalAnimation,
@@ -244,7 +253,6 @@ const {
     shopCommand,
     inventoryCommand,
     equipCommand,
-    unequipCommand,
     addCoinsCommand,
     balanceCommand,
 } = createEconomy({
@@ -260,6 +268,10 @@ const {
     errorColor,
     formatCoins,
     getRandomInt,
+    playSmokeAnimation,
+    playFireworksAnimation,
+    Role,
+    getRole,
 });
 
 const PLAYTIME_TICK_INTERVAL_SECONDS = 60;
@@ -314,18 +326,25 @@ room.setKickRateLimit(6, 12, 4);
 state.roomPassword = window.__secrets.roomPassword;
 room.setPassword(state.roomPassword != '' ? state.roomPassword : null);
 
+// Watched for as "@<name>" (case-insensitive) in chat by events/activity.js
+// — see its own onPlayerChat. Empty disables the whole feature.
+const mentionWatchName = window.__secrets.mentionWatchName;
+
 /* OPTIONS */
 
 const drawTimeLimit = Infinity;
 const teamSize = 4;
 // Per-stadium score/time limits, applied whenever stadiumCommand switches
 // arenas — classic is the small 1v1/2v2 map, big is the 3v3/4v4 map.
-const classicScoreLimit = 3;
-const classicTimeLimit = 3;
-const bigScoreLimit = 5;
-const bigTimeLimit = 5;
+const classicScoreLimit = 2;
+const classicTimeLimit = 2;
+const bigScoreLimit = 4;
+const bigTimeLimit = 4;
 const disableBans = false;
-const debugMode = false;
+// TEST_MODE (npm run test / HaxBot_test.js) — no ghost-kick (see
+// events/movement.js's onPlayerJoin) and no AFK-kick, so testing from the
+// same account already sitting in the live room doesn't kick either one.
+const debugMode = window.__secrets.testMode === true;
 const afkLimit = debugMode ? Infinity : 15;
 
 const defaultSlowMode = 0.5;
@@ -364,7 +383,11 @@ state.streak = 0;
 // Masters and permanent admins are configured in the database (see
 // scripts/add-master.js) rather than granted at runtime by any bot command.
 state.adminList = (await db.getAdmins()).map((a) => [a.auth, a.playerName]);
-state.vipList = (await db.getVips()).map((v) => [v.auth, v.playerName]);
+// Third tuple element is the VIP's expiry (ISO string, or null for a
+// permanent grant, see !setvip in commands/master.js) — getRole() below
+// checks it live on every message, since a grant can expire mid-session
+// without a bot restart.
+state.vipList = (await db.getVips()).map((v) => [v.auth, v.playerName, v.expiresAt]);
 const masterList = await db.getMasters();
 
 // Player clubs (see core/commands/club.js) — same in-memory cache pattern
@@ -384,11 +407,29 @@ state.equippedTrophies = (await db.getAllEquippedTrophies()).reduce((acc, row) =
     return acc;
 }, {});
 
+// Seasons (see db.closeSeason, run manually via scripts/close-season.js) —
+// state.currentSeason tags LIVE trophies (e.g. "S1"); state.seasonTrophies is
+// every already-closed season's frozen top-3 (never recomputed, unlike
+// state.topPlayers), so a player who held rank 1-3 can keep displaying that
+// exact title via !trophy long after their live stats reset to 0. Same
+// in-memory-cache reasoning as topPlayers/equippedTrophies above — a closed
+// season's rows never change, so no per-message DB round trip is needed.
+state.currentSeason = await db.getCurrentSeason();
+state.seasonTrophies = await db.getSeasonTrophies();
+
 // !customcolors (see core/commands/player.js) — auths who've opted out of
 // SEEING other players' club custom colors (events/activity.js sends them
 // the default color instead, per-viewer, on messages that would otherwise
 // use a club's color). Same in-memory-cache reasoning as the above.
 state.hiddenCustomColorsSet = new Set(await db.getAllHiddenCustomColors());
+
+// !vipcolor (see core/commands/player.js) — a VIP's own override for their
+// role's shared chat color (auth -> color), same in-memory-cache reasoning
+// as the above.
+state.vipColors = (await db.getAllVipColors()).reduce((acc, row) => {
+    acc[row.auth] = row.color;
+    return acc;
+}, {});
 
 /* GAME */
 
@@ -410,13 +451,32 @@ state.cancelGameVariable = false;
 state.kickFetchVariable = false;
 
 state.chooseMode = false;
+state.chooseModePreMatch = false;
 state.timeOutCap = undefined;
 state.capLeft = false;
 state.redCaptainChoice = '';
 state.blueCaptainChoice = '';
 const chooseTime = 20;
 
-const AFKSet = new Set();
+// !up (commands/player.js) — a VIP's claim to become the NEXT captain
+// chosen (see team/choosing.js's choosePlayer() and team/balance.js's
+// handlePlayersLeave(), the two places an empty side gets auto-filled from
+// state.teamSpec[0] — both consume/clear this instead when set). Single
+// slot: only one VIP can hold a live claim at a time.
+state.priorityCaptainId = null;
+
+state.swapMode = false;
+state.swapTurnTeam = null;
+state.swapStep = null;
+state.swapPendingPlayerId = null;
+state.swapTimeout = undefined;
+const swapTime = 5;
+
+// player.id -> Date.now() they went AFK — a Map rather than a plain Set so
+// !afks (afkListCommand) can show how long each of them has been sitting
+// there. Everywhere else only ever reads membership (.has/.size), which
+// works identically on a Map.
+const AFKSet = new Map();
 const AFKMinSet = new Set();
 const AFKCooldownSet = new Set();
 const minAFKDuration = 0;
@@ -430,6 +490,13 @@ const AFKCooldown = 0;
 // preference — reconnecting resets it, same as AFK does).
 const hiddenAdminsSet = new Set();
 
+// !silence #<id> — per-VIEWER chat filter: viewerAuth -> Set<targetAuth> of
+// players that viewer no longer sees chat from. Session-only like AFKSet
+// above, not persisted — nobody else's view is affected, enforced in
+// events/activity.js's onPlayerChat by skipping delivery to viewers who
+// silenced this speaker, never by blocking the message itself.
+const silencedAuths = new Map();
+
 const muteArray = new MuteList();
 const muteDuration = 5;
 const MutePlayer = createMutePlayerClass({ room, announcementColor, HaxNotification, muteArray });
@@ -442,6 +509,13 @@ state.startTimeout = undefined;
 state.unpauseTimeout = undefined;
 state.removingTimeout = undefined;
 state.insertingTimeout = undefined;
+
+// !votepause (see core/pauseVote.js) — pauseVotes holds the in-progress
+// vote per team (null when none), pauseVoteUsed tracks each team's
+// once-per-match allowance; both reset on every onGameStart.
+state.pauseVotes = { [Team.RED]: null, [Team.BLUE]: null };
+state.pauseVoteUsed = { [Team.RED]: false, [Team.BLUE]: false };
+state.pauseVoteUnpauseTimeout = undefined;
 
 const emptyPlayer = {
     id: 0,
@@ -523,6 +597,8 @@ const {
     unmuteCommand,
     muteListCommand,
     hideCommand,
+    muteByAuth,
+    unmuteByAuth,
 } = createAdminCommands({
     room,
     state,
@@ -539,13 +615,23 @@ const {
     bigTimeLimit,
     State,
     Situation,
+    Role,
     announcementColor,
     errorColor,
     HaxNotification,
     hiddenAdminsSet,
     instantRestart,
     swapButton,
+    getRole,
 });
+
+// Reaches into __roomBridge (defined earlier, before createAdminCommands
+// existed) same as grantVipByAuth below — lets the Discord process mute/
+// unmute by auth (!muteauth/!unmuteauth, see discord.js) via
+// page.evaluate() from the orchestrator, which has no direct room/state
+// access of its own.
+window.__roomBridge.muteByAuth = muteByAuth;
+window.__roomBridge.unmuteByAuth = unmuteByAuth;
 
 /* MASTER COMMANDS */
 
@@ -562,8 +648,13 @@ const {
     banAuthCommand,
     unbanAuthCommand,
     authBanListCommand,
+    restrictCmdCommand,
+    unrestrictCmdCommand,
+    cmdRestrictionsCommand,
     playersListCommand,
     passwordCommand,
+    grantVipByAuth,
+    applyVipGrant,
 } = createMasterCommands({
     room,
     state,
@@ -574,7 +665,15 @@ const {
     errorColor,
     HaxNotification,
     formatBanRemaining,
+    formatVipRemaining,
 });
+
+// Reaches into __roomBridge (defined earlier, before createMasterCommands
+// existed) now that grantVipByAuth is actually available — the orchestrator
+// calls this via page.evaluate() when the Discord process reports a member
+// getting the configured VIP role (see index.js's 'grantVip' handling and
+// discordProcess.js/discord.js's guildMemberUpdate wiring).
+window.__roomBridge.grantVipByAuth = grantVipByAuth;
 
 /* GAME FUNCTIONS */
 
@@ -741,6 +840,7 @@ const {
     chooseModeFunction,
     checkCaptainLeave,
     slowModeFunction,
+    resolveNextCaptainId,
 } = createChoosingHelpers({
     room,
     state,
@@ -755,6 +855,24 @@ const {
     defaultSlowMode,
     SMSet,
     getRandomInt,
+});
+
+/* SWAP FUNCTIONS */
+
+const createSwapHelpers = require('../core/team/swap');
+const {
+    startSwapPhase,
+    cancelSwapPhase,
+    swapModeFunction,
+} = createSwapHelpers({
+    room,
+    state,
+    Team,
+    HaxNotification,
+    announcementColor,
+    errorColor,
+    infoColor,
+    swapTime,
 });
 
 /* PLAYER FUNCTIONS */
@@ -777,7 +895,14 @@ function getRole(player) {
     if (masterList.includes(auth)) return Role.MASTER;
     if (state.adminList.some((a) => a[0] == auth)) return Role.ADMIN_PERM;
     if (player.admin) return Role.ADMIN_TEMP;
-    if (state.vipList.some((v) => v[0] == auth)) return Role.VIP;
+    // Checked live rather than trusting the cache alone — a time-limited
+    // grant (v[2], see !setvip) can expire mid-session, and this is the
+    // only place that runs on every single message. Expired entries are
+    // actually purged from state.vipList/the db lazily, by the next VIP
+    // command that runs (see purgeExpiredVips in commands/master.js), not
+    // here — this check just makes sure nobody gets an extra few hours/days
+    // of VIP because nobody happened to run one in the meantime.
+    if (state.vipList.some((v) => v[0] == auth && (v[2] == null || new Date(v[2]).getTime() > Date.now()))) return Role.VIP;
     return Role.PLAYER;
 }
 
@@ -948,6 +1073,8 @@ const {
     updatePlayerStats,
     updateStats,
     printRankings,
+    printAllRankings,
+    printClubRankings,
 } = createRoomStats({
     room,
     state,
@@ -958,6 +1085,7 @@ const {
     HaxNotification,
     errorColor,
     infoColor,
+    announcementColor,
     teamSize,
     getAssistsPlayer,
     getCSPlayer,
@@ -966,6 +1094,8 @@ const {
     getOwnGoalsPlayer,
     getPlayerComp,
     getTimeStats,
+    applyVipGrant,
+    random: Math.random,
 });
 
 /* PRINT FUNCTIONS */
@@ -1032,9 +1162,12 @@ const {
     redToSpecButton,
     resetButton,
     resumeGame,
+    resolveNextCaptainId,
     stadiumCommand,
     swapButton,
     topButton,
+    startSwapPhase,
+    cancelSwapPhase,
 });
 
 /* PLAYER COMMANDS */
@@ -1048,14 +1181,20 @@ const {
     globalStatsCommand,
     renameCommand,
     customColorsCommand,
+    vipColorCommand,
+    vipHelpCommand,
     linkDiscordCommand,
-    statsLeaderboardCommand,
+    topsCommand,
     afkCommand,
     afkListCommand,
+    silenceCommand,
+    reportCommand,
+    upCommand,
 } = createPlayerCommands({
     room,
     state,
     Team,
+    State,
     Role,
     HaxStatistics,
     authArray,
@@ -1066,6 +1205,7 @@ const {
     minAFKDuration,
     maxAFKDuration,
     AFKCooldown,
+    silencedAuths,
     announcementColor,
     errorColor,
     infoColor,
@@ -1077,28 +1217,56 @@ const {
     handlePlayersLeave,
     printPlayerStats,
     printRankings,
+    printAllRankings,
+    printClubRankings,
     updateTeams,
     getCommands: () => commands,
+    formatCoins,
+    discordBot,
+    formatBanRemaining,
+});
+
+/* PAUSE VOTE */
+
+const createPauseVote = require('../core/pauseVote');
+const { votepauseCommand, handleVoteMessage, resetPauseVotes } = createPauseVote({
+    room,
+    state,
+    Team,
+    State,
+    Situation,
+    HaxNotification,
+    errorColor,
+    warningColor,
+    successColor,
+    redColor,
+    blueColor,
+    teamSize,
+});
+
+/* VOTE BAN */
+
+const createVoteBan = require('../core/voteBan');
+const { votebanCommand, handleVoteBanMessage } = createVoteBan({
+    room,
+    state,
+    authArray,
+    db,
+    Role,
+    getRole,
+    HaxNotification,
+    errorColor,
+    warningColor,
+    successColor,
+    announcementColor,
+    discordBot,
+    formatBanRemaining,
 });
 
 /* CLUBS */
 
 const createClubCommands = require('../core/commands/club');
-const {
-    clubCreateCommand,
-    clubInviteCommand,
-    clubJoinCommand,
-    clubLeaveCommand,
-    clubKickCommand,
-    clubAssistantCommand,
-    clubDisbandCommand,
-    clubColorCommand,
-    clubColorsCommand,
-    clubEmojiCommand,
-    clubSlotsCommand,
-    clubInfoCommand,
-    clubHelpCommand,
-} = createClubCommands({
+const { clubCommand, clubChatCommand } = createClubCommands({
     room,
     state,
     authArray,
@@ -1120,9 +1288,28 @@ const { trophiesCommand } = createTrophyCommands({
     db,
     Trophies,
     formatTrophyLabel,
+    encodeLegacyTrophyKey,
+    resolveTrophyRank,
     announcementColor,
     errorColor,
     HaxNotification,
+});
+
+/* MINIGAMES */
+
+const createMinigameCommands = require('../core/commands/minigames');
+const { minigamesCommand, playCommand } = createMinigameCommands({
+    room,
+    state,
+    authArray,
+    db,
+    Team,
+    announcementColor,
+    errorColor,
+    successColor,
+    HaxNotification,
+    formatCoins,
+    getRandomInt,
 });
 
 /* COMMANDS */
@@ -1139,10 +1326,13 @@ const commands = createCommands({
     globalStatsCommand,
     renameCommand,
     customColorsCommand,
+    vipColorCommand,
+    vipHelpCommand,
     linkDiscordCommand,
-    statsLeaderboardCommand,
+    topsCommand,
     afkCommand,
     afkListCommand,
+    silenceCommand,
     restartCommand,
     restartSwapCommand,
     swapCommand,
@@ -1163,29 +1353,26 @@ const commands = createCommands({
     banAuthCommand,
     unbanAuthCommand,
     authBanListCommand,
+    restrictCmdCommand,
+    unrestrictCmdCommand,
+    cmdRestrictionsCommand,
     playersListCommand,
     passwordCommand,
     teamChat,
     shopCommand,
     inventoryCommand,
     equipCommand,
-    unequipCommand,
     addCoinsCommand,
     balanceCommand,
-    clubCreateCommand,
-    clubInviteCommand,
-    clubJoinCommand,
-    clubLeaveCommand,
-    clubKickCommand,
-    clubAssistantCommand,
-    clubDisbandCommand,
-    clubColorCommand,
-    clubColorsCommand,
-    clubEmojiCommand,
-    clubSlotsCommand,
-    clubInfoCommand,
-    clubHelpCommand,
+    clubCommand,
+    clubChatCommand,
     trophiesCommand,
+    votepauseCommand,
+    votebanCommand,
+    reportCommand,
+    upCommand,
+    minigamesCommand,
+    playCommand,
 });
 
 stadiumCommand(emptyPlayer, "!training");
@@ -1222,6 +1409,7 @@ Object.assign(room, wrapEventHandlers(createMovementEvents({
     welcomeColor,
     getDate,
     applyTeamForms,
+    claimDailyBonus,
     checkCaptainLeave,
     checkOverflowPassword,
     getRole,
@@ -1255,16 +1443,22 @@ Object.assign(room, wrapEventHandlers(createActivityEvents({
     errorColor,
     hiddenAdminsSet,
     masterChatColor,
+    mentionWatchName,
     muteArray,
+    silencedAuths,
     vipChatColor,
     checkGoalKickTouch,
     chooseModeFunction,
+    swapModeFunction,
     formatTrophyLabel,
+    resolveTrophyRank,
     getCommand,
     getDate,
     getGoalGame,
     getPlayerComp,
     getRole,
+    handleVoteMessage,
+    handleVoteBanMessage,
     playerChat,
     slowModeFunction,
     teamChat,
@@ -1304,6 +1498,7 @@ Object.assign(room, wrapEventHandlers(createGameManagementEvents({
     handlePlayersStop,
     playGoalAnimation,
     playGoalSizeEffect,
+    resetPauseVotes,
     updateTeams,
 })));
 

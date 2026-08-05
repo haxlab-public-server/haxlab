@@ -4,6 +4,8 @@
  * Mutable room state is reached through `state`, never captured by value:
  * those bindings are reassigned on every room event.
  */
+const { buildRankingString, buildAllRankingsText, buildClubRankingString } = require('./print');
+
 module.exports = function createRoomStats({
     room,
     state,
@@ -14,6 +16,7 @@ module.exports = function createRoomStats({
     HaxNotification,
     errorColor,
     infoColor,
+    announcementColor,
     teamSize,
     getAssistsPlayer,
     getCSPlayer,
@@ -22,7 +25,42 @@ module.exports = function createRoomStats({
     getOwnGoalsPlayer,
     getPlayerComp,
     getTimeStats,
+    applyVipGrant,
+    random,
 }) {
+    // Each player on the WINNING side of a genuine full 4v4 quals match
+    // (same gate updateStats() already requires below) gets an independent
+    // 1% roll at a week of VIP — a fun rare bonus, not a grind reward like
+    // the coin economy. Draws never roll at all (nobody "won"). A player
+    // who's already VIP just quietly doesn't win again (see rollVipLottery)
+    // rather than stacking or extending — same "already VIP" no-op every
+    // other grant path (commands/master.js's setVipCommand/grantVipByAuth)
+    // already treats as a dead end, not an error.
+    //
+    // `random` is injected (entry.js passes Math.random) rather than called
+    // directly, specifically so tests can substitute a deterministic
+    // function instead of monkey-patching the actual global Math.random —
+    // this file's own tests run as interleaved, unawaited async blocks (see
+    // tools/smoke-test.js), so temporarily replacing a REAL global here
+    // would risk leaking into some other, unrelated test's randomness
+    // mid-await.
+    const VIP_LOTTERY_CHANCE = 0.01;
+    const VIP_LOTTERY_DAYS = 7;
+
+    async function rollVipLottery(player) {
+        if (random() >= VIP_LOTTERY_CHANCE) return;
+        const auth = authArray[player.id][0];
+        if (state.vipList.some((v) => v[0] === auth)) return;
+        const expiresAt = new Date(Date.now() + VIP_LOTTERY_DAYS * 24 * 60 * 60000).toISOString();
+        await applyVipGrant(auth, player.name, expiresAt);
+        room.sendAnnouncement(
+            `🎰 ${player.name} выиграл(а) VIP на ${VIP_LOTTERY_DAYS} дней по счастливому билету за победу в матче 4х4 !`,
+            null,
+            announcementColor,
+            'bold',
+            HaxNotification.CHAT
+        );
+    }
     async function updatePlayerStats(player, teamStats) {
         const auth = authArray[player.id][0];
         const pComp = getPlayerComp(player);
@@ -30,12 +68,26 @@ module.exports = function createRoomStats({
         stats.games++;
         if (state.lastWinner == teamStats) stats.wins++;
         stats.winrate = ((100 * stats.wins) / (stats.games || 1)).toFixed(1) + `%`;
-        stats.goals += getGoalsPlayer(pComp);
-        stats.assists += getAssistsPlayer(pComp);
+        const goals = getGoalsPlayer(pComp);
+        const assists = getAssistsPlayer(pComp);
+        const CS = getCSPlayer(pComp);
+        stats.goals += goals;
+        stats.assists += assists;
         stats.ownGoals += getOwnGoalsPlayer(pComp);
-        stats.CS += getCSPlayer(pComp);
+        stats.CS += CS;
         stats.playtime += getGametimePlayer(pComp);
         await db.savePlayerStats(auth, stats);
+
+        // !tops clubs (see db.addClubStats) — credited at this same
+        // per-match granularity, keyed off CURRENT club membership
+        // (state.clubMembers) right now: a player who has since left their
+        // club stops contributing to it going forward, but whatever they
+        // already earned while a member stays on the club's record — there's
+        // no retroactive removal, only no further additions.
+        const membership = state.clubMembers.find((m) => m.auth === auth);
+        if (membership && (goals > 0 || assists > 0 || CS > 0)) {
+            await db.addClubStats(membership.clubId, { goals, assists, cleanSheets: CS });
+        }
     }
 
     async function updateStats() {
@@ -59,22 +111,23 @@ module.exports = function createRoomStats({
             // once per completed match, since that's the only time these
             // stats actually change, not per chat message.
             state.topPlayers = await db.getTopPlayers();
+
+            // VIP lottery (see rollVipLottery above) — only the WINNING
+            // side rolls, and only on a genuine decisive result;
+            // state.lastWinner sits outside Team.RED/Team.BLUE on a draw
+            // (see economy.js's awardMatchCoins), so a draw never rolls.
+            if (state.lastWinner === Team.RED || state.lastWinner === Team.BLUE) {
+                const winners = state.lastWinner === Team.RED ? state.teamRedStats : state.teamBlueStats;
+                for (const player of winners) {
+                    await rollVipLottery(player);
+                }
+            }
         }
     }
 
-    const STAT_LABELS = {
-        games: 'Игры',
-        wins: 'Победы',
-        goals: 'Голы',
-        assists: 'Ассисты',
-        CS: 'Сухие матчи',
-        playtime: 'Время игры',
-    };
-
     async function printRankings(statKey, id = 0) {
-        statKey = statKey == "cs" ? "CS" : statKey;
-        const leaderboard = await db.getLeaderboard(statKey, 5);
-        if (leaderboard.length < 5) {
+        const rankingString = await buildRankingString(db, getTimeStats, statKey);
+        if (rankingString == null) {
             if (id != 0) {
                 room.sendAnnouncement(
                     'Недостаточно игр сыграно !',
@@ -86,14 +139,56 @@ module.exports = function createRoomStats({
             }
             return;
         }
-        let rankingString = `${STAT_LABELS[statKey] ?? statKey}> `;
-        for (let i = 0; i < 5; i++) {
-            let playerName = leaderboard[i].playerName;
-            let playerStat = leaderboard[i].value;
-            if (statKey == 'playtime') playerStat = getTimeStats(playerStat);
-            rankingString += `#${i + 1} ${playerName} : ${playerStat}, `;
+        room.sendAnnouncement(
+            rankingString,
+            id,
+            null,
+            'bold',
+            HaxNotification.CHAT
+        );
+    }
+
+    // !tops with no argument — every category in one message, skipping any
+    // that don't have the 5-player quorum yet rather than erroring.
+    async function printAllRankings(id = 0) {
+        const text = await buildAllRankingsText(db, getTimeStats);
+        if (text == null) {
+            room.sendAnnouncement(
+                'Недостаточно игр сыграно !',
+                id,
+                errorColor,
+                'bold',
+                HaxNotification.CHAT
+            );
+            return;
         }
-        rankingString = rankingString.substring(0, rankingString.length - 2);
+        room.sendAnnouncement(
+            text,
+            id,
+            null,
+            'bold',
+            HaxNotification.CHAT
+        );
+    }
+
+    // !tops clubs — separate from printRankings since clubs rank by a
+    // combined goals+assists+clean_sheets score (see db.getTopClubs), not a
+    // single player_stats column, and have no 5-quorum gate (see
+    // buildClubRankingString).
+    async function printClubRankings(id = 0) {
+        const rankingString = await buildClubRankingString(db);
+        if (rankingString == null) {
+            if (id != 0) {
+                room.sendAnnouncement(
+                    'Ни один клуб еще не заработал очков !',
+                    id,
+                    errorColor,
+                    'bold',
+                    HaxNotification.CHAT
+                );
+            }
+            return;
+        }
         room.sendAnnouncement(
             rankingString,
             id,
@@ -107,5 +202,7 @@ module.exports = function createRoomStats({
         updatePlayerStats,
         updateStats,
         printRankings,
+        printAllRankings,
+        printClubRankings,
     };
 };

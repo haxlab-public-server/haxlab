@@ -13,25 +13,56 @@ const roomConstants = require('./roomConstants');
 const roomPassword = process.env.ROOM_PASSWORD ?? ''; // leave unset for no password
 const token = process.env.HAXBALL_TOKEN ?? ''; // from https://www.haxball.com/headlesstoken — expires in ~1 hour
 
+// Room-side too (injected into the page as window.__secrets, same as
+// roomPassword above) — entry.js/events/activity.js watches every chat
+// message for "@<mentionWatchName>" and, when it appears, relays the whole
+// message to Discord via discordBot.sendMentionAlert. Leave empty to
+// disable the whole feature.
+const mentionWatchName = process.env.MENTION_WATCH_NAME ?? '';
+
+// Set by HaxBot_test.js (npm run test), never by hand in .env — a "[TEST] "
+// room name prefix (see roomConstants.js's buildGameConfig) and no
+// ghost-kick/AFK-kick (see entry.js's debugMode), so you can join a test
+// room from the same account you're already using in the live one without
+// getting yourself kicked out of either.
+const testMode = process.env.TEST_MODE === 'true';
+
 const discordToken = process.env.DISCORD_TOKEN ?? '';
 const discordLogChannelId = process.env.DISCORD_LOG_CHANNEL_ID ?? ''; // formerly roomWebhook
 const discordReportChannelId = process.env.DISCORD_REPORT_CHANNEL_ID ?? ''; // formerly gameWebhook
 const discordOwnerId = process.env.DISCORD_OWNER_ID ?? '';
 const discordAdminRoleId = process.env.DISCORD_ADMIN_ROLE_ID ?? ''; // members with this role can also use /say, alongside the owner
 const discordAutoRoleId = process.env.DISCORD_AUTO_ROLE_ID ?? ''; // role auto-assigned to every new Discord member
+const discordVipRoleId = process.env.DISCORD_VIP_ROLE_ID ?? ''; // granting this role on Discord grants room VIP to the linked auth
 const discordStatusChannelId = process.env.DISCORD_STATUS_CHANNEL_ID ?? ''; // live "join the room" message with player count
 const discordPasswordChannelId = process.env.DISCORD_PASSWORD_CHANNEL_ID ?? ''; // gets the auto-rotated overflow room password
+const discordAdminCallChannelId = process.env.DISCORD_ADMIN_CALL_CHANNEL_ID ?? ''; // gets an @here ping when a player uses !report
+const discordVotebanChannelId = process.env.DISCORD_VOTEBAN_CHANNEL_ID ?? ''; // gets a notification whenever a !voteban vote actually bans someone
+const discordMentionAlertChannelId = process.env.DISCORD_MENTION_ALERT_CHANNEL_ID ?? ''; // gets pinged (via DISCORD_OWNER_ID) whenever MENTION_WATCH_NAME is mentioned in chat
+
+// SOCKS5 proxy for the Discord process's own outbound traffic only (REST +
+// gateway), e.g. `socks5://user:pass@host:port` — see discordProcess.js's
+// proxy patch. Leave empty to connect directly. Never touches the room
+// process / Puppeteer, which live entirely separately.
+const discordProxyUrl = process.env.DISCORD_PROXY_URL ?? '';
 
 module.exports = {
     ...roomConstants,
     roomPassword,
     token,
+    testMode,
+    mentionWatchName,
     discordToken,
     discordLogChannelId,
     discordReportChannelId,
     discordOwnerId,
     discordAdminRoleId,
     discordAutoRoleId,
+    discordVipRoleId,
     discordStatusChannelId,
     discordPasswordChannelId,
+    discordAdminCallChannelId,
+    discordVotebanChannelId,
+    discordMentionAlertChannelId,
+    discordProxyUrl,
 };

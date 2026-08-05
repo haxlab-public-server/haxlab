@@ -55,6 +55,10 @@ global.window = {
         // method only ever runs later, from an actual command/event.
         if (method === 'getAdmins' || method === 'getVips') return Promise.resolve([]);
         if (method === 'getMasters') return Promise.resolve([]);
+        // Every other getAll*/getTopPlayers call is immediately chained
+        // (.reduce/.map/new Set()) during init — null would throw before
+        // this check ever gets a chance to catch a real wiring fault.
+        if (method.startsWith('getAll') || method === 'getTopPlayers') return Promise.resolve([]);
         return Promise.resolve(null);
     },
     __discordSend: () => {},

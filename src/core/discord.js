@@ -7,20 +7,49 @@
  * newly added/changed command.
  */
 const { Client, GatewayIntentBits, Events, EmbedBuilder, AttachmentBuilder, SlashCommandBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
+const { Agent: UndiciAgent, buildConnector } = require('undici');
+const { SocksClient } = require('socks');
 const { formatBanRemaining } = require('./utils');
+const { buildRankingString, buildAllRankingsText, buildClubRankingString } = require('./stats/print');
 
 const SAY_PREFIX = '!say';
 const STATS_COMMAND_PREFIX = '!stats';
+const TOPS_COMMAND_PREFIX = '!tops';
 const PLAYERS_PREFIX = '!players';
 const BANAUTH_PREFIX = '!banauth';
 const UNBANAUTH_PREFIX = '!unbanauth';
 const AUTHBANS_PREFIX = '!authbans';
+const MUTEAUTH_PREFIX = '!muteauth';
+const UNMUTEAUTH_PREFIX = '!unmuteauth';
 const STATUS_MESSAGE_SETTING_KEY = 'statusMessageId';
 
-// say/banauth/unbanauth/authbans are usable by the owner OR anyone with the
-// configured admin role — every other command here (players, etc.) stays
-// owner-only. A role check is enough (no need to hit the DB/adminList) since
-// it's just gating who's allowed to moderate the room from Discord.
+// Same key list/aliases/quorum behavior as the room's own !tops (see
+// commands/player.js's topsCommand and stats/roomStats.js) — just producing
+// a reply string here instead of a room.sendAnnouncement call.
+const TOPS_STAT_KEYS = ['games', 'wins', 'goals', 'assists', 'cs', 'playtime', 'pt', 'clubs'];
+const TOPS_USAGE_REPLY = 'Использование: !tops [games|wins|goals|assists|cs|playtime|clubs] (или /tops). Без аргумента показывает все таблицы лидеров сразу.';
+const NOT_ENOUGH_GAMES_REPLY = 'Недостаточно игр сыграно !';
+const NO_CLUB_SCORES_REPLY = 'Ни один клуб еще не заработал очков !';
+
+async function buildTopsReply(key, { db, getTimeStats }) {
+    if (!key) {
+        const text = await buildAllRankingsText(db, getTimeStats);
+        return text ?? NOT_ENOUGH_GAMES_REPLY;
+    }
+    if (key === 'clubs') {
+        const text = await buildClubRankingString(db);
+        return text ?? NO_CLUB_SCORES_REPLY;
+    }
+    if (!TOPS_STAT_KEYS.includes(key)) return TOPS_USAGE_REPLY;
+    const text = await buildRankingString(db, getTimeStats, key === 'pt' ? 'playtime' : key);
+    return text ?? NOT_ENOUGH_GAMES_REPLY;
+}
+
+// say/banauth/unbanauth/authbans/muteauth/unmuteauth are usable by the owner
+// OR anyone with the configured admin role — every other command here
+// (players, etc.) stays owner-only. A role check is enough (no need to hit
+// the DB/adminList) since it's just gating who's allowed to moderate the
+// room from Discord.
 function isOwnerOrAdmin(userId, member, discordOwnerId, discordAdminRoleId) {
     if (userId === discordOwnerId) return true;
     if (discordAdminRoleId && member && member.roles.cache.has(discordAdminRoleId)) return true;
@@ -41,6 +70,21 @@ const slashCommandData = [
             option.setName('name').setDescription('Имя игрока (по умолчанию — ваша статистика, если аккаунт привязан)').setRequired(false)
         ),
     new SlashCommandBuilder()
+        .setName('tops')
+        .setDescription('Показать таблицы лидеров (как !tops в комнате) — видно только вам')
+        .addStringOption((option) =>
+            option.setName('stat').setDescription('Категория (по умолчанию — все сразу)').setRequired(false)
+                .addChoices(
+                    { name: 'games', value: 'games' },
+                    { name: 'wins', value: 'wins' },
+                    { name: 'goals', value: 'goals' },
+                    { name: 'assists', value: 'assists' },
+                    { name: 'cs', value: 'cs' },
+                    { name: 'playtime', value: 'playtime' },
+                    { name: 'clubs', value: 'clubs' }
+                )
+        ),
+    new SlashCommandBuilder()
         .setName('players')
         .setDescription('Показать список игроков в комнате вместе с их auth (только для владельца)'),
     new SlashCommandBuilder()
@@ -56,6 +100,15 @@ const slashCommandData = [
     new SlashCommandBuilder()
         .setName('authbans')
         .setDescription('Показать список банов по auth (владелец и админы)'),
+    new SlashCommandBuilder()
+        .setName('muteauth')
+        .setDescription('Заглушить игрока по auth — только если он сейчас в комнате (владелец и админы)')
+        .addStringOption((option) => option.setName('auth').setDescription('Auth игрока').setRequired(true))
+        .addIntegerOption((option) => option.setName('minutes').setDescription('Длительность заглушения в минутах').setRequired(true).setMinValue(1)),
+    new SlashCommandBuilder()
+        .setName('unmuteauth')
+        .setDescription('Снять заглушение по auth (владелец и админы)')
+        .addStringOption((option) => option.setName('auth').setDescription('Auth заглушенного игрока').setRequired(true)),
 ];
 
 // Resolves a typed name to stats. A currently-connected player's live auth
@@ -88,7 +141,7 @@ function listCurrentPlayers(state, getAuthArray) {
 // incoming Discord message, without touching the discord.js Client itself.
 // Async because kickPlayerByAuth crosses to the game process over IPC (see
 // core/discordProcess.js) — it's no longer a same-process function call.
-async function handleIncomingMessage(message, { discordOwnerId, discordAdminRoleId, db, state, getAuthArray, getPrintPlayerStats, relayToRoom, kickPlayerByAuth }) {
+async function handleIncomingMessage(message, { discordOwnerId, discordAdminRoleId, db, state, getAuthArray, getPrintPlayerStats, relayToRoom, kickPlayerByAuth, muteByAuth, unmuteByAuth, getTimeStats }) {
     if (message.author.bot) return null;
 
     if (message.content.toLowerCase().startsWith(SAY_PREFIX)) {
@@ -119,6 +172,26 @@ async function handleIncomingMessage(message, { discordOwnerId, discordAdminRole
         const bans = db.getAuthBans();
         if (bans.length === 0) return 'В списке банов по auth никого нет.';
         return bans.map((ban) => `${ban.playerName} [${ban.auth}] — осталось ${formatBanRemaining(ban.expiresAt)}${ban.reason ? ' (' + ban.reason + ')' : ''}`).join('\n');
+    }
+
+    // Checked before !muteauth so "!unmuteauth" doesn't get shadowed by it.
+    if (message.content.toLowerCase().startsWith(UNMUTEAUTH_PREFIX)) {
+        if (!isOwnerOrAdmin(message.author.id, message.member, discordOwnerId, discordAdminRoleId)) return null;
+        const auth = message.content.slice(UNMUTEAUTH_PREFIX.length).trim();
+        if (auth === '') return 'Использование: !unmuteauth <auth>';
+        const result = await unmuteByAuth(auth);
+        return result.ok ? `${result.name} размучен.` : 'Этот игрок сейчас не заглушен.';
+    }
+
+    if (message.content.toLowerCase().startsWith(MUTEAUTH_PREFIX)) {
+        if (!isOwnerOrAdmin(message.author.id, message.member, discordOwnerId, discordAdminRoleId)) return null;
+        const rest = message.content.slice(MUTEAUTH_PREFIX.length).trim().split(/ +/);
+        const auth = rest[0];
+        const minutes = parseInt(rest[1]);
+        if (!auth || !(minutes > 0)) return 'Использование: !muteauth <auth> <минуты>';
+        const result = await muteByAuth(auth, minutes);
+        if (result.ok) return `${result.name} заглушен на ${minutes} мин.`;
+        return result.reason === 'admin' ? 'Нельзя заглушить администратора.' : 'Этого игрока сейчас нет в комнате.';
     }
 
     // Checked after !unbanauth/!authbans/!players so "!banauth" doesn't
@@ -154,6 +227,11 @@ async function handleIncomingMessage(message, { discordOwnerId, discordAdminRole
         return await getPrintPlayerStats()(stats);
     }
 
+    if (message.content.toLowerCase().startsWith(TOPS_COMMAND_PREFIX)) {
+        const key = message.content.slice(TOPS_COMMAND_PREFIX.length).trim().toLowerCase() || null;
+        return await buildTopsReply(key, { db, getTimeStats });
+    }
+
     return null;
 }
 
@@ -165,6 +243,25 @@ function handleGuildMemberAdd(member, { discordAutoRoleId }) {
     member.roles.add(discordAutoRoleId).catch((err) => console.error('Discord auto-role assignment failed:', err));
 }
 
+// Pure and independently testable, same shape as handleGuildMemberAdd: a
+// member gaining the configured VIP role on Discord grants room VIP to
+// whichever HaxBall auth they've linked via !discord (see
+// commands/player.js's linkDiscordCommand) — a no-op if no role is
+// configured, if the role wasn't the one that just got added (only the
+// false -> true edge counts, not already having it or losing it), or if
+// this Discord account was never linked to a HaxBall auth. grantVipByAuth
+// crosses to the room process over IPC (see discordProcess.js), same as
+// kickPlayerByAuth.
+function handleGuildMemberUpdate(oldMember, newMember, { discordVipRoleId, db, grantVipByAuth }) {
+    if (!discordVipRoleId) return;
+    const hadRole = oldMember.roles.cache.has(discordVipRoleId);
+    const hasRole = newMember.roles.cache.has(discordVipRoleId);
+    if (hadRole || !hasRole) return;
+    const auth = db.getAuthByDiscordId(newMember.id);
+    if (!auth) return;
+    grantVipByAuth(auth, newMember.displayName);
+}
+
 const OWNER_ONLY_REPLY = { content: 'Только владелец может использовать эту команду.', ephemeral: true };
 const OWNER_OR_ADMIN_ONLY_REPLY = { content: 'Только владелец или админ может использовать эту команду.', ephemeral: true };
 
@@ -173,7 +270,7 @@ const OWNER_OR_ADMIN_ONLY_REPLY = { content: 'Только владелец ил
 // behavior command-for-command, just reading typed slash-command options instead
 // of parsing message text — /stats replies publicly (like !stats) since it's an
 // open lookup, the rest stay ephemeral (owner-only moderation/utility actions).
-async function handleSlashCommand(interaction, { discordOwnerId, discordAdminRoleId, db, state, getAuthArray, getPrintPlayerStats, relayToRoom, kickPlayerByAuth }) {
+async function handleSlashCommand(interaction, { discordOwnerId, discordAdminRoleId, db, state, getAuthArray, getPrintPlayerStats, relayToRoom, kickPlayerByAuth, muteByAuth, unmuteByAuth, getTimeStats }) {
     const { commandName } = interaction;
 
     if (commandName === 'say') {
@@ -181,6 +278,12 @@ async function handleSlashCommand(interaction, { discordOwnerId, discordAdminRol
         const text = interaction.options.getString('message');
         relayToRoom(interaction.user.displayName, text);
         return { content: `Отправлено: ${text}`, ephemeral: true };
+    }
+
+    if (commandName === 'tops') {
+        const key = interaction.options.getString('stat');
+        const content = await buildTopsReply(key, { db, getTimeStats });
+        return { content, ephemeral: true };
     }
 
     if (commandName === 'players') {
@@ -218,6 +321,25 @@ async function handleSlashCommand(interaction, { discordOwnerId, discordAdminRol
         return { content, ephemeral: true };
     }
 
+    if (commandName === 'muteauth') {
+        if (!isOwnerOrAdmin(interaction.user.id, interaction.member, discordOwnerId, discordAdminRoleId)) return OWNER_OR_ADMIN_ONLY_REPLY;
+        const auth = interaction.options.getString('auth');
+        const minutes = interaction.options.getInteger('minutes');
+        const result = await muteByAuth(auth, minutes);
+        const content = result.ok
+            ? `${result.name} заглушен на ${minutes} мин.`
+            : result.reason === 'admin' ? 'Нельзя заглушить администратора.' : 'Этого игрока сейчас нет в комнате.';
+        return { content, ephemeral: true };
+    }
+
+    if (commandName === 'unmuteauth') {
+        if (!isOwnerOrAdmin(interaction.user.id, interaction.member, discordOwnerId, discordAdminRoleId)) return OWNER_OR_ADMIN_ONLY_REPLY;
+        const auth = interaction.options.getString('auth');
+        const result = await unmuteByAuth(auth);
+        const content = result.ok ? `${result.name} размучен.` : 'Этот игрок сейчас не заглушен.';
+        return { content, ephemeral: true };
+    }
+
     if (commandName === 'stats') {
         const name = interaction.options.getString('name');
 
@@ -237,6 +359,42 @@ async function handleSlashCommand(interaction, { discordOwnerId, discordAdminRol
     return null;
 }
 
+// Builds an undici Dispatcher that tunnels every request through a SOCKS5
+// proxy — same recipe as the (unmaintained-for-our-undici-version) fetch-socks
+// package, reimplemented directly against *this* project's own `undici`
+// (the exact instance @discordjs/rest uses) so the Agent/Dispatcher classes
+// match. Passing a dispatcher built against a different undici copy fails
+// with "opts.dispatcher is not supported by instance methods", since undici
+// checks the object's class identity, not just its shape.
+function buildSocksDispatcher(proxyUrl) {
+    const parsed = new URL(proxyUrl);
+    const proxy = {
+        host: parsed.hostname,
+        port: Number(parsed.port),
+        type: 5,
+        userId: parsed.username ? decodeURIComponent(parsed.username) : undefined,
+        password: parsed.password ? decodeURIComponent(parsed.password) : undefined,
+    };
+    const tlsConnect = buildConnector({});
+    const connect = async (options, callback) => {
+        try {
+            const { socket } = await SocksClient.createConnection({
+                command: 'connect',
+                proxy,
+                destination: { host: options.hostname, port: Number(options.port) || (options.protocol === 'https:' ? 443 : 80) },
+            });
+            if (options.protocol === 'https:') {
+                tlsConnect({ ...options, httpSocket: socket }, callback);
+            } else {
+                callback(null, socket.setNoDelay());
+            }
+        } catch (err) {
+            callback(err, null);
+        }
+    };
+    return new UndiciAgent({ connect });
+}
+
 module.exports = function createDiscordBot({
     discordToken,
     discordLogChannelId,
@@ -244,8 +402,13 @@ module.exports = function createDiscordBot({
     discordOwnerId,
     discordAdminRoleId,
     discordAutoRoleId,
+    discordVipRoleId,
     discordStatusChannelId,
     discordPasswordChannelId,
+    discordAdminCallChannelId,
+    discordVotebanChannelId,
+    discordMentionAlertChannelId,
+    discordProxyUrl,
     maxPlayers,
     db,
     state,
@@ -253,25 +416,42 @@ module.exports = function createDiscordBot({
     getPrintPlayerStats,
     relayToRoom,
     kickPlayerByAuth,
+    grantVipByAuth,
+    muteByAuth,
+    unmuteByAuth,
+    getTimeStats,
 }) {
-    const client = new Client({
+    const clientOptions = {
         intents: [
             GatewayIntentBits.Guilds,
             GatewayIntentBits.GuildMessages,
             GatewayIntentBits.MessageContent,
-            // Needed to receive GuildMemberAdd at all — like MessageContent,
-            // this is a privileged intent that must also be enabled in the
-            // Discord Developer Portal (Bot > Privileged Gateway Intents >
-            // Server Members Intent), or client.login() will reject.
+            // Needed to receive GuildMemberAdd/GuildMemberUpdate at all
+            // (the latter is what notices someone getting the VIP role) —
+            // like MessageContent, this is a privileged intent that must
+            // also be enabled in the Discord Developer Portal (Bot >
+            // Privileged Gateway Intents > Server Members Intent), or
+            // client.login() will reject.
             GatewayIntentBits.GuildMembers,
         ],
-    });
+    };
+    // Routes only this REST client's traffic through the SOCKS5 proxy — the
+    // gateway (WebSocket) side is proxied separately in discordProcess.js,
+    // since @discordjs/ws doesn't expose an agent option here. Never touches
+    // the room/Puppeteer connection, which lives in a different process.
+    if (discordProxyUrl) {
+        clientOptions.rest = { agent: buildSocksDispatcher(discordProxyUrl) };
+    }
+    const client = new Client(clientOptions);
 
     let logChannel = null;
     let reportChannel = null;
     let statusChannel = null;
     let statusMessage = null;
     let passwordChannel = null;
+    let adminCallChannel = null;
+    let votebanChannel = null;
+    let mentionAlertChannel = null;
     let roomLink = null;
 
     // Keeps a single message live in discordStatusChannelId, with a real
@@ -315,6 +495,9 @@ module.exports = function createDiscordBot({
         if (discordReportChannelId) reportChannel = await client.channels.fetch(discordReportChannelId).catch(() => null);
         if (discordStatusChannelId) statusChannel = await client.channels.fetch(discordStatusChannelId).catch(() => null);
         if (discordPasswordChannelId) passwordChannel = await client.channels.fetch(discordPasswordChannelId).catch(() => null);
+        if (discordAdminCallChannelId) adminCallChannel = await client.channels.fetch(discordAdminCallChannelId).catch(() => null);
+        if (discordVotebanChannelId) votebanChannel = await client.channels.fetch(discordVotebanChannelId).catch(() => null);
+        if (discordMentionAlertChannelId) mentionAlertChannel = await client.channels.fetch(discordMentionAlertChannelId).catch(() => null);
         if (statusChannel) {
             const savedMessageId = db.getSetting(STATUS_MESSAGE_SETTING_KEY);
             if (savedMessageId) statusMessage = await statusChannel.messages.fetch(savedMessageId).catch(() => null);
@@ -327,7 +510,7 @@ module.exports = function createDiscordBot({
     });
 
     client.on(Events.MessageCreate, async (message) => {
-        const reply = await handleIncomingMessage(message, { discordOwnerId, discordAdminRoleId, db, state, getAuthArray, getPrintPlayerStats, relayToRoom, kickPlayerByAuth });
+        const reply = await handleIncomingMessage(message, { discordOwnerId, discordAdminRoleId, db, state, getAuthArray, getPrintPlayerStats, relayToRoom, kickPlayerByAuth, muteByAuth, unmuteByAuth, getTimeStats });
         if (reply) message.channel.send(reply).catch((err) => console.error('Discord reply failed:', err));
     });
 
@@ -335,9 +518,13 @@ module.exports = function createDiscordBot({
         handleGuildMemberAdd(member, { discordAutoRoleId });
     });
 
+    client.on(Events.GuildMemberUpdate, (oldMember, newMember) => {
+        handleGuildMemberUpdate(oldMember, newMember, { discordVipRoleId, db, grantVipByAuth });
+    });
+
     client.on(Events.InteractionCreate, async (interaction) => {
         if (!interaction.isChatInputCommand()) return;
-        const reply = await handleSlashCommand(interaction, { discordOwnerId, discordAdminRoleId, db, state, getAuthArray, getPrintPlayerStats, relayToRoom, kickPlayerByAuth });
+        const reply = await handleSlashCommand(interaction, { discordOwnerId, discordAdminRoleId, db, state, getAuthArray, getPrintPlayerStats, relayToRoom, kickPlayerByAuth, muteByAuth, unmuteByAuth, getTimeStats });
         if (reply) interaction.reply(reply).catch((err) => console.error('Discord interaction reply failed:', err));
     });
 
@@ -380,6 +567,50 @@ module.exports = function createDiscordBot({
             .catch((err) => console.error('Discord sendPassword failed:', err));
     }
 
+    // !report (player.js) — pings admins in a dedicated channel. The
+    // `parse: ['everyone']` allowedMentions flag covers @here too (Discord
+    // treats @everyone/@here as the same mention category), and is needed
+    // to actually trigger a ping — without it, discord.js still renders the
+    // text but suppresses the notification.
+    function sendAdminCall(playerName) {
+        if (!adminCallChannel) return;
+        adminCallChannel.send({
+            content: `@here **${playerName}** позвал админа!`,
+            allowedMentions: { parse: ['everyone'] },
+        }).catch((err) => console.error('Discord sendAdminCall failed:', err));
+    }
+
+    // !voteban (voteBan.js) — posted only once a vote actually passes and
+    // the target gets banned, not on every vote.
+    function sendVoteBanNotification({ targetName, durationMinutes, votesFor, votesAgainst, abstained }) {
+        if (!votebanChannel) return;
+        const embed = new EmbedBuilder()
+            .setTitle('🔨 Бан по голосованию')
+            .setDescription(`**${targetName}** забанен(а) голосованием игроков на ${durationMinutes} мин.`)
+            .addFields(
+                { name: 'За', value: String(votesFor), inline: true },
+                { name: 'Против', value: String(votesAgainst), inline: true },
+                { name: 'Воздержались', value: String(abstained), inline: true },
+            )
+            .setColor(0xe74c3c)
+            .setTimestamp();
+        votebanChannel.send({ embeds: [embed] }).catch((err) => console.error('Discord sendVoteBanNotification failed:', err));
+    }
+
+    // events/activity.js's onPlayerChat — fires whenever a chat message
+    // contains "@<MENTION_WATCH_NAME>". allowedMentions.users is scoped to
+    // JUST discordOwnerId: `text` is raw, untrusted room chat, and without
+    // this restriction a player typing "@everyone" would get relayed as a
+    // real @everyone ping (discord.js parses all mentions in content by
+    // default unless allowedMentions explicitly narrows them).
+    function sendMentionAlert(speakerName, text) {
+        if (!mentionAlertChannel || !discordOwnerId) return;
+        mentionAlertChannel.send({
+            content: `<@${discordOwnerId}> **${speakerName}** упомянул(а) вас в чате: ${text}`,
+            allowedMentions: { users: [discordOwnerId] },
+        }).catch((err) => console.error('Discord sendMentionAlert failed:', err));
+    }
+
     return {
         init,
         sendLog,
@@ -388,6 +619,9 @@ module.exports = function createDiscordBot({
         setRoomLink,
         updateRoomStatus,
         sendPassword,
+        sendAdminCall,
+        sendVoteBanNotification,
+        sendMentionAlert,
     };
 };
 
@@ -396,5 +630,6 @@ module.exports = function createDiscordBot({
 module.exports.handleIncomingMessage = handleIncomingMessage;
 module.exports.handleSlashCommand = handleSlashCommand;
 module.exports.handleGuildMemberAdd = handleGuildMemberAdd;
+module.exports.handleGuildMemberUpdate = handleGuildMemberUpdate;
 module.exports.resolveStatsByName = resolveStatsByName;
 module.exports.listCurrentPlayers = listCurrentPlayers;

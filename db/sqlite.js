@@ -61,12 +61,16 @@ function createSqliteDatabase(filePath = path.join(__dirname, 'haxlab.sqlite')) 
     // VIPs get no extra permissions (no command role check treats them
     // specially) — this is purely cosmetic, a chat prefix. Same DB-backed
     // pattern as admins/masters rather than a runtime-only list, so it
-    // survives a bot restart.
+    // survives a bot restart. expires_at is nullable — NULL means a
+    // permanent grant, same nullable-means-permanent convention as
+    // auth_bans (see banAuth/getAuthBan below), except here a permanent
+    // grant is still a normal, supported case, not just legacy data.
     const vipsStatement = database.prepare(`
         CREATE TABLE IF NOT EXISTS vips (
             auth TEXT PRIMARY KEY,
             player_name TEXT NOT NULL,
-            added_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            added_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            expires_at TEXT
         );
     `);
 
@@ -101,14 +105,53 @@ function createSqliteDatabase(filePath = path.join(__dirname, 'haxlab.sqlite')) 
         );
     `);
 
+    // Per-(auth, command) restriction blocking a specific player from using a
+    // specific self-service room command (currently 'voteban'/'report') —
+    // see !restrictcmd/!unrestrictcmd (commands/master.js). Same nullable
+    // expires_at = permanent convention as auth_bans, but keyed on the pair
+    // since one player can be restricted from one command and not the other.
+    const commandRestrictionsStatement = database.prepare(`
+        CREATE TABLE IF NOT EXISTS command_restrictions (
+            auth TEXT NOT NULL,
+            command TEXT NOT NULL,
+            player_name TEXT NOT NULL,
+            reason TEXT NOT NULL DEFAULT '',
+            restricted_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            expires_at TEXT,
+            PRIMARY KEY (auth, command)
+        );
+    `);
+
     // Generic key/value store for small bits of bot state that need to survive
     // a restart but don't warrant their own table — e.g. the Discord status
     // message ID, so the bot edits the same message instead of leaving a stale
     // one (with a dead room link) behind every time the process restarts.
+    // Also holds 'currentSeason' (see getCurrentSeason/closeSeason below) and
+    // one 'seasonClosed:<N>' flag per season already closed, same
+    // once-only-migration-guard idea as scripts/migrate-size-levels.js.
     const settingsStatement = database.prepare(`
         CREATE TABLE IF NOT EXISTS bot_settings (
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL
+        );
+    `);
+
+    // A permanent, frozen snapshot of each closed season's top-3 (see
+    // closeSeason below) — unlike player_stats' live games/wins/goals/...
+    // (reset to 0 when a season closes), these rows are never touched again
+    // once written, so a player who held rank 1-3 keeps that exact title
+    // forever, independent of anything that happens in later seasons.
+    // (season, category, rank) is the PK since exactly one player ever holds
+    // a given rank in a given category in a given season.
+    const seasonTrophiesStatement = database.prepare(`
+        CREATE TABLE IF NOT EXISTS season_trophies (
+            season INTEGER NOT NULL,
+            category TEXT NOT NULL,
+            rank INTEGER NOT NULL,
+            auth TEXT NOT NULL,
+            player_name TEXT NOT NULL,
+            value REAL NOT NULL,
+            PRIMARY KEY (season, category, rank)
         );
     `);
 
@@ -194,10 +237,13 @@ function createSqliteDatabase(filePath = path.join(__dirname, 'haxlab.sqlite')) 
         mastersStatement.run();
         adminsStatement.run();
         vipsStatement.run();
+        addColumnIfMissing('vips', 'expires_at TEXT');
         discordLinksStatement.run();
         authBansStatement.run();
         addColumnIfMissing('auth_bans', 'expires_at TEXT');
+        commandRestrictionsStatement.run();
         settingsStatement.run();
+        seasonTrophiesStatement.run();
         playerItemsStatement.run();
         addColumnIfMissing('player_stats', 'balance INTEGER NOT NULL DEFAULT 0');
         addColumnIfMissing('player_stats', 'equipped_form TEXT');
@@ -205,6 +251,9 @@ function createSqliteDatabase(filePath = path.join(__dirname, 'haxlab.sqlite')) 
         addColumnIfMissing('player_stats', 'equipped_size TEXT');
         addColumnIfMissing('player_stats', 'equipped_trophy TEXT');
         addColumnIfMissing('player_stats', 'hide_custom_colors INTEGER NOT NULL DEFAULT 0');
+        addColumnIfMissing('player_stats', 'vip_color INTEGER');
+        addColumnIfMissing('player_stats', 'daily_streak INTEGER NOT NULL DEFAULT 0');
+        addColumnIfMissing('player_stats', 'last_daily_at TEXT');
         addColumnIfMissing('player_items', 'level INTEGER NOT NULL DEFAULT 1');
         clubsStatement.run();
         clubMembersStatement.run();
@@ -212,6 +261,13 @@ function createSqliteDatabase(filePath = path.join(__dirname, 'haxlab.sqlite')) 
         addColumnIfMissing('clubs', 'emoji TEXT');
         addColumnIfMissing('clubs', 'assistant_auth TEXT');
         addColumnIfMissing('clubs', 'color_unlocked INTEGER NOT NULL DEFAULT 0');
+        // !tops clubs (see addClubStats/getTopClubs below) — goals/assists/
+        // clean_sheets credited to a club whenever a CURRENT member earns
+        // them (see roomStats.js's updatePlayerStats), weighted equally
+        // (each worth 1 toward the combined ranking score).
+        addColumnIfMissing('clubs', 'goals INTEGER NOT NULL DEFAULT 0');
+        addColumnIfMissing('clubs', 'assists INTEGER NOT NULL DEFAULT 0');
+        addColumnIfMissing('clubs', 'clean_sheets INTEGER NOT NULL DEFAULT 0');
         return true;
     }
 
@@ -313,15 +369,19 @@ function createSqliteDatabase(filePath = path.join(__dirname, 'haxlab.sqlite')) 
         playtime: 'playtime',
     };
 
+    // `auth` is included alongside the display fields specifically so a
+    // caller can check "is THIS auth in the top N" reliably (see
+    // voteBan.js's protected-top-10 check) — matching by player_name alone
+    // would be fragile (not unique, changes via !rename).
     function getLeaderboard(statKey, limit) {
         const column = LEADERBOARD_COLUMNS[statKey];
         if (!column) throw new Error(`getLeaderboard: unknown statKey "${statKey}"`);
 
         const rows = database
-            .prepare(`SELECT player_name, ${column} AS value FROM player_stats ORDER BY ${column} DESC LIMIT ?`)
+            .prepare(`SELECT auth, player_name AS playerName, ${column} AS value FROM player_stats ORDER BY ${column} DESC LIMIT ?`)
             .all(limit);
 
-        return rows.map((row) => ({ playerName: row.player_name, value: row.value }));
+        return rows.map((row) => ({ auth: row.auth, playerName: row.playerName, value: row.value }));
     }
 
     // Rank of a given stat value among all players (1-indexed, ties share the
@@ -369,19 +429,28 @@ function createSqliteDatabase(filePath = path.join(__dirname, 'haxlab.sqlite')) 
         database.prepare('DELETE FROM admins WHERE auth = ?').run(auth);
     }
 
+    // Sweeps expired grants (like getAuthBans does for bans) before
+    // reading, so an expired VIP never needs a separate cleanup job — the
+    // list this returns is always the currently-active set.
     function getVips() {
+        database.prepare('DELETE FROM vips WHERE expires_at IS NOT NULL AND expires_at <= ?').run(new Date().toISOString());
         return database
-            .prepare('SELECT auth, player_name AS playerName FROM vips')
+            .prepare('SELECT auth, player_name AS playerName, expires_at AS expiresAt FROM vips')
             .all();
     }
 
-    function addVip(auth, playerName) {
+    // expiresAt is an already-computed ISO string (or null for a permanent
+    // grant) rather than a raw duration — unlike banAuth's durationMinutes,
+    // the caller (commands/master.js) also needs this exact value to keep
+    // state.vipList's cached copy in sync, so it computes it once itself
+    // rather than have two places derive it and risk drifting apart.
+    function addVip(auth, playerName, expiresAt) {
         database
             .prepare(
-                `INSERT INTO vips (auth, player_name) VALUES (?, ?)
-                 ON CONFLICT(auth) DO UPDATE SET player_name = excluded.player_name`
+                `INSERT INTO vips (auth, player_name, expires_at) VALUES (?, ?, ?)
+                 ON CONFLICT(auth) DO UPDATE SET player_name = excluded.player_name, expires_at = excluded.expires_at`
             )
-            .run(auth, playerName);
+            .run(auth, playerName, expiresAt ?? null);
     }
 
     function removeVip(auth) {
@@ -390,13 +459,18 @@ function createSqliteDatabase(filePath = path.join(__dirname, 'haxlab.sqlite')) 
 
     // A player may relink to a different Discord account (e.g. a typo the
     // first time), so this upserts rather than rejecting an existing link.
+    // Returns whether `auth` had no prior link at all, so callers (the
+    // one-time link bonus in commands/player.js) can tell a genuine first
+    // link apart from a relink.
     function linkDiscordId(auth, discordId) {
+        const isNewLink = !database.prepare('SELECT 1 FROM discord_links WHERE auth = ?').get(auth);
         database
             .prepare(
                 `INSERT INTO discord_links (auth, discord_id, linked_at) VALUES (@auth, @discordId, CURRENT_TIMESTAMP)
                  ON CONFLICT(auth) DO UPDATE SET discord_id = excluded.discord_id, linked_at = CURRENT_TIMESTAMP`
             )
             .run({ auth, discordId });
+        return isNewLink;
     }
 
     function getDiscordIdByAuth(auth) {
@@ -462,6 +536,52 @@ function createSqliteDatabase(filePath = path.join(__dirname, 'haxlab.sqlite')) 
             .all();
     }
 
+    // durationMinutes falsy (0/null/undefined) means permanent — same
+    // convention banAuth's own expiresAt ternary uses, just not gated behind
+    // a "always mandatory" command-layer rule like banAuth's is: !restrictcmd
+    // deliberately supports both temporary and permanent restrictions.
+    function restrictCommand(auth, command, playerName, reason, durationMinutes) {
+        const expiresAt = durationMinutes ? new Date(Date.now() + durationMinutes * 60000).toISOString() : null;
+        database
+            .prepare(
+                `INSERT INTO command_restrictions (auth, command, player_name, reason, restricted_at, expires_at)
+                 VALUES (@auth, @command, @playerName, @reason, CURRENT_TIMESTAMP, @expiresAt)
+                 ON CONFLICT(auth, command) DO UPDATE SET
+                    player_name = excluded.player_name,
+                    reason = excluded.reason,
+                    restricted_at = CURRENT_TIMESTAMP,
+                    expires_at = excluded.expires_at`
+            )
+            .run({ auth, command, playerName: playerName ?? '', reason: reason ?? '', expiresAt });
+    }
+
+    function unrestrictCommand(auth, command) {
+        database.prepare('DELETE FROM command_restrictions WHERE auth = ? AND command = ?').run(auth, command);
+    }
+
+    // A restriction past its expiry is functionally identical to no
+    // restriction at all — deleted here (not just filtered out) for the same
+    // reason getAuthBan does it: no separate cleanup job needed, and every
+    // caller sees the same up-to-date picture.
+    function getCommandRestriction(auth, command) {
+        const row = database
+            .prepare('SELECT auth, command, player_name AS playerName, reason, expires_at AS expiresAt FROM command_restrictions WHERE auth = ? AND command = ?')
+            .get(auth, command);
+        if (!row) return null;
+        if (isBanExpired(row.expiresAt)) {
+            database.prepare('DELETE FROM command_restrictions WHERE auth = ? AND command = ?').run(auth, command);
+            return null;
+        }
+        return row;
+    }
+
+    function getCommandRestrictions() {
+        database.prepare('DELETE FROM command_restrictions WHERE expires_at IS NOT NULL AND expires_at <= ?').run(new Date().toISOString());
+        return database
+            .prepare('SELECT auth, command, player_name AS playerName, reason, expires_at AS expiresAt FROM command_restrictions ORDER BY restricted_at DESC')
+            .all();
+    }
+
     // Upserts so a player who has never finished a quals game (and so has no
     // player_stats row yet — see roomStats.js's full-house gate) still gets
     // a row the first time they ever earn coins, instead of needing one to
@@ -481,6 +601,54 @@ function createSqliteDatabase(filePath = path.join(__dirname, 'haxlab.sqlite')) 
     function getBalance(auth) {
         const row = database.prepare('SELECT balance FROM player_stats WHERE auth = ?').get(auth);
         return row ? row.balance : 0;
+    }
+
+    // Atomic like buyItem/upgradeItem below: checks and deducts within this
+    // same synchronous call, so a caller (see core/commands/minigames.js's
+    // wager resolution) can't be double-charged or race a balance check
+    // against a concurrent spend. Returns false (no charge) on insufficient
+    // funds.
+    function spendCoins(auth, playerName, amount) {
+        if (getBalance(auth) < amount) return false;
+        addCoins(auth, playerName, -amount);
+        return true;
+    }
+
+    // !daily-style login bonus (see economy.js's onPlayerJoin hook) — day N
+    // of the streak pays coinsPerStreak*N, capped at maxStreak (day
+    // maxStreak+1 wraps back around to day 1 rather than growing forever).
+    // Whole read-decide-write sequence happens inside this one synchronous
+    // call (same reasoning as buyItem/upgradeItem) so two joins landing close
+    // together — e.g. a reconnect — can't race their way into a double
+    // payout for the same day. Returns null (no charge) if `auth` already
+    // claimed today; otherwise { amount, streak, newBalance }.
+    function claimDailyBonus(auth, playerName, coinsPerStreak, maxStreak) {
+        const todayStr = new Date().toISOString().slice(0, 10);
+        const row = database.prepare('SELECT balance, daily_streak, last_daily_at FROM player_stats WHERE auth = ?').get(auth);
+        if (row && row.last_daily_at === todayStr) return null;
+
+        const yesterday = new Date();
+        yesterday.setUTCDate(yesterday.getUTCDate() - 1);
+        const yesterdayStr = yesterday.toISOString().slice(0, 10);
+
+        const wasConsecutive = row && row.last_daily_at === yesterdayStr;
+        let streak = wasConsecutive ? row.daily_streak + 1 : 1;
+        if (streak > maxStreak) streak = 1;
+
+        const amount = streak * coinsPerStreak;
+        database
+            .prepare(
+                `INSERT INTO player_stats (auth, player_name, balance, daily_streak, last_daily_at)
+                 VALUES (@auth, @playerName, @amount, @streak, @todayStr)
+                 ON CONFLICT(auth) DO UPDATE SET
+                    balance = balance + @amount,
+                    daily_streak = @streak,
+                    last_daily_at = @todayStr`
+            )
+            .run({ auth, playerName: playerName ?? '', amount, streak, todayStr });
+
+        const newBalance = (row ? row.balance : 0) + amount;
+        return { amount, streak, newBalance };
     }
 
     function getOwnedItemIds(auth) {
@@ -519,6 +687,21 @@ function createSqliteDatabase(filePath = path.join(__dirname, 'haxlab.sqlite')) 
     function getItemLevel(auth, itemId) {
         const row = database.prepare('SELECT level FROM player_items WHERE auth = ? AND item_id = ?').get(auth, itemId);
         return row ? row.level : 0;
+    }
+
+    // Migration-only (see scripts/migrate-size-levels.js) — every owner of a
+    // given upgradeable item, with their raw current level. No in-game
+    // command reads this; it exists purely to let a script re-derive every
+    // affected auth when an item's level scale itself changes.
+    function getItemOwners(itemId) {
+        return database.prepare('SELECT auth, level FROM player_items WHERE item_id = ?').all(itemId);
+    }
+
+    // Migration-only, same reasoning as getItemOwners — a raw level write
+    // with no cost/balance logic at all, unlike upgradeItem. Never called
+    // from an in-game command.
+    function setItemLevel(auth, itemId, level) {
+        database.prepare('UPDATE player_items SET level = ? WHERE auth = ? AND item_id = ?').run(level, auth, itemId);
     }
 
     // Atomic like buyItem: re-reads the current level and re-checks the
@@ -604,6 +787,32 @@ function createSqliteDatabase(filePath = path.join(__dirname, 'haxlab.sqlite')) 
             .map((row) => row.auth);
     }
 
+    // !vipcolor (see commands/player.js) — a VIP's own override for their
+    // role's chat color (vipChatColor, see constants.js), which everyone
+    // sees the same way (unlike !customcolors' per-viewer club-color
+    // opt-out — this isn't personalizable per-viewer, just per-VIP-sender).
+    // color may be null to clear back to the shared default. Upserts for
+    // the same reason setHideCustomColors does: a VIP may not have a
+    // player_stats row yet.
+    function setVipColor(auth, color) {
+        database
+            .prepare(
+                `INSERT INTO player_stats (auth, player_name, vip_color)
+                 VALUES (@auth, '', @color)
+                 ON CONFLICT(auth) DO UPDATE SET vip_color = @color`
+            )
+            .run({ auth, color });
+    }
+
+    // Every auth with a custom VIP color set — loaded once at startup into
+    // state.vipColors (see entry.js), same in-memory-cache reasoning as
+    // hiddenCustomColorsSet/equippedTrophies/clubs above.
+    function getAllVipColors() {
+        return database
+            .prepare('SELECT auth, vip_color AS color FROM player_stats WHERE vip_color IS NOT NULL')
+            .all();
+    }
+
     // Same >=5-player quorum as printRankings' leaderboards (see
     // roomStats.js) before anyone is "Top-3" at all — otherwise the first
     // few players in a fresh room would all hand themselves trophies off a
@@ -637,6 +846,72 @@ function createSqliteDatabase(filePath = path.join(__dirname, 'haxlab.sqlite')) 
             wr: topWinrate,
             pt: topByColumn('playtime'),
         };
+    }
+
+    /* SEASONS */
+
+    // 0 until the very first closeSeason() ever runs (no 'currentSeason' key
+    // yet) — the season currently being played is "season 0" by convention,
+    // matching how getTopPlayers()/state.topPlayers already behaves with no
+    // season concept at all today.
+    function getCurrentSeason() {
+        return parseInt(getSetting('currentSeason') ?? '0', 10);
+    }
+
+    // Every already-closed season's frozen top-3, across every category —
+    // loaded once into state.seasonTrophies at startup (see entry.js), same
+    // in-memory-cache reasoning as getAllEquippedTrophies/getAllClubs/etc,
+    // since these rows never change again once closeSeason() writes them.
+    function getSeasonTrophies() {
+        return database
+            .prepare('SELECT season, category, rank, auth, player_name AS playerName, value FROM season_trophies ORDER BY season DESC, category, rank')
+            .all();
+    }
+
+    // Ends the current season: freezes its top-3 (via getTopPlayers(), same
+    // quorum/ranking rules as the live !trophy display) into season_trophies
+    // forever, resets every player's GAME stats to 0 — but deliberately
+    // leaves balance, owned shop items (player_items), equipped cosmetics,
+    // daily_streak and every other non-stat column untouched — then advances
+    // currentSeason by one. A player who held rank 1-3 keeps showing that
+    // exact title afterward simply by re-pointing their !trophy pick at the
+    // now-closed season (see commands/trophies.js) — their equipped_trophy
+    // column itself needs no migration, it just naturally stops matching the
+    // (now all-zero) live standings until they either pick the frozen
+    // season's trophy or earn a new one.
+    // Guarded by a 'seasonClosed:<N>' bot_settings flag (same idempotency
+    // pattern as scripts/migrate-size-levels.js's MIGRATION_FLAG) so running
+    // this twice — a restart mid-run, or by mistake — can't double-close a
+    // season or wipe stats a second time.
+    function closeSeason() {
+        const season = getCurrentSeason();
+        const closedFlagKey = `seasonClosed:${season}`;
+        if (getSetting(closedFlagKey) != null) {
+            return { alreadyClosed: true, season };
+        }
+
+        const top = getTopPlayers();
+        const insertTrophy = database.prepare(
+            'INSERT INTO season_trophies (season, category, rank, auth, player_name, value) VALUES (?, ?, ?, ?, ?, ?)'
+        );
+        let trophiesSaved = 0;
+        for (const [category, entries] of Object.entries(top)) {
+            entries.forEach((entry, i) => {
+                insertTrophy.run(season, category, i + 1, entry.auth, entry.playerName, entry.value);
+                trophiesSaved++;
+            });
+        }
+
+        database.exec(
+            `UPDATE player_stats SET
+                games = 0, wins = 0, goals = 0, assists = 0, own_goals = 0,
+                clean_sheets = 0, playtime = 0, updated_at = CURRENT_TIMESTAMP`
+        );
+
+        setSetting(closedFlagKey, new Date().toISOString());
+        setSetting('currentSeason', String(season + 1));
+
+        return { alreadyClosed: false, season, nextSeason: season + 1, trophiesSaved };
     }
 
     /* CLUBS */
@@ -767,7 +1042,7 @@ function createSqliteDatabase(filePath = path.join(__dirname, 'haxlab.sqlite')) 
         database.prepare('DELETE FROM clubs WHERE id = ?').run(clubId);
     }
 
-    // Gated behind !clubcolors buy (see commands/club.js) — setClubColor
+    // Gated behind !club color buy (see commands/club.js) — setClubColor
     // itself doesn't check colorUnlocked, that's the caller's job, same
     // division of labor as ownership/role checks throughout club.js.
     function setClubColor(clubId, color) {
@@ -820,6 +1095,40 @@ function createSqliteDatabase(filePath = path.join(__dirname, 'haxlab.sqlite')) 
         return true;
     }
 
+    // !tops clubs (see stats/print.js's buildClubRankingString) — called
+    // once per player per completed match, same granularity as
+    // savePlayerStats itself (see roomStats.js's updatePlayerStats), for
+    // whichever club that player currently belongs to. A no-op call (all
+    // three 0, e.g. a player who neither scored nor kept a clean sheet) is
+    // skipped entirely rather than issuing a pointless UPDATE.
+    function addClubStats(clubId, { goals = 0, assists = 0, cleanSheets = 0 } = {}) {
+        if (goals === 0 && assists === 0 && cleanSheets === 0) return;
+        database
+            .prepare('UPDATE clubs SET goals = goals + ?, assists = assists + ?, clean_sheets = clean_sheets + ? WHERE id = ?')
+            .run(goals, assists, cleanSheets, clubId);
+    }
+
+    // Ranked by combined score — goals + assists + clean_sheets, each
+    // weighted equally (worth 1 apiece, no category outweighing another) —
+    // NOT the same 5-entry quorum player leaderboards require (see
+    // getLeaderboard/print.js's buildRankingString): clubs are a much
+    // scarcer resource than players (coin-gated creation via !clubcreate),
+    // so requiring 5 of them to exist would make this near-useless in a
+    // typical room. A club that hasn't scored anything at all (score 0) is
+    // excluded rather than padding the list with zeroes.
+    function getTopClubs(limit) {
+        return database
+            .prepare(
+                `SELECT id, name, prefix, emoji, goals, assists, clean_sheets AS cleanSheets,
+                    (goals + assists + clean_sheets) AS score
+                 FROM clubs
+                 WHERE (goals + assists + clean_sheets) > 0
+                 ORDER BY score DESC
+                 LIMIT ?`
+            )
+            .all(limit);
+    }
+
     // VACUUM INTO takes a consistent, atomic snapshot even while the DB is
     // open and being written to (unlike copying the .sqlite file directly,
     // which risks grabbing it mid-write since it's in WAL mode). destPath is
@@ -864,23 +1173,36 @@ function createSqliteDatabase(filePath = path.join(__dirname, 'haxlab.sqlite')) 
         unbanAuth,
         getAuthBan,
         getAuthBans,
+        restrictCommand,
+        unrestrictCommand,
+        getCommandRestriction,
+        getCommandRestrictions,
         backup,
         getSetting,
         setSetting,
         saveGameReport,
         addCoins,
         getBalance,
+        spendCoins,
+        claimDailyBonus,
         getOwnedItemIds,
         ownsItem,
         buyItem,
         getItemLevel,
+        getItemOwners,
+        setItemLevel,
         upgradeItem,
         setEquipped,
         getEquipped,
         getAllEquippedTrophies,
         setHideCustomColors,
         getAllHiddenCustomColors,
+        setVipColor,
+        getAllVipColors,
         getTopPlayers,
+        getCurrentSeason,
+        getSeasonTrophies,
+        closeSeason,
         getClub,
         getAllClubs,
         getAllClubMembers,
@@ -896,6 +1218,8 @@ function createSqliteDatabase(filePath = path.join(__dirname, 'haxlab.sqlite')) 
         setClubEmoji,
         setClubAssistant,
         buyClubSlot,
+        addClubStats,
+        getTopClubs,
         close,
     };
 }

@@ -40,8 +40,8 @@ function createDatabaseApi(options = {}) {
         getVips() {
             return sqlite.getVips();
         },
-        addVip(auth, playerName) {
-            return sqlite.addVip(auth, playerName);
+        addVip(auth, playerName, expiresAt) {
+            return sqlite.addVip(auth, playerName, expiresAt);
         },
         removeVip(auth) {
             return sqlite.removeVip(auth);
@@ -67,6 +67,18 @@ function createDatabaseApi(options = {}) {
         getAuthBans() {
             return sqlite.getAuthBans();
         },
+        restrictCommand(auth, command, playerName, reason, durationMinutes) {
+            return sqlite.restrictCommand(auth, command, playerName, reason, durationMinutes);
+        },
+        unrestrictCommand(auth, command) {
+            return sqlite.unrestrictCommand(auth, command);
+        },
+        getCommandRestriction(auth, command) {
+            return sqlite.getCommandRestriction(auth, command);
+        },
+        getCommandRestrictions() {
+            return sqlite.getCommandRestrictions();
+        },
         backup(destPath) {
             return sqlite.backup(destPath);
         },
@@ -85,6 +97,12 @@ function createDatabaseApi(options = {}) {
         getBalance(auth) {
             return sqlite.getBalance(auth);
         },
+        spendCoins(auth, playerName, amount) {
+            return sqlite.spendCoins(auth, playerName, amount);
+        },
+        claimDailyBonus(auth, playerName, coinsPerStreak, maxStreak) {
+            return sqlite.claimDailyBonus(auth, playerName, coinsPerStreak, maxStreak);
+        },
         getOwnedItemIds(auth) {
             return sqlite.getOwnedItemIds(auth);
         },
@@ -96,6 +114,12 @@ function createDatabaseApi(options = {}) {
         },
         getItemLevel(auth, itemId) {
             return sqlite.getItemLevel(auth, itemId);
+        },
+        getItemOwners(itemId) {
+            return sqlite.getItemOwners(itemId);
+        },
+        setItemLevel(auth, itemId, level) {
+            return sqlite.setItemLevel(auth, itemId, level);
         },
         upgradeItem(auth, playerName, itemId, cost, expectedCurrentLevel) {
             return sqlite.upgradeItem(auth, playerName, itemId, cost, expectedCurrentLevel);
@@ -115,8 +139,23 @@ function createDatabaseApi(options = {}) {
         getAllHiddenCustomColors() {
             return sqlite.getAllHiddenCustomColors();
         },
+        setVipColor(auth, color) {
+            return sqlite.setVipColor(auth, color);
+        },
+        getAllVipColors() {
+            return sqlite.getAllVipColors();
+        },
         getTopPlayers() {
             return sqlite.getTopPlayers();
+        },
+        getCurrentSeason() {
+            return sqlite.getCurrentSeason();
+        },
+        getSeasonTrophies() {
+            return sqlite.getSeasonTrophies();
+        },
+        closeSeason() {
+            return sqlite.closeSeason();
         },
         getClub(clubId) {
             return sqlite.getClub(clubId);
@@ -162,6 +201,12 @@ function createDatabaseApi(options = {}) {
         },
         buyClubSlot(auth, clubId, cost) {
             return sqlite.buyClubSlot(auth, clubId, cost);
+        },
+        addClubStats(clubId, deltas) {
+            return sqlite.addClubStats(clubId, deltas);
+        },
+        getTopClubs(limit) {
+            return sqlite.getTopClubs(limit);
         },
         close() {
             return sqlite.close();

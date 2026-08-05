@@ -6,6 +6,7 @@
   "main": "HaxBot_public.js",
   "scripts": {
     "start": "node HaxBot_public.js",
+    "test": "node HaxBot_test.js",
     "check": "node tools/check-all.js",
     "check:deps": "node tools/check-module-deps.js",
     "check:parity": "node tools/audit-parity.js",
@@ -15,7 +16,10 @@
   "dependencies": {
     "discord.js": "^14.27.0",
     "esbuild": "^0.28.1",
-    "puppeteer": "^25.3.0"
+    "puppeteer": "^25.3.0",
+    "socks": "^2.8.9",
+    "socks-proxy-agent": "^10.1.0",
+    "undici": "^6.28.0"
   },
   "engines": {
     "node": ">=22.18"

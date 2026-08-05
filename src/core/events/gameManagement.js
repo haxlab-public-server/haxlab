@@ -35,6 +35,7 @@ module.exports = function createGameManagementEvents({
     handlePlayersStop,
     playGoalAnimation,
     playGoalSizeEffect,
+    resetPauseVotes,
     updateTeams,
 }) {
     function onGameStart(byPlayer) {
@@ -51,6 +52,11 @@ module.exports = function createGameManagementEvents({
         state.lastTeamTouched = Team.SPECTATORS;
         state.teamRedStats = [];
         state.teamBlueStats = [];
+        // !votepause (see core/pauseVote.js) — once-per-match allowance
+        // resets on every fresh match, same as the rest of this function's
+        // per-round state.
+        resetPauseVotes();
+        state.pauseVoteUsed = { [Team.RED]: false, [Team.BLUE]: false };
         if (state.teamRed.length == teamSize && state.teamBlue.length == teamSize) {
             for (let i = 0; i < teamSize; i++) {
                 state.teamRedStats.push(state.teamRed[i]);
@@ -75,6 +81,7 @@ module.exports = function createGameManagementEvents({
         clearTimeout(state.stopTimeout);
         clearTimeout(state.unpauseTimeout);
         if (byPlayer != null) clearTimeout(state.startTimeout);
+        resetPauseVotes();
         state.game.rec = room.stopRecording();
         if (
             !state.cancelGameVariable && state.game.playerComp[0].length + state.game.playerComp[1].length > 0 &&

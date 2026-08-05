@@ -44,6 +44,15 @@ function createBridgedDiscordBot({ state, authArray }) {
         sendPassword(password) {
             window.__discordSend('password', { password });
         },
+        sendAdminCall(playerName) {
+            window.__discordSend('adminCall', { playerName });
+        },
+        sendMentionAlert(speakerName, text) {
+            window.__discordSend('mentionAlert', { speakerName, text });
+        },
+        sendVoteBanNotification({ targetName, durationMinutes, votesFor, votesAgainst, abstained }) {
+            window.__discordSend('voteBanNotification', { targetName, durationMinutes, votesFor, votesAgainst, abstained });
+        },
         updateRoomStatus() {
             window.__discordSend('roster', {
                 players: state.playersAll.map((p) => ({ id: p.id, name: p.name, auth: authArray[p.id]?.[0] ?? null })),

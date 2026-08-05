@@ -22,7 +22,7 @@ const { fork } = require('node:child_process');
 const puppeteer = require('puppeteer');
 const esbuild = require('esbuild');
 
-const { roomPassword, token } = require('./core/config');
+const { roomPassword, token, testMode, mentionWatchName } = require('./core/config');
 const { createDatabaseApi } = require('../api/database');
 const { BRIDGED_METHODS } = require('./browser/dbBridgeClient');
 
@@ -112,6 +112,37 @@ function spawnDiscordProcess() {
                     console.error('[WARN] kickByAuth bridge failed:', err);
                     sendToDiscord({ type: 'kickResult', requestId: msg.requestId, result: null });
                 });
+            return;
+        }
+        if (msg.type === 'grantVip') {
+            if (page) page.evaluate((m) => window.__roomBridge.grantVipByAuth(m.auth, m.targetName), msg).catch((err) => console.error('[WARN] grantVip bridge failed:', err));
+            return;
+        }
+        if (msg.type === 'muteByAuth') {
+            if (!page) {
+                sendToDiscord({ type: 'muteResult', requestId: msg.requestId, result: { ok: false, reason: 'offline' } });
+                return;
+            }
+            page.evaluate((m) => window.__roomBridge.muteByAuth(m.auth, m.minutes), msg)
+                .then((result) => sendToDiscord({ type: 'muteResult', requestId: msg.requestId, result }))
+                .catch((err) => {
+                    console.error('[WARN] muteByAuth bridge failed:', err);
+                    sendToDiscord({ type: 'muteResult', requestId: msg.requestId, result: { ok: false, reason: 'offline' } });
+                });
+            return;
+        }
+        if (msg.type === 'unmuteByAuth') {
+            if (!page) {
+                sendToDiscord({ type: 'unmuteResult', requestId: msg.requestId, result: { ok: false } });
+                return;
+            }
+            page.evaluate((m) => window.__roomBridge.unmuteByAuth(m.auth), msg)
+                .then((result) => sendToDiscord({ type: 'unmuteResult', requestId: msg.requestId, result }))
+                .catch((err) => {
+                    console.error('[WARN] unmuteByAuth bridge failed:', err);
+                    sendToDiscord({ type: 'unmuteResult', requestId: msg.requestId, result: { ok: false } });
+                });
+            return;
         }
     });
     child.on('error', (err) => {
@@ -249,7 +280,7 @@ async function launchRoom() {
     await newPage.waitForFunction(() => typeof window.HBInit === 'function', { timeout: 60000 });
     await newPage.evaluate((secrets) => {
         window.__secrets = secrets;
-    }, { token, roomPassword });
+    }, { token, roomPassword, testMode, mentionWatchName });
 
     const bundle = await buildEntryBundle();
     await newPage.addScriptTag({ content: bundle });

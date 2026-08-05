@@ -25,6 +25,7 @@ module.exports = function createMovementEvents({
     welcomeColor,
     getDate,
     applyTeamForms,
+    claimDailyBonus,
     checkCaptainLeave,
     checkOverflowPassword,
     getRole,
@@ -68,6 +69,7 @@ module.exports = function createMovementEvents({
             'bold',
             HaxNotification.CHAT
         );
+        claimDailyBonus(player).catch((err) => console.error('[economy] claimDailyBonus failed:', err));
         updateTeams();
         discordBot.updateRoomStatus();
         checkOverflowPassword();

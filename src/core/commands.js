@@ -6,10 +6,13 @@ module.exports = function createCommands({
     globalStatsCommand,
     renameCommand,
     customColorsCommand,
+    vipColorCommand,
+    vipHelpCommand,
     linkDiscordCommand,
-    statsLeaderboardCommand,
+    topsCommand,
     afkCommand,
-    afkListCommand, 
+    afkListCommand,
+    silenceCommand,
     restartCommand,
     restartSwapCommand,
     swapCommand,
@@ -30,29 +33,26 @@ module.exports = function createCommands({
     banAuthCommand,
     unbanAuthCommand,
     authBanListCommand,
+    restrictCmdCommand,
+    unrestrictCmdCommand,
+    cmdRestrictionsCommand,
     playersListCommand,
     passwordCommand,
     teamChat,
     shopCommand,
     inventoryCommand,
     equipCommand,
-    unequipCommand,
     addCoinsCommand,
     balanceCommand,
-    clubCreateCommand,
-    clubInviteCommand,
-    clubJoinCommand,
-    clubLeaveCommand,
-    clubKickCommand,
-    clubAssistantCommand,
-    clubDisbandCommand,
-    clubColorCommand,
-    clubColorsCommand,
-    clubEmojiCommand,
-    clubSlotsCommand,
-    clubInfoCommand,
-    clubHelpCommand,
+    clubCommand,
+    clubChatCommand,
     trophiesCommand,
+    votepauseCommand,
+    votebanCommand,
+    reportCommand,
+    upCommand,
+    minigamesCommand,
+    playCommand,
 }) {
     return {
 
@@ -78,6 +78,17 @@ module.exports = function createCommands({
         desc: `
         Эта команда показывает всех игроков, которые находятся AFK.`,
         function: afkListCommand,
+    },
+    silence: {
+        aliases: ['ignore'],
+        roles: Role.PLAYER,
+        desc: `
+        Эта команда заглушает игрока ТОЛЬКО ДЛЯ ВАС — вы больше не будете видеть его сообщения в чате, но все остальные продолжат их видеть как обычно. Повторный ввод команды на того же игрока снимает заглушение.
+    Нельзя заглушить самого себя, а также администраторов и модераторов.
+    Она принимает 1 аргумент:
+    Аргумент 1: #<id> где <id> это id целевого игрока.
+    Пример: !silence #3 заглушит игрока с id 3 только для вас.`,
+        function: silenceCommand,
     },
     bb: {
         aliases: ['bye', 'gn', 'cya', 'ии'],
@@ -107,57 +118,53 @@ module.exports = function createCommands({
         Эта команда переключает, видите ли ВЫ кастомные цвета клубов в чате. Не влияет на то, что видят другие игроки.`,
         function: customColorsCommand,
     },
+    vipcolor: {
+        aliases: [],
+        roles: Role.VIP,
+        desc: `
+        Эта команда позволяет вам изменить цвет вашего VIP-префикса в чате.
+    Она принимает 1 аргумент (опционально):
+    Аргумент 1: <hex> цвет в hex-формате. Без аргумента цвет сбрасывается на стандартный.
+    Пример: !vipcolor ff8800.`,
+        function: vipColorCommand,
+    },
+    viphelp: {
+        aliases: [],
+        roles: Role.VIP,
+        desc: `
+        Эта команда показывает все команды VIP и как ими пользоваться.`,
+        function: vipHelpCommand,
+    },
+    up: {
+        aliases: [],
+        roles: Role.VIP,
+        desc: `
+        Эта команда позволяет вам стать капитаном раньше остальных зрителей, когда в следующий раз потребуется выбрать капитана.
+    Недоступна, пока капитаны прямо сейчас выбирают игроков. Только 1 VIP может занять очередь одновременно — остальные ждут следующей итерации.
+    Доступна раз в 30 минут.`,
+        function: upCommand,
+    },
     discord: {
         aliases: [],
         roles: Role.PLAYER,
         desc: `
-        Эта команда связывает ваш аккаунт Discord, чтобы "!stats" в Discord показывал ваши статистики без необходимости вводить ваше имя.
+        Эта команда связывает ваш аккаунт Discord, чтобы "!stats" в Discord показывал ваши статистики без необходимости вводить ваше имя. За первую привязку начисляется бонус 100 монет.
     Она требует 1 аргумент:
     Аргумент 1: <id> где <id> это ваш ID пользователя Discord (включите Режим разработчика в настройках Discord, затем кликните правой кнопкой мыши на вашем имени и выберите "Копировать ID пользователя").
     Пример: !discord 123456789012345678 связывает ваш аккаунт Discord.`,
         function: linkDiscordCommand,
     },
-    games: {
+    tops: {
         aliases: [],
         roles: Role.PLAYER,
         desc: `
-        Эта команда показывает топ 5 игроков с самым большим количеством игр в комнате.`,
-        function: statsLeaderboardCommand,
-    },
-    wins: {
-        aliases: [],
-        roles: Role.PLAYER,
-        desc: `
-        Эта команда показывает топ 5 игроков с самым большим количеством побед в комнате.`,
-        function: statsLeaderboardCommand,
-    },
-    goals: {
-        aliases: [],
-        roles: Role.PLAYER,
-        desc: `
-        Эта команда показывает топ 5 игроков с самым большим количеством голов в комнате.`,
-        function: statsLeaderboardCommand,
-    },
-    assists: {
-        aliases: [],
-        roles: Role.PLAYER,
-        desc: `
-        Эта команда показывает топ 5 игроков с самым большим количеством ассистов в комнате.`,
-        function: statsLeaderboardCommand,
-    },
-    cs: {
-        aliases: [],
-        roles: Role.PLAYER,
-        desc: `
-        Эта команда показывает топ 5 игроков с самым большим количеством сухих матчей в комнате.`,
-        function: statsLeaderboardCommand,
-    },
-    playtime: {
-        aliases: ['pt'],
-        roles: Role.PLAYER,
-        desc: `
-        Эта команда показывает топ 5 игроков с самым большим временем игры в комнате.`,
-        function: statsLeaderboardCommand,
+        Эта команда показывает таблицы лидеров (топ 5 игроков) комнаты.
+    Без аргумента показывает все таблицы сразу: игры, победы, голы, ассисты, сухие матчи, время игры и клубы.
+    Она принимает 1 аргумент (опционально):
+    Аргумент 1: <категория> где <категория> одна из: games, wins, goals, assists, cs, playtime (или pt), clubs.
+    Пример: !tops goals покажет только таблицу лидеров по голам.
+    Пример: !tops clubs покажет топ-5 клубов по сумме голов+ассистов+сухих матчей их ТЕКУЩИХ участников (вышедшие из клуба не в счет).`,
+        function: topsCommand,
     },
     x: {
         aliases: ['ч'],
@@ -166,6 +173,14 @@ module.exports = function createCommands({
         Эта команда отправляет сообщение только вашей команде (работает так же, как обычный командный чат — набрать "t <сообщение>").
     Пример: !x привет отправит "привет" только вашей команде.`,
         function: teamChat,
+    },
+    cc: {
+        aliases: ['сс'],
+        roles: Role.PLAYER,
+        desc: `
+        Эта команда отправляет сообщение всем участникам вашего клуба, которые сейчас на сервере (работает так же, как !x, только для клуба вместо команды).
+    Пример: !cc привет отправит "привет" всем участникам вашего клуба онлайн.`,
+        function: clubChatCommand,
     },
     shop: {
         aliases: [],
@@ -196,21 +211,11 @@ module.exports = function createCommands({
         aliases: [],
         roles: Role.PLAYER,
         desc: `
-        Эта команда надевает (или заменяет) купленный аксессуар.
+        Эта команда надевает (или заменяет) купленный аксессуар. Повторный ввод той же команды на уже надетый аксессуар снимает его.
     Она принимает 1 аргумент:
     Аргумент 1: <id> id аксессуара (посмотреть можно командой '!inventory').
-    Пример: !equip fire наденет аксессуар с id "fire".`,
+    Пример: !equip fire наденет аксессуар с id "fire", повторный !equip fire снимет его.`,
         function: equipCommand,
-    },
-    unequip: {
-        aliases: [],
-        roles: Role.PLAYER,
-        desc: `
-        Эта команда снимает надетый аксессуар.
-    Она принимает 1 аргумент:
-    Аргумент 1: <id> id аксессуара (посмотреть можно командой '!inventory').
-    Пример: !unequip fire снимет аксессуар с id "fire", если он сейчас надет.`,
-        function: unequipCommand,
     },
     training: {
         aliases: ['tr'],
@@ -322,7 +327,7 @@ module.exports = function createCommands({
     },
     bans: {
         aliases: ['banlist'],
-        roles: Role.MASTER,
+        roles: Role.ADMIN_TEMP,
         desc: `
     Эта команда показывает всех игроков, которые были забанены, и их IDs.`,
         function: banListCommand,
@@ -362,9 +367,12 @@ module.exports = function createCommands({
         roles: Role.MASTER,
         desc: `
     Эта команда делает кого-то VIP. Это не дает никаких прав — только префикс "VIP" в чате.
-    Она принимает 1 аргумент:
-    Аргумент 1: #<id> где <id> это id целевого игрока.
-    Пример: !setvip #3 сделает игрока с id 3 VIP.`,
+    Она принимает от 1 до 2 аргументов:
+    Аргумент 1: #<id> игрока, который сейчас в комнате, ИЛИ его <auth> напрямую — работает даже если он не в комнате.
+    Аргумент 2 (опционально): <дни> на сколько дней выдать VIP. Если не указано, VIP выдается навсегда.
+    Пример: !setvip #3 сделает игрока с id 3 VIP навсегда,
+             !setvip #3 30 сделает игрока с id 3 VIP на 30 дней,
+             !setvip AUTH_XYZ 30 сделает VIP на 30 дней игрока с auth "AUTH_XYZ", даже если он сейчас не в комнате.`,
         function: setVipCommand,
     },
     removevip: {
@@ -375,8 +383,11 @@ module.exports = function createCommands({
     Она принимает 1 аргумент:
     Аргумент 1: #<id> где <id> это id целевого игрока.
     ИЛИ
+    Аргумент 1: <auth> — работает даже если игрок сейчас не в комнате.
+    ИЛИ
     Аргумент 1: <number> где <number> это номер, связанный с VIP игроком, данным командой 'vips'.
     Пример: !removevip #300 уберет VIP у игрока с id 300,
+         !removevip AUTH_XYZ уберет VIP по auth "AUTH_XYZ", даже если игрок сейчас не в комнате,
          !removevip 2 уберет VIP у игрока с номером 2 согласно команде 'vips'.`,
         function: removeVipCommand,
     },
@@ -427,6 +438,38 @@ module.exports = function createCommands({
     Эта команда показывает список игроков, забаненных по auth командой '!banauth'.`,
         function: authBanListCommand,
     },
+    restrictcmd: {
+        aliases: [],
+        roles: Role.ADMIN_TEMP,
+        desc: `
+    Эта команда запрещает игроку использовать !voteban или !report — на время или навсегда. Работает по auth (переживает выход/переподключение), даже если игрок сейчас не в комнате.
+    Она принимает от 3 до 4 аргументов:
+    Аргумент 1: #<id> игрока, который сейчас в комнате, ИЛИ его <auth> напрямую.
+    Аргумент 2: <voteban|report> какую команду запретить.
+    Аргумент 3: <минуты> — 0 означает навсегда.
+    Аргумент 4 (опционально): <reason> причина.
+    Пример: !restrictcmd #3 report 60 спам запретит игроку с id 3 использовать !report на 60 минут с причиной "спам".
+    Пример: !restrictcmd #3 voteban 0 запретит !voteban навсегда.`,
+        function: restrictCmdCommand,
+    },
+    unrestrictcmd: {
+        aliases: [],
+        roles: Role.ADMIN_TEMP,
+        desc: `
+    Эта команда снимает запрет, выданный командой '!restrictcmd'.
+    Она принимает 2 аргумента:
+    Аргумент 1: #<id> игрока, который сейчас в комнате, ИЛИ его <auth> напрямую.
+    Аргумент 2: <voteban|report> с какой команды снять запрет.
+    Пример: !unrestrictcmd #3 report снимет запрет на !report с игрока с id 3.`,
+        function: unrestrictCmdCommand,
+    },
+    cmdrestrictions: {
+        aliases: [],
+        roles: Role.ADMIN_TEMP,
+        desc: `
+    Эта команда показывает список всех текущих запретов, выданных командой '!restrictcmd'.`,
+        function: cmdRestrictionsCommand,
+    },
     players: {
         aliases: [],
         roles: Role.MASTER,
@@ -456,94 +499,80 @@ module.exports = function createCommands({
     Пример: !addcoins #3 500 начислит 500 монет игроку с id 3.`,
         function: addCoinsCommand,
     },
-    clubcreate: {
-        aliases: [],
-        roles: Role.PLAYER,
-        desc: `Смотрите "!clubhelp" для информации.`,
-        function: clubCreateCommand,
-    },
-    clubinvite: {
-        aliases: [],
-        roles: Role.PLAYER,
-        desc: `Смотрите "!clubhelp" для информации.`,
-        function: clubInviteCommand,
-    },
-    clubjoin: {
-        aliases: [],
-        roles: Role.PLAYER,
-        desc: `Смотрите "!clubhelp" для информации.`,
-        function: clubJoinCommand,
-    },
-    clubleave: {
-        aliases: [],
-        roles: Role.PLAYER,
-        desc: `Смотрите "!clubhelp" для информации.`,
-        function: clubLeaveCommand,
-    },
-    clubkick: {
-        aliases: [],
-        roles: Role.PLAYER,
-        desc: `Смотрите "!clubhelp" для информации.`,
-        function: clubKickCommand,
-    },
-    clubassistent: {
-        aliases: [],
-        roles: Role.PLAYER,
-        desc: `Смотрите "!clubhelp" для информации.`,
-        function: clubAssistantCommand,
-    },
-    clubdisband: {
-        aliases: [],
-        roles: Role.PLAYER,
-        desc: `Смотрите "!clubhelp" для информации.`,
-        function: clubDisbandCommand,
-    },
-    clubcolor: {
-        aliases: [],
-        roles: Role.PLAYER,
-        desc: `Смотрите "!clubhelp" для информации.`,
-        function: clubColorCommand,
-    },
-    clubcolors: {
-        aliases: [],
-        roles: Role.PLAYER,
-        desc: `Смотрите "!clubhelp" для информации.`,
-        function: clubColorsCommand,
-    },
-    clubemoji: {
-        aliases: [],
-        roles: Role.PLAYER,
-        desc: `Смотрите "!clubhelp" для информации.`,
-        function: clubEmojiCommand,
-    },
-    clubslots: {
-        aliases: [],
-        roles: Role.PLAYER,
-        desc: `Смотрите "!clubhelp" для информации.`,
-        function: clubSlotsCommand,
-    },
     club: {
         aliases: [],
         roles: Role.PLAYER,
-        desc: `Смотрите "!clubhelp" для информации.`,
-        function: clubInfoCommand,
-    },
-    clubhelp: {
-        aliases: [],
-        roles: Role.PLAYER,
         desc: `
-        Эта команда показывает все команды клуба и как ими пользоваться.`,
-        function: clubHelpCommand,
+        Команда клуба — принимает подкоманду первым аргументом.
+    Введите "!club help" для полного списка подкоманд (create/invite/join/leave/kick/assistant/disband/color/colors/emoji/slots).
+    Без аргумента — то же самое, что "!club show" (показывает информацию о вашем клубе).`,
+        function: clubCommand,
     },
     trophy: {
         aliases: [],
         roles: Role.PLAYER,
         desc: `
         Эта команда показывает ваши трофеи (за топ-3 место в статистике) и позволяет экипировать один из них в качестве префикса в чате.
-    Она принимает 1 аргумент (опционально):
+    Она принимает до 2 аргументов (оба опциональны):
     Аргумент 1: <трофей> где <трофей> один из: goals, assists, cs, wr, pt. Или "none", чтобы снять текущий трофей.
-    Пример: !trophy goals экипирует трофей "🥇Топ-1 голов" (или 🥈/🥉 в зависимости от вашего текущего места), если вы сейчас в топ-3 по голам.`,
+    Аргумент 2: <сезон> — номер прошлого (уже завершенного) сезона, чтобы экипировать трофей за него вместо текущего.
+    Пример: !trophy goals экипирует трофей текущего сезона "🥇Топ-1 голов S1" (или 🥈/🥉 в зависимости от вашего текущего места), если вы сейчас в топ-3 по голам.
+    Пример: !trophy goals 0 экипирует трофей "🥇Топ-1 голов S0" за сезон 0, если вы держали это место на момент его завершения.`,
         function: trophiesCommand,
+    },
+    votepause: {
+        aliases: ['голос'],
+        roles: Role.PLAYER,
+        desc: `
+        Эта команда позволяет игрокам на поле начать голосование команды за паузу.
+    Доступно только в полных матчах 4х4 (с капитан-модом) и только на кикоффе (пока мяч не тронут).
+    Нужно 3/4 голосов "за" от вашей команды, доступно 1 раз за матч на команду.
+    Игроки команды голосуют, написав в чат "1" (за) или "2" (против), в течение 7 секунд.
+    Пример: !votepause начнет голосование за 20-секундную паузу.`,
+        function: votepauseCommand,
+    },
+    voteban: {
+        aliases: [],
+        roles: Role.PLAYER,
+        desc: `
+        Эта команда начинает голосование ВСЕЙ комнаты за временный бан игрока (60 минут).
+    Голосовать могут только игроки, сыгравшие от 10 игр — это же требование и для того, кто начинает голосование.
+    Игроков из топ-10 по любой из категорий !tops (games, wins, goals, assists, cs, playtime) забанить голосованием нельзя.
+    Для бана нужно набрать 61% голосов "за" ОТ ВСЕХ, кто мог голосовать (не только от проголосовавших — те, кто не написал ничего, фактически голосуют "против").
+    Она принимает 1 аргумент:
+    Аргумент 1: #<id> — ID игрока, за бан которого начинается голосование.
+    Игроки голосуют, написав в чат "1" (за) или "2" (против), в течение 60 секунд.
+    Пример: !voteban #5 начнет голосование за бан игрока с ID 5.`,
+        function: votebanCommand,
+    },
+    report: {
+        aliases: ['админ'],
+        roles: Role.PLAYER,
+        desc: `
+        Эта команда зовет администрацию в комнату — объявление увидят все, а в Discord придет пинг @here в специальном канале.
+    Доступна раз в минуту (на игрока).
+    Пример: !report позовет администрацию.`,
+        function: reportCommand,
+    },
+    minigames: {
+        aliases: ['mg', 'мини'],
+        roles: Role.PLAYER,
+        desc: `
+        Эта команда вызывает другого зрителя на мини-игру на ставку монет. Доступно только зрителям (не участвующим в матче).
+    Она принимает 3 аргумента:
+    Аргумент 1: <игра> где <игра> одна из: coinflip (монетка), russianroulette (русская рулетка).
+    Аргумент 2: #<id> где <id> это id зрителя, которого вы вызываете.
+    Аргумент 3: <ставка> сколько монет поставить на кон.
+    Пример: !minigames coinflip #3 100 вызовет игрока с id 3 на монетку на 100 монет.
+    Приглашенный игрок должен ввести "!play", чтобы принять вызов.`,
+        function: minigamesCommand,
+    },
+    play: {
+        aliases: [],
+        roles: Role.PLAYER,
+        desc: `
+        Эта команда принимает вызов на мини-игру, полученный командой "!minigames".`,
+        function: playCommand,
     },
 
     };

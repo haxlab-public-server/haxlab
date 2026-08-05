@@ -21,16 +21,22 @@ module.exports = function createActivityEvents({
     errorColor,
     hiddenAdminsSet,
     masterChatColor,
+    mentionWatchName,
     muteArray,
+    silencedAuths,
     vipChatColor,
     checkGoalKickTouch,
     chooseModeFunction,
+    swapModeFunction,
     formatTrophyLabel,
+    resolveTrophyRank,
     getCommand,
     getDate,
     getGoalGame,
     getPlayerComp,
     getRole,
+    handleVoteMessage,
+    handleVoteBanMessage,
     playerChat,
     slowModeFunction,
     teamChat,
@@ -42,6 +48,9 @@ module.exports = function createActivityEvents({
         }
         let msgArray = message.split(/ +/);
         discordBot.sendLog(`[${getDate()}] 💬 CHAT\n**${player.name}** : ${message.replace('@', '@ ')}`);
+        if (mentionWatchName && message.toLowerCase().includes('@' + mentionWatchName.toLowerCase())) {
+            discordBot.sendMentionAlert(player.name, message);
+        }
         if (msgArray[0][0] == '!') {
             let command = getCommand(msgArray[0].slice(1).toLowerCase());
             if (command != false && commands[command].roles <= getRole(player)) {
@@ -63,6 +72,16 @@ module.exports = function createActivityEvents({
                 );
             return false;
         }
+        if (handleVoteMessage(player, message)) {
+            return false;
+        }
+        // Checked second (pause-vote gets first claim on a bare "1"/"2") —
+        // the two systems use separate state namespaces (state.pauseVotes
+        // vs state.votebanSession) specifically so they never collide, but
+        // a player could theoretically be eligible for both at once.
+        if (handleVoteBanMessage(player, message)) {
+            return false;
+        }
         if (msgArray[0].toLowerCase() == 't') {
             teamChat(player, message);
             return false;
@@ -74,6 +93,10 @@ module.exports = function createActivityEvents({
         if (state.chooseMode && state.teamRed.length * state.teamBlue.length != 0) {
             const choosingMessageCheck = chooseModeFunction(player, message);
             if (choosingMessageCheck) return false;
+        }
+        if (state.swapMode) {
+            const swapMessageCheck = swapModeFunction(player, message);
+            if (swapMessageCheck) return false;
         }
         if (state.slowMode > 0) {
             const filter = slowModeFunction(player, message);
@@ -100,6 +123,7 @@ module.exports = function createActivityEvents({
         // would still fall through to the VIP prefix rather than none at all.
         const role = getRole(player);
         const showAdminPrefix = !hiddenAdminsSet.has(player.id);
+        const auth = authArray[player.id][0];
         let rolePrefix = null;
         let prefixColor = null;
         if (showAdminPrefix && role == Role.MASTER) {
@@ -110,7 +134,11 @@ module.exports = function createActivityEvents({
             prefixColor = adminChatColor;
         } else if (role == Role.VIP) {
             rolePrefix = '[⭐ВИП]';
-            prefixColor = vipChatColor;
+            // !vipcolor (see commands/player.js) — a VIP's own override for
+            // this, falling back to the shared default when they haven't
+            // set one. Same color for everyone who sees it, unlike
+            // !customcolors' per-viewer club-color opt-out.
+            prefixColor = state.vipColors[auth] ?? vipChatColor;
         }
         // Full prefix order is [клуб] [трофей] [роль] — club tag first, then
         // the equipped trophy (!trophy, see commands/trophies.js), then the
@@ -120,7 +148,6 @@ module.exports = function createActivityEvents({
         // never "hidden" here whereas a club member with no custom color set
         // just falls back to the default chat color (see constants.js's
         // defaultColor/null semantics in room.sendAnnouncement).
-        const auth = authArray[player.id][0];
         const membership = state.clubMembers.find((m) => m.auth == auth);
         const club = membership && state.clubs.find((c) => c.id == membership.clubId);
         const clubPrefix = club ? `[${club.emoji ?? ''}${club.prefix}]` : null;
@@ -132,17 +159,20 @@ module.exports = function createActivityEvents({
             prefixColor = club.color;
             usesClubColor = club.color != null;
         }
-        // A trophy only actually shows while state.topPlayers still agrees
-        // the player holds a top-3 spot — an equipped-but-since-lost trophy
-        // silently stops appearing rather than lying (see commands/trophies.js).
-        // The medal (🥇/🥈/🥉) always reflects the player's ACTUAL current
-        // rank, never whatever it was when they last ran !trophy.
+        // A LIVE trophy pick only actually shows while state.topPlayers still
+        // agrees the player holds a top-3 spot this season — an
+        // equipped-but-since-lost one silently stops appearing rather than
+        // lying (see commands/trophies.js). A LEGACY pick (a past, already
+        // CLOSED season — see db.closeSeason) is frozen forever in
+        // state.seasonTrophies instead, so it always shows once earned. The
+        // medal (🥇/🥈/🥉) and season tag always reflect resolveTrophyRank's
+        // current answer, never whatever it was when !trophy was last run.
         const equippedTrophyKey = state.equippedTrophies[auth];
-        const equippedRankIndex = equippedTrophyKey
-            ? (state.topPlayers[equippedTrophyKey] ?? []).findIndex((e) => e.auth == auth)
-            : -1;
-        const trophyPrefix = equippedRankIndex !== -1
-            ? `[${formatTrophyLabel(Trophies, equippedTrophyKey, equippedRankIndex + 1)}]`
+        const resolvedTrophy = equippedTrophyKey
+            ? resolveTrophyRank(equippedTrophyKey, auth, state.currentSeason, state.topPlayers, state.seasonTrophies)
+            : null;
+        const trophyPrefix = resolvedTrophy
+            ? `[${formatTrophyLabel(Trophies, resolvedTrophy.category, resolvedTrophy.rank, resolvedTrophy.season)}]`
             : null;
         const prefix = [clubPrefix, trophyPrefix, rolePrefix].filter((p) => p != null).join(' ');
         const displayName = prefix ? `${prefix} ${player.name}` : player.name;
@@ -150,16 +180,19 @@ module.exports = function createActivityEvents({
         // prefixes alone don't, same as a plain player with no prefix at all.
         const style = rolePrefix != null ? 'bold' : 'normal';
         const text = `${displayName}: ${message}`;
-        if (usesClubColor) {
-            // !customcolors (commands/player.js) is a per-VIEWER preference:
-            // whoever has opted out sees this specific message in the
-            // default color instead — everyone else still sees the club's
-            // chosen color, and the prefix TEXT is identical for both. Only
-            // a genuinely per-message loop (rather than one broadcast) can
-            // give two viewers different colors for the same line.
+        // !silence (commands/player.js) is a per-VIEWER filter: whoever
+        // silenced this speaker's auth just never gets the message sent to
+        // them, while everyone else still sees it normally — same
+        // per-viewer-loop trick !customcolors uses below for color, except
+        // here a silenced viewer is skipped entirely instead of recolored.
+        // silencedAuths starts empty and most rooms never touch it, so the
+        // cheap single-broadcast path below stays untouched until someone
+        // actually uses the command.
+        if (usesClubColor || silencedAuths.size > 0) {
             for (const viewer of state.playersAll) {
                 const viewerAuth = authArray[viewer.id][0];
-                const viewerColor = state.hiddenCustomColorsSet.has(viewerAuth) ? null : prefixColor;
+                if (silencedAuths.get(viewerAuth)?.has(auth)) continue;
+                const viewerColor = usesClubColor && state.hiddenCustomColorsSet.has(viewerAuth) ? null : prefixColor;
                 room.sendAnnouncement(text, viewer.id, viewerColor, style, null);
             }
         } else {

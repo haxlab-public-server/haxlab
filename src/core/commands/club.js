@@ -1,5 +1,8 @@
 /*
- * Player clubs: !clubcreate/!clubinvite/!clubjoin/etc. Every member gets the
+ * Player clubs: !club create/invite/join/etc, all routed through a single
+ * !club <subcommand> dispatcher (see clubCommand/CLUB_SUBCOMMANDS at the
+ * bottom) rather than one registered command per action — !help was getting
+ * crowded with a dozen separate clubXxx entries. Every member gets the
  * club's prefix (and, if the owner set one, its color) in front of their
  * chat messages — see events/activity.js's onPlayerChat.
  *
@@ -23,7 +26,7 @@ module.exports = function createClubCommands({
     HaxNotification,
     formatCoins,
 }) {
-    const CLUB_CREATE_COST = 1000;
+    const CLUB_CREATE_COST = 1000;  
     const CLUB_BASE_SLOTS = 5;
     const CLUB_SLOT_BASE_COST = 500;
     const CLUB_SLOT_COST_STEP = 100;
@@ -31,7 +34,7 @@ module.exports = function createClubCommands({
     const CLUB_COLOR_UNLOCK_COST = 10000;
 
     // The displayed prefix is capped at "1 emoji + 4 letters" — the emoji is
-    // set separately (!clubemoji), so what !clubcreate takes here is just
+    // set separately (!club emoji), so what !club create takes here is just
     // the 1-4 letter part, letters only (no digits/symbols/emoji).
     const CLUB_PREFIX_REGEX = /^[a-zA-Zа-яА-ЯёЁ]{1,4}$/;
     // A single pictographic character, optionally followed by a variation
@@ -81,11 +84,11 @@ module.exports = function createClubCommands({
         const msgArray = message.split(/ +/).slice(1);
         const [name, prefix] = msgArray;
         if (!name || !prefix) {
-            announceError(player, `Использование: !clubcreate <название> <префикс>. Пример: !clubcreate Falcons FLC. Введите "!clubhelp" для информации.`);
+            announceError(player, `Использование: !club create <название> <префикс>. Пример: !club create Falcons FLC. Введите "!club help" для информации.`);
             return;
         }
         if (!CLUB_PREFIX_REGEX.test(prefix)) {
-            announceError(player, `Префикс должен состоять из 1-4 букв (без цифр, символов и эмодзи). Эмодзи можно добавить отдельно командой "!clubemoji". Пример: !clubcreate Falcons FLC.`);
+            announceError(player, `Префикс должен состоять из 1-4 букв (без цифр, символов и эмодзи). Эмодзи можно добавить отдельно командой "!club emoji". Пример: !club create Falcons FLC.`);
             return;
         }
         const auth = getAuth(player);
@@ -102,7 +105,7 @@ module.exports = function createClubCommands({
         state.clubs.push(club);
         state.clubMembers.push({ auth, clubId: club.id, playerName: player.name });
         room.sendAnnouncement(
-            `🏆 Клуб "${club.name}" ${clubTag(club)} создан ! Приглашайте игроков командой "!clubinvite".`,
+            `🏆 Клуб "${club.name}" ${clubTag(club)} создан ! Приглашайте игроков командой "!club invite".`,
             player.id,
             announcementColor,
             'bold',
@@ -113,7 +116,7 @@ module.exports = function createClubCommands({
     async function clubInviteCommand(player, message) {
         const target = message.split(/ +/)[1];
         if (!target || target[0] !== '#') {
-            announceError(player, `Использование: !clubinvite #<id>. Введите "!help clubinvite" для информации.`);
+            announceError(player, `Использование: !club invite #<id>. Введите "!club help" для информации.`);
             return;
         }
         const auth = getAuth(player);
@@ -137,7 +140,7 @@ module.exports = function createClubCommands({
         }
         const memberCount = state.clubMembers.filter((m) => m.clubId === club.id).length;
         if (memberCount >= club.slots) {
-            announceError(player, `В клубе нет свободных слотов ! Купите слот командой "!clubslots buy".`);
+            announceError(player, `В клубе нет свободных слотов ! Купите слот командой "!club slots buy".`);
             return;
         }
         await db.inviteToClub(club.id, resolved.auth, CLUB_INVITE_DURATION_SECONDS);
@@ -149,7 +152,7 @@ module.exports = function createClubCommands({
             HaxNotification.CHAT
         );
         room.sendAnnouncement(
-            `Вы были приглашены в клуб "${club.name}". У вас есть ${CLUB_INVITE_DURATION_SECONDS} секунд чтобы принять приглашение (!clubjoin)`,
+            `Вы были приглашены в клуб "${club.name}". У вас есть ${CLUB_INVITE_DURATION_SECONDS} секунд чтобы принять приглашение (!club join)`,
             resolved.player.id,
             announcementColor,
             'bold',
@@ -173,7 +176,7 @@ module.exports = function createClubCommands({
             const wanted = message.split(/ +/).slice(1).join(' ').toLowerCase();
             if (!wanted) {
                 const list = invites.map((i) => `"${i.clubName}" [${i.clubEmoji ?? ''}${i.clubPrefix}]`).join(', ');
-                announceError(player, `У вас несколько приглашений: ${list}. Введите "!clubjoin <название клуба>" чтобы выбрать.`);
+                announceError(player, `У вас несколько приглашений: ${list}. Введите "!club join <название клуба>" чтобы выбрать.`);
                 return;
             }
             const found = invites.find((i) => i.clubName.toLowerCase() === wanted);
@@ -206,7 +209,7 @@ module.exports = function createClubCommands({
             return;
         }
         if (club.ownerAuth === auth) {
-            announceError(player, `Владелец не может покинуть свой клуб — используйте "!clubdisband" чтобы расформировать его.`);
+            announceError(player, `Владелец не может покинуть свой клуб — используйте "!club disband" чтобы расформировать его.`);
             return;
         }
         await db.removeClubMember(auth);
@@ -221,7 +224,7 @@ module.exports = function createClubCommands({
     async function clubKickCommand(player, message) {
         const target = message.split(/ +/)[1];
         if (!target) {
-            announceError(player, `Использование: !clubkick <#id|auth>.`);
+            announceError(player, `Использование: !club kick <#id|auth>.`);
             return;
         }
         const auth = getAuth(player);
@@ -240,7 +243,7 @@ module.exports = function createClubCommands({
             return;
         }
         if (resolved.auth === auth) {
-            announceError(player, `Вы не можете выгнать самого себя — используйте "!clubdisband".`);
+            announceError(player, `Вы не можете выгнать самого себя — используйте "!club disband".`);
             return;
         }
         const membership = state.clubMembers.find((m) => m.auth === resolved.auth && m.clubId === club.id);
@@ -258,7 +261,7 @@ module.exports = function createClubCommands({
     }
 
     // The assistant is the one non-owner role a club has — its only extra
-    // power over a plain member is being allowed to !clubinvite (see the
+    // power over a plain member is being allowed to !club invite (see the
     // ownership check up there). One assistant per club; naming a new one
     // replaces whoever held it before. Target can be #<id> (online) or an
     // exact (case-insensitive) member name (offline members are still
@@ -332,10 +335,47 @@ module.exports = function createClubCommands({
         room.sendAnnouncement(`Клуб "${club.name}" был расформирован !`, null, announcementColor, 'bold', HaxNotification.CHAT);
     }
 
+    // "!club color buy" unlocks custom colors for the club (permanently,
+    // once — not per-color-change), "!club color <hex>" sets one (requires
+    // the unlock first). Merged into one subcommand since "buy" can never be
+    // mistaken for a real hex value (u/y aren't hex digits), so there's no
+    // ambiguity routing on the first argument alone.
     async function clubColorCommand(player, message) {
-        const hex = message.split(/ +/)[1];
-        if (!hex || !/^[0-9a-fA-F]{1,6}$/.test(hex)) {
-            announceError(player, `Использование: !clubcolor <hex>. Пример: !clubcolor ff8800.`);
+        const arg = message.split(/ +/)[1];
+        if ((arg ?? '').toLowerCase() === 'buy') {
+            const auth = getAuth(player);
+            const club = findClubByAuth(auth);
+            if (!club) {
+                announceError(player, `Вы не состоите в клубе !`);
+                return;
+            }
+            if (club.ownerAuth !== auth) {
+                announceError(player, `Только владелец клуба может покупать эту возможность !`);
+                return;
+            }
+            if (club.colorUnlocked) {
+                announceError(player, `Кастомный цвет уже разблокирован для вашего клуба !`);
+                return;
+            }
+            const unlocked = await db.unlockClubColor(auth, club.id, CLUB_COLOR_UNLOCK_COST);
+            if (!unlocked) {
+                const balance = await db.getBalance(auth);
+                announceError(player, `Недостаточно монет. Нужно ${formatCoins(CLUB_COLOR_UNLOCK_COST)}, у вас ${formatCoins(balance)}.`);
+                return;
+            }
+            club.colorUnlocked = true;
+            room.sendAnnouncement(
+                `✔️ Кастомный цвет разблокирован для клуба "${club.name}" ! Установите его командой "!club color <hex>".`,
+                player.id,
+                successColor,
+                'bold',
+                HaxNotification.CHAT
+            );
+            return;
+        }
+
+        if (!arg || !/^[0-9a-fA-F]{1,6}$/.test(arg)) {
+            announceError(player, `Использование: !club color <hex>, или !club color buy — разблокировать кастомный цвет клуба (${formatCoins(CLUB_COLOR_UNLOCK_COST)}). Пример: !club color ff8800.`);
             return;
         }
         const auth = getAuth(player);
@@ -349,55 +389,16 @@ module.exports = function createClubCommands({
             return;
         }
         if (!club.colorUnlocked) {
-            announceError(player, `Кастомный цвет клуба — платная возможность. Купите ее командой "!clubcolors buy" (${formatCoins(CLUB_COLOR_UNLOCK_COST)}).`);
+            announceError(player, `Кастомный цвет клуба — платная возможность. Купите ее командой "!club color buy" (${formatCoins(CLUB_COLOR_UNLOCK_COST)}).`);
             return;
         }
-        const color = parseInt(hex, 16);
+        const color = parseInt(arg, 16);
         await db.setClubColor(club.id, color);
         club.color = color;
         room.sendAnnouncement(`✔️ Цвет клуба "${club.name}" обновлен !`, player.id, successColor, 'bold', HaxNotification.CHAT);
     }
 
-    // Unlocks !clubcolor for this club, permanently, once — not per-color-
-    // change. Paid by the owner from their own balance, same as !clubslots
-    // buy; club.colorUnlocked never gets reset back to false.
-    async function clubColorsCommand(player, message) {
-        const sub = message.split(/ +/)[1];
-        if ((sub ?? '').toLowerCase() !== 'buy') {
-            announceError(player, `Использование: !clubcolors buy — разблокировать кастомный цвет клуба. Введите "!clubhelp" для информации.`);
-            return;
-        }
-        const auth = getAuth(player);
-        const club = findClubByAuth(auth);
-        if (!club) {
-            announceError(player, `Вы не состоите в клубе !`);
-            return;
-        }
-        if (club.ownerAuth !== auth) {
-            announceError(player, `Только владелец клуба может покупать эту возможность !`);
-            return;
-        }
-        if (club.colorUnlocked) {
-            announceError(player, `Кастомный цвет уже разблокирован для вашего клуба !`);
-            return;
-        }
-        const unlocked = await db.unlockClubColor(auth, club.id, CLUB_COLOR_UNLOCK_COST);
-        if (!unlocked) {
-            const balance = await db.getBalance(auth);
-            announceError(player, `Недостаточно монет. Нужно ${formatCoins(CLUB_COLOR_UNLOCK_COST)}, у вас ${formatCoins(balance)}.`);
-            return;
-        }
-        club.colorUnlocked = true;
-        room.sendAnnouncement(
-            `✔️ Кастомный цвет разблокирован для клуба "${club.name}" ! Установите его командой "!clubcolor <hex>".`,
-            player.id,
-            successColor,
-            'bold',
-            HaxNotification.CHAT
-        );
-    }
-
-    // The prefix itself (!clubcreate) is letters-only — the emoji in front
+    // The prefix itself (!club create) is letters-only — the emoji in front
     // of it (making up the "1 emoji + 4 letters" displayed tag) is set here,
     // separately, so a club can go without one entirely.
     async function clubEmojiCommand(player, message) {
@@ -420,7 +421,7 @@ module.exports = function createClubCommands({
         }
         const emoji = msgArray[0];
         if (!CLUB_EMOJI_REGEX.test(emoji)) {
-            announceError(player, `Использование: !clubemoji <эмодзи>. Пример: !clubemoji 🔥. Введите "!clubemoji" без аргумента, чтобы убрать эмодзи.`);
+            announceError(player, `Использование: !club emoji <эмодзи>. Пример: !club emoji 🔥. Введите "!club emoji" без аргумента, чтобы убрать эмодзи.`);
             return;
         }
         await db.setClubEmoji(club.id, emoji);
@@ -431,7 +432,7 @@ module.exports = function createClubCommands({
     async function clubSlotsCommand(player, message) {
         const sub = message.split(/ +/)[1];
         if ((sub ?? '').toLowerCase() !== 'buy') {
-            announceError(player, `Использование: !clubslots buy — купить дополнительный слот. Введите "!clubhelp" для информации.`);
+            announceError(player, `Использование: !club slots buy — купить дополнительный слот. Введите "!club help" для информации.`);
             return;
         }
         const auth = getAuth(player);
@@ -468,7 +469,7 @@ module.exports = function createClubCommands({
         const auth = getAuth(player);
         const club = findClubByAuth(auth);
         if (!club) {
-            announceError(player, `Вы не состоите в клубе ! Создайте свой командой "!clubcreate", или дождитесь приглашения.`);
+            announceError(player, `Вы не состоите в клубе ! Создайте свой командой "!club create", или дождитесь приглашения.`);
             return;
         }
         const members = state.clubMembers.filter((m) => m.clubId === club.id);
@@ -488,26 +489,90 @@ module.exports = function createClubCommands({
         );
     }
 
+    // !cc <message> — same idea as !x/teamChat (chat.js), just addressed to
+    // the sender's whole club instead of their current team: every club
+    // member currently online (state.playersAll — regardless of team or
+    // spectator status, unlike teamChat) gets a private sendAnnouncement,
+    // not a single broadcast. Offline members obviously can't receive
+    // anything; there's no mailbox/history for them to catch up on later.
+    function clubChatCommand(player, message) {
+        const msgArray = message.split(/ +/).slice(1);
+        const auth = getAuth(player);
+        const club = findClubByAuth(auth);
+        if (!club) {
+            announceError(player, `Вы не состоите в клубе !`);
+            return;
+        }
+        const text = `${clubTag(club)} [CC] ${player.name}: ${msgArray.join(' ')}`;
+        const memberAuths = new Set(state.clubMembers.filter((m) => m.clubId === club.id).map((m) => m.auth));
+        for (const online of state.playersAll.filter((p) => memberAuths.has(getAuth(p)))) {
+            room.sendAnnouncement(text, online.id, announcementColor, 'bold', HaxNotification.CHAT);
+        }
+    }
+
     function clubHelpCommand(player, message) {
         const text = [
-            '🏆 Команды клуба:',
-            `!clubcreate <название> <префикс> — создать клуб (${formatCoins(CLUB_CREATE_COST)}). Префикс — 1-4 буквы. Пример: !clubcreate Falcons FLC.`,
-            '!club — показать информацию о вашем клубе.',
-            `!clubinvite #<id> — пригласить игрока в клуб (владелец и ассистент). У приглашения есть ${CLUB_INVITE_DURATION_SECONDS} секунд на принятие.`,
-            '!clubjoin [название] — принять приглашение в клуб.',
-            '!clubleave — покинуть клуб.',
-            '!clubkick <#id|auth> — выгнать игрока из клуба (только владелец).',
-            '!clubassistent <игрок> — назначить ассистента клуба, или без аргумента чтобы снять его (только владелец). У ассистента есть доступ только к приглашениям игроков.',
-            '!clubdisband — расформировать клуб (только владелец).',
-            `!clubcolors buy — разблокировать кастомный цвет клуба (${formatCoins(CLUB_COLOR_UNLOCK_COST)}, только владелец, разовая покупка).`,
-            '!clubcolor <hex> — изменить цвет префикса клуба в чате (только владелец, требует "!clubcolors buy"). Пример: !clubcolor ff8800.',
-            '!clubemoji <эмодзи> — добавить эмодзи к префиксу клуба, или без аргумента чтобы убрать его (только владелец). Пример: !clubemoji 🔥.',
-            '!clubslots buy - купить слот (500 монеток, +100 за каждый следующий) (только владелец).',
+            '🏆 Команды клуба (!club <команда>):',
+            `!club show — показать информацию о вашем клубе (по умолчанию — то же самое, что и без аргумента "!club").`,
+            `!club create <название> <префикс> — создать клуб (${formatCoins(CLUB_CREATE_COST)}). Префикс — 1-4 буквы. Пример: !club create Falcons FLC.`,
+            `!club invite #<id> — пригласить игрока в клуб (владелец и ассистент). У приглашения есть ${CLUB_INVITE_DURATION_SECONDS} секунд на принятие.`,
+            '!club join [название] — принять приглашение в клуб.',
+            '!club leave — покинуть клуб.',
+            '!club kick <#id|auth> — выгнать игрока из клуба (только владелец).',
+            '!club assistant <игрок> — назначить ассистента клуба, или без аргумента чтобы снять его (только владелец). У ассистента есть доступ только к приглашениям игроков.',
+            '!club disband — расформировать клуб (только владелец).',
+            `!club color buy — разблокировать кастомный цвет клуба (${formatCoins(CLUB_COLOR_UNLOCK_COST)}, только владелец, разовая покупка).`,
+            '!club color <hex> — изменить цвет префикса клуба в чате (только владелец, требует "!club color buy"). Пример: !club color ff8800.',
+            '!club emoji <эмодзи> — добавить эмодзи к префиксу клуба, или без аргумента чтобы убрать его (только владелец). Пример: !club emoji 🔥.',
+            '!club slots buy - купить слот (500 монеток, +100 за каждый следующий) (только владелец).',
+            '!cc <сообщение> — клубный чат: отправляет сообщение всем участникам вашего клуба, которые сейчас на сервере. Пример: !cc привет!',
+            '!club help — эта команда.',
         ].join('\n');
         room.sendAnnouncement(text, player.id, announcementColor, 'bold', HaxNotification.CHAT);
     }
 
+    // Every !clubXxx command used to be its own registered top-level command
+    // — !help got crowded with a dozen near-identical "смотрите !clubhelp"
+    // entries. Routed through one dispatcher instead: !club <subcommand>
+    // <rest...>. Each handler below still parses its OWN args the exact same
+    // way it always did (message.split(/ +/).slice(1)), so the dispatcher
+    // just needs to hand it a message whose slice(1) reproduces `rest` — the
+    // literal first token it rebuilds ('!club') is never looked at, only
+    // dropped, so it doesn't matter that it's not the real subcommand word.
+    // 'assistant'/'assistent' both map to the same handler — the in-game
+    // command was historically misspelled and old muscle memory shouldn't
+    // suddenly stop working now that it's a subcommand instead of a whole
+    // command name.
+    const CLUB_SUBCOMMANDS = {
+        show: clubInfoCommand,
+        create: clubCreateCommand,
+        invite: clubInviteCommand,
+        join: clubJoinCommand,
+        leave: clubLeaveCommand,
+        kick: clubKickCommand,
+        assistant: clubAssistantCommand,
+        assistent: clubAssistantCommand,
+        disband: clubDisbandCommand,
+        color: clubColorCommand,
+        emoji: clubEmojiCommand,
+        slots: clubSlotsCommand,
+        help: clubHelpCommand,
+    };
+
+    async function clubCommand(player, message) {
+        const msgArray = message.split(/ +/).slice(1);
+        const sub = (msgArray[0] ?? 'show').toLowerCase();
+        const handler = CLUB_SUBCOMMANDS[sub];
+        if (!handler) {
+            announceError(player, `Неизвестная подкоманда "${sub}". Введите "!club help" для списка.`);
+            return;
+        }
+        await handler(player, ['!club', ...msgArray.slice(1)].join(' '));
+    }
+
     return {
+        clubCommand,
+        clubChatCommand,
         clubCreateCommand,
         clubInviteCommand,
         clubJoinCommand,
@@ -516,7 +581,6 @@ module.exports = function createClubCommands({
         clubAssistantCommand,
         clubDisbandCommand,
         clubColorCommand,
-        clubColorsCommand,
         clubEmojiCommand,
         clubSlotsCommand,
         clubInfoCommand,

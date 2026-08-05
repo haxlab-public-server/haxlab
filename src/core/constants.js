@@ -12,7 +12,7 @@ module.exports = {
     // disagree on what a trophy key displays as.
     Trophies: {
         goals: 'голов',
-        assists: 'ассистов',
+        assists: 'ас-ов',
         cs: 'GK',
         wr: 'WR',
         pt: 'PT',

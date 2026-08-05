@@ -27,9 +27,12 @@ module.exports = function createTeamBalance({
     redToSpecButton,
     resetButton,
     resumeGame,
+    resolveNextCaptainId,
     stadiumCommand,
     swapButton,
     topButton,
+    startSwapPhase,
+    cancelSwapPhase,
 }) {
     // Single source of truth for "what map should this room be on right
     // now" — driven by whichever side is currently BIGGER, not raw total
@@ -202,6 +205,15 @@ module.exports = function createTeamBalance({
         }
     }
 
+    // Pause between rounds before the next random (non-captain) match
+    // auto-starts — long enough for players to read the result / step away
+    // via !afk before getting swept into the next reshuffle. Every
+    // handlePlayersStop branch below uses this same value: even the
+    // >=2*teamSize (full house) branch is safe to include, since
+    // ensureFullFieldBeforeStart's own state.chooseMode guard already no-ops
+    // this timer if a captain draft is the thing that actually started.
+    const RANDOM_RESTART_DELAY_MS = 5000;
+
     // Replaces what used to be 5 identical copies (one per handlePlayersStop
     // branch) of "wait delayMs, run the pre-start safety net, then start the
     // game 50ms after that settles" — same delayMs (2000 everywhere it was
@@ -281,7 +293,14 @@ module.exports = function createTeamBalance({
                 reassertStadium();
             }, 5);
         }
-        if (!state.chooseMode) {
+        // Also skip the whole rebuild while the pre-match swap window (see
+        // handlePlayersTeamChange's completion branch and swap.js) is
+        // open — chooseMode is already false by then (deactivateChooseMode()
+        // ran before the window opened), but the roster is a settled full
+        // house with captains actively picking numbered indices out of it;
+        // an ordinary join/leave landing in that window mustn't rebalance
+        // out from under them.
+        if (!state.chooseMode && !state.swapMode) {
             if (state.players.length == 0) {
                 room.stopGame();
                 room.setScoreLimit(scoreLimit);
@@ -490,6 +509,15 @@ module.exports = function createTeamBalance({
     }
 
     function handlePlayersLeave() {
+        // A leave landing mid-swap-window invalidates whatever numbered
+        // roster/spec list the current captain was just shown — same
+        // "abort, don't try to limp on with stale indices" policy as
+        // chooseMode's own leave-triggered aborts below. cancelSwapPhase()
+        // runs the stored finishDrafting() callback immediately, same as a
+        // normal both-turns-done completion.
+        if (state.swapMode) {
+            cancelSwapPhase();
+        }
         if (state.gameState != State.STOP) {
             const scores = room.getScores();
             if (state.players.length >= 2 * teamSize && scores.time >= (5 / 6) * state.game.scores.timeLimit && state.teamRed.length != state.teamBlue.length) {
@@ -548,7 +576,7 @@ module.exports = function createTeamBalance({
                 return;
             }
             if (state.teamRed.length == 0 || state.teamBlue.length == 0) {
-                room.setPlayerTeam(state.teamSpec[0].id, state.teamRed.length == 0 ? Team.RED : Team.BLUE);
+                room.setPlayerTeam(resolveNextCaptainId(), state.teamRed.length == 0 ? Team.RED : Team.BLUE);
                 return;
             }
             if (Math.abs(state.teamRed.length - state.teamBlue.length) == state.teamSpec.length) {
@@ -659,15 +687,31 @@ module.exports = function createTeamBalance({
                 (state.teamRed.length == teamSize && state.teamBlue.length == teamSize) ||
                 (state.teamRed.length == state.teamBlue.length && state.teamSpec.length < 2)
             ) {
-                deactivateChooseMode();
-                resumeGame();
                 // Both sides are already equal here (either both at
                 // teamSize, or Red==Blue outright) and nothing further
                 // moves anyone in this branch, so the map is already
-                // decided — same deferred-by-a-tick reasoning as above.
-                setTimeout(() => {
-                    reassertStadium();
-                }, 5);
+                // decided — same deferred-by-a-tick reasoning as below.
+                // Captured before deactivateChooseMode() resets it: this is
+                // "captains just finished a genuine draft" (see below).
+                const wasPreMatchDraft = state.chooseModePreMatch;
+                deactivateChooseMode();
+                const finishDrafting = () => {
+                    resumeGame();
+                    setTimeout(() => {
+                        reassertStadium();
+                    }, 5);
+                };
+                // Only the post-match WinStay refill draft (handlePlayersStop's
+                // activateChooseMode(true) call below) gets the pre-match swap
+                // window — a live-match growth pick (balanceTeams()'s own
+                // activateChooseMode() call, mid-round, no `true` arg) resumes
+                // the same way it always did. Also skipped with nobody left in
+                // teamSpec to swap in — nothing for a captain to actually do.
+                if (wasPreMatchDraft && state.teamSpec.length > 0) {
+                    startSwapPhase(finishDrafting);
+                } else {
+                    finishDrafting();
+                }
             } else if (state.teamRed.length <= state.teamBlue.length && state.redCaptainChoice != '') {
                 // Bug: none of these three indexed into state.teamSpec
                 // guarded against it already being empty — a captain's
@@ -736,7 +780,7 @@ module.exports = function createTeamBalance({
                 setTimeout(() => {
                     reassertStadium();
                 }, 5);
-                scheduleRestart(2000);
+                scheduleRestart(RANDOM_RESTART_DELAY_MS);
             } else if (state.players.length == 3 || state.players.length == 5 || state.players.length == 7 || state.players.length >= 2 * teamSize) {
                 // Bug: 7 was missing entirely from this list — every OTHER
                 // total from 2 up to a full house (2, 3, 4, 5, 6) had a
@@ -871,7 +915,11 @@ module.exports = function createTeamBalance({
                                     stadiumCommand(emptyPlayer, `!${desiredStadiumFor(teamSize)}`);
                                 }, 5);
                             }
-                            activateChooseMode();
+                            // true: this draft happens between rounds, before
+                            // the next kickoff — eligible for the pre-match
+                            // swap window once it completes (see
+                            // handlePlayersTeamChange's completion branch).
+                            activateChooseMode(true);
                             choosePlayer();
                             return;
                         }
@@ -903,7 +951,7 @@ module.exports = function createTeamBalance({
                         });
                     }, 10);
                 }
-                scheduleRestart(2000);
+                scheduleRestart(RANDOM_RESTART_DELAY_MS);
             } else if (state.players.length == 4) {
                 // resetButton() + 2x randomButton() below always rebuilds an
                 // even 2v2 regardless of the shape leading in, so the map is
@@ -926,7 +974,7 @@ module.exports = function createTeamBalance({
                 state.insertingTimeout = setTimeout(() => {
                     state.insertingPlayers = false;
                 }, 2000);
-                scheduleRestart(2000);
+                scheduleRestart(RANDOM_RESTART_DELAY_MS);
             } else if (state.players.length == 6) {
                 // Same reasoning as the 4-player case above — resetButton()
                 // + 3x randomButton() always rebuilds an even 3v3.
@@ -950,7 +998,7 @@ module.exports = function createTeamBalance({
                         }, 500);
                     }, 500);
                 }, 500);
-                scheduleRestart(2000);
+                scheduleRestart(RANDOM_RESTART_DELAY_MS);
             }
         }
     }

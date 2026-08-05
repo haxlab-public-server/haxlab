@@ -20,12 +20,14 @@ module.exports = function createAdminCommands({
     bigTimeLimit,
     State,
     Situation,
+    Role,
     announcementColor,
     errorColor,
     HaxNotification,
     hiddenAdminsSet,
     instantRestart,
     swapButton,
+    getRole,
 }) {
     function restartCommand(player, message) {
         instantRestart();
@@ -311,6 +313,50 @@ module.exports = function createAdminCommands({
         );
     }
 
+    // Discord-triggered mute (see discord.js's !muteauth/`/muteauth`, gated
+    // there to the room owner or the configured admin role) — same
+    // MutePlayer/muteArray mechanism as muteCommand above, just targeting
+    // whoever currently holds `auth` instead of a live #<id>, since Discord
+    // has no room ids to give. Requires the target to actually be online
+    // right now (same constraint muteCommand has via room.getPlayer) —
+    // unlike !banauth, this can't reach someone who isn't currently in the
+    // room. Re-mutes (replacing any existing mute's timer) rather than
+    // stacking two independent auto-unmute timeouts for the same auth.
+    function muteByAuth(auth, minutes) {
+        const target = state.playersAll.find((p) => authArray[p.id]?.[0] === auth);
+        if (!target) return { ok: false, reason: 'offline' };
+        if (getRole(target) >= Role.ADMIN_TEMP) return { ok: false, reason: 'admin' };
+        const existingMute = muteArray.getByAuth(auth);
+        if (existingMute) existingMute.remove();
+        const muteObj = new MutePlayer(target.name, target.id, auth);
+        muteObj.setDuration(minutes);
+        room.sendAnnouncement(
+            `${target.name} был замучен на ${minutes} минут.`,
+            null,
+            announcementColor,
+            'bold',
+            null
+        );
+        return { ok: true, name: target.name };
+    }
+
+    // Companion to muteByAuth above — same auth-keyed lookup unmuteCommand
+    // already uses for its #<id> path, just reachable from Discord.
+    function unmuteByAuth(auth) {
+        const existingMute = muteArray.getByAuth(auth);
+        if (!existingMute) return { ok: false };
+        const name = existingMute.name;
+        existingMute.remove();
+        room.sendAnnouncement(
+            `${name} был размучен !`,
+            null,
+            announcementColor,
+            'bold',
+            HaxNotification.CHAT
+        );
+        return { ok: true, name };
+    }
+
     return {
         restartCommand,
         restartSwapCommand,
@@ -321,5 +367,7 @@ module.exports = function createAdminCommands({
         unmuteCommand,
         muteListCommand,
         hideCommand,
+        muteByAuth,
+        unmuteByAuth,
     };
 };

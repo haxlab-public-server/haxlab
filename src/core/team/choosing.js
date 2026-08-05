@@ -19,8 +19,14 @@ module.exports = function createChoosingHelpers({
     SMSet,
     getRandomInt,
 }) {
-    function activateChooseMode() {
+    function activateChooseMode(isPreMatchDraft = false) {
         state.chooseMode = true;
+        // Distinguishes the post-match WinStay refill draft (balance.js's
+        // handlePlayersStop, before the next round's first kickoff) from a
+        // live-match growth pick (balanceTeams(), mid-round) — only the
+        // former gets the pre-match swap window once picking completes
+        // (see balance.js's handlePlayersTeamChange completion branch).
+        state.chooseModePreMatch = isPreMatchDraft;
         state.slowMode = chooseModeSlowMode;
         room.sendAnnouncement(
             `🐢 Время капитанов для выбора игроков: ${chooseModeSlowMode}s.`,
@@ -46,6 +52,7 @@ module.exports = function createChoosingHelpers({
         }
         state.redCaptainChoice = '';
         state.blueCaptainChoice = '';
+        state.chooseModePreMatch = false;
     }
 
     function getSpecList(player) {
@@ -64,6 +71,24 @@ module.exports = function createChoosingHelpers({
         );
     }
 
+    // Whoever fills an empty side becomes its captain, by construction (see
+    // choosePlayer()/balance.js's handlePlayersLeave() below — both call
+    // this rather than reading state.teamSpec[0] directly) — so !up
+    // (commands/player.js) works by making THIS pick the VIP who claimed
+    // state.priorityCaptainId instead of the front of the queue, once, then
+    // clearing the claim either way (consumed, or found stale — the holder
+    // left the spectator pool since claiming) so the next !up can be made.
+    function resolveNextCaptainId() {
+        let nextCaptainId = state.teamSpec[0].id;
+        if (state.priorityCaptainId != null) {
+            if (state.teamSpec.some((p) => p.id === state.priorityCaptainId)) {
+                nextCaptainId = state.priorityCaptainId;
+            }
+            state.priorityCaptainId = null;
+        }
+        return nextCaptainId;
+    }
+
     function choosePlayer() {
         clearTimeout(state.timeOutCap);
         // Bug: if one side is completely empty, neither branch below ever
@@ -80,7 +105,7 @@ module.exports = function createChoosingHelpers({
         // (-> handlePlayersTeamChange) re-evaluate from there, same as
         // every other roster change in this file.
         if ((state.teamRed.length == 0 || state.teamBlue.length == 0) && state.teamSpec.length > 0) {
-            room.setPlayerTeam(state.teamSpec[0].id, state.teamRed.length == 0 ? Team.RED : Team.BLUE);
+            room.setPlayerTeam(resolveNextCaptainId(), state.teamRed.length == 0 ? Team.RED : Team.BLUE);
             return;
         }
         let captain;
@@ -311,5 +336,6 @@ module.exports = function createChoosingHelpers({
         chooseModeFunction,
         checkCaptainLeave,
         slowModeFunction,
+        resolveNextCaptainId,
     };
 };

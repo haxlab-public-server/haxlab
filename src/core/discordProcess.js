@@ -9,9 +9,10 @@
  * reason.
  *
  * Has no access to `room`/`state` — those live in the parent. Talks to it
- * over the fork's IPC channel: this process pushes 'relay'/'kickByAuth'
- * messages up, and receives 'log'/'report'/'recording'/'roomLink'/
- * 'password'/'roster' messages down (see the matching shim in src/index.js).
+ * over the fork's IPC channel: this process pushes 'relay'/'kickByAuth'/
+ * 'muteByAuth'/'unmuteByAuth' messages up, and receives 'log'/'report'/
+ * 'recording'/'roomLink'/'password'/'roster' messages down (see the
+ * matching shim in src/index.js).
  */
 
 // Registered first, before anything that could actually throw: a crash here
@@ -35,11 +36,39 @@ const {
     discordOwnerId,
     discordAdminRoleId,
     discordAutoRoleId,
+    discordVipRoleId,
     discordStatusChannelId,
     discordPasswordChannelId,
+    discordAdminCallChannelId,
+    discordVotebanChannelId,
+    discordMentionAlertChannelId,
+    discordProxyUrl,
     maxPlayers,
 } = require('./config');
 const { getTimeStats } = require('./utils');
+
+// Routes this process's Discord gateway (WebSocket) traffic through
+// DISCORD_PROXY_URL, when set — the ISP appears to drop Discord's TCP
+// traffic outright, so both REST and the gateway need to go through it.
+// This process only ever talks to Discord (see the file header above), so
+// patching `ws` globally here is safe: the room/Puppeteer connection that
+// players actually ride on lives entirely in the parent process and never
+// sees this. Must run before `./discord` (-> discord.js -> @discordjs/ws)
+// is required below, since @discordjs/ws reads `require('ws').WebSocket`
+// once, at module-load time, into a module-level constant — patching it
+// any later would be too late for that reference to pick it up.
+if (discordProxyUrl) {
+    const { SocksProxyAgent } = require('socks-proxy-agent');
+    const wsModule = require('ws');
+    const socksAgent = new SocksProxyAgent(discordProxyUrl);
+    const NativeWebSocket = wsModule.WebSocket;
+    class ProxiedWebSocket extends NativeWebSocket {
+        constructor(address, protocols, options) {
+            super(address, protocols, { ...options, agent: socksAgent });
+        }
+    }
+    wsModule.WebSocket = ProxiedWebSocket;
+}
 
 const { createDatabaseApi } = require('../../api/database');
 const db = createDatabaseApi();
@@ -89,6 +118,53 @@ function relayToRoom(username, content) {
     sendToParent({ type: 'relay', username, content });
 }
 
+// Fire-and-forget, same as relayToRoom above — a member getting the
+// configured VIP role on Discord (see discord.js's handleGuildMemberUpdate)
+// grants room VIP to whichever HaxBall auth they've linked, but nothing on
+// this side is waiting on a reply to report back.
+function grantVipByAuth(auth, targetName) {
+    sendToParent({ type: 'grantVip', auth, targetName });
+}
+
+// Same request/reply-with-timeout shape as kickPlayerByAuth above, for
+// !muteauth/!unmuteauth (discord.js) — a lost/delayed reply degrades to
+// "nobody was muted/unmuted" rather than hanging the command forever.
+const MUTE_REPLY_TIMEOUT_MS = 5000;
+const pendingMutes = new Map();
+const pendingUnmutes = new Map();
+
+function muteByAuth(auth, minutes) {
+    if (!process.connected) return Promise.resolve({ ok: false, reason: 'offline' });
+    const requestId = nextRequestId++;
+    return new Promise((resolve) => {
+        const timer = setTimeout(() => {
+            pendingMutes.delete(requestId);
+            resolve({ ok: false, reason: 'offline' });
+        }, MUTE_REPLY_TIMEOUT_MS);
+        pendingMutes.set(requestId, (result) => {
+            clearTimeout(timer);
+            resolve(result);
+        });
+        sendToParent({ type: 'muteByAuth', requestId, auth, minutes });
+    });
+}
+
+function unmuteByAuth(auth) {
+    if (!process.connected) return Promise.resolve({ ok: false });
+    const requestId = nextRequestId++;
+    return new Promise((resolve) => {
+        const timer = setTimeout(() => {
+            pendingUnmutes.delete(requestId);
+            resolve({ ok: false });
+        }, MUTE_REPLY_TIMEOUT_MS);
+        pendingUnmutes.set(requestId, (result) => {
+            clearTimeout(timer);
+            resolve(result);
+        });
+        sendToParent({ type: 'unmuteByAuth', requestId, auth });
+    });
+}
+
 const createDiscordBot = require('./discord');
 const discordBot = createDiscordBot({
     discordToken,
@@ -97,8 +173,13 @@ const discordBot = createDiscordBot({
     discordOwnerId,
     discordAdminRoleId,
     discordAutoRoleId,
+    discordVipRoleId,
     discordStatusChannelId,
     discordPasswordChannelId,
+    discordAdminCallChannelId,
+    discordVotebanChannelId,
+    discordMentionAlertChannelId,
+    discordProxyUrl,
     maxPlayers,
     db,
     state,
@@ -106,6 +187,10 @@ const discordBot = createDiscordBot({
     getPrintPlayerStats: () => printPlayerStats,
     relayToRoom,
     kickPlayerByAuth,
+    grantVipByAuth,
+    muteByAuth,
+    unmuteByAuth,
+    getTimeStats,
 });
 discordBot.init();
 
@@ -127,6 +212,21 @@ process.on('message', (msg) => {
         case 'password':
             discordBot.sendPassword(msg.password);
             break;
+        case 'adminCall':
+            discordBot.sendAdminCall(msg.playerName);
+            break;
+        case 'voteBanNotification':
+            discordBot.sendVoteBanNotification({
+                targetName: msg.targetName,
+                durationMinutes: msg.durationMinutes,
+                votesFor: msg.votesFor,
+                votesAgainst: msg.votesAgainst,
+                abstained: msg.abstained,
+            });
+            break;
+        case 'mentionAlert':
+            discordBot.sendMentionAlert(msg.speakerName, msg.text);
+            break;
         case 'roster':
             state.playersAll = msg.players.map((p) => ({ id: p.id, name: p.name }));
             authArray.length = 0;
@@ -137,6 +237,22 @@ process.on('message', (msg) => {
             const resolve = pendingKicks.get(msg.requestId);
             if (resolve) {
                 pendingKicks.delete(msg.requestId);
+                resolve(msg.result);
+            }
+            break;
+        }
+        case 'muteResult': {
+            const resolve = pendingMutes.get(msg.requestId);
+            if (resolve) {
+                pendingMutes.delete(msg.requestId);
+                resolve(msg.result);
+            }
+            break;
+        }
+        case 'unmuteResult': {
+            const resolve = pendingUnmutes.get(msg.requestId);
+            if (resolve) {
+                pendingUnmutes.delete(msg.requestId);
                 resolve(msg.result);
             }
             break;
