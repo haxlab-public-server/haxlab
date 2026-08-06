@@ -89,26 +89,26 @@
  *            the exact same 7 helper discs as smokeColor — set to `true`,
  *            single fixed palette, no color variants.
  *
- * type: 'goalAnimation' as a whole is gated behind VIP (see economy.js's
- * hasGoalAnimationAccess) — a non-VIP can't !shop or !equip any item of this
- * type until they own either the smoke bundle or fireworks (see
- * `grantsAccess`/`smokeFamily` below); there's no separate unlock purchase.
+ * type: 'goalAnimation' splits into two access tiers (see economy.js's
+ * isBigGoalAnimation/hasBigAnimationAccess):
+ *   - Plain avatar flashes (`avatar` set — fire/star/skull/crown) are
+ *     ordinary coin-shop cosmetics, open to every player — no VIP or
+ *     unlock prerequisite at all, same as a 'form'/'size' item.
+ *   - The bigger disc-based ones (`smokeColor`/`smokeFamily`/`fireworks`
+ *     set) are a VIP perk: free to use for any CURRENT VIP+ without owning
+ *     anything, re-checked live every goal (a lapsed VIP simply stops
+ *     seeing it fire, no re-equip needed) — or usable by anyone, VIP or
+ *     not, who's bought that specific item outright (50000 coins each),
+ *     which then never expires.
  *
  *   smokeFamily — type: 'goalAnimation' only, on the single 'smoke' catalog
  *            entry. Marks it as a bundle purchase: buying it charges once
  *            and grants every real smokeColor item (see above) instead of
- *            being equippable itself. Also exempts it from the
- *            goalAnimation VIP/access gate — buying it is how a non-VIP
- *            gets access in the first place, same reasoning as
- *            `grantsAccess` below.
+ *            being equippable itself.
  *   hidden — optional, any type. Excluded from the browsable !shop catalog
  *            listing (still fully ownable/equippable/shown in !inventory by
  *            id) — used for the 4 real smoke colors now that 'smoke' is the
  *            single catalog entry for the whole family.
- *   grantsAccess — type: 'goalAnimation' only. Exempts this item from the
- *            "need goalAnimation access already" gate (see
- *            hasGoalAnimationAccess) — owning it IS how a non-VIP gets that
- *            access, same as the smoke bundle. Currently just `fireworks`.
  *   retired — optional, any type. A past season's item, kept in this array
  *            FOREVER (never delete a retired entry — see below) purely so
  *            existing owners keep it: `hidden`-like (excluded from the
@@ -230,7 +230,5 @@ module.exports = [
     { id: 'smoke-purple', type: 'goalAnimation', name: 'Дым (фиолетовый)', price: 50000, smokeColor: 'purple', hidden: true },
     { id: 'smoke-white', type: 'goalAnimation', name: 'Дым (белый)', price: 50000, smokeColor: 'white', hidden: true },
 
-    // Also unlocks goalAnimation access for a non-VIP, same as buying the
-    // smoke bundle above (see `grantsAccess`) — no separate unlock purchase.
-    { id: 'fireworks', type: 'goalAnimation', name: 'Фейерверк', price: 50000, fireworks: true, grantsAccess: true },
+    { id: 'fireworks', type: 'goalAnimation', name: 'Фейерверк', price: 50000, fireworks: true },
 ];

@@ -33,7 +33,7 @@
  * established for classic), so the same "no rescaling for classic, scale
  * by stadium-goal-x/372 for big" reasoning applies unchanged here too.
  */
-const { SMOKE_DISC_START_INDEX, STADIUM_GOAL_X } = require('./smokeAnimation');
+const { SMOKE_DISC_START_INDEX, STADIUM_GOAL_X, clearGoalpost } = require('./smokeAnimation');
 
 const REFERENCE_GOAL_X = 372;
 const ORIGIN = { x: REFERENCE_GOAL_X, y: 0 };
@@ -165,19 +165,45 @@ async function playFireworksAnimation({ room, Team, stadium, team }) {
     const mirror = team === Team.RED ? 1 : -1;
     const framesBySlot = buildFireworksFrames();
 
-    for (let frameIndex = 0; frameIndex < FRAME_COUNT; frameIndex++) {
-        for (let slot = 0; slot < DISCS_NEEDED; slot++) {
-            const f = framesBySlot[slot][frameIndex];
-            const props = f.radius > 0
-                ? { x: f.x * scale * mirror, y: f.y * scale, radius: f.radius * scale, color: f.color }
-                : HIDDEN_DISC;
-            room.setDiscProperties(discStart + slot, props);
+    // Bug (reported live: "штанга пропадает после фейерверка" — confirmed
+    // on both stadiums, every play, not just an occasional race):
+    //   1. The randomized burst can fly a disc close enough to visually
+    //      overlap a real goalpost (see smokeAnimation.js's clearGoalpost,
+    //      which this reuses — its own hand-tuned frames had the exact
+    //      same problem, worse even). Clamped below, per frame.
+    //   2. Separately, if the stadium switches (or the room restarts)
+    //      while this ~1.8s async loop is still mid-flight,
+    //      setDiscProperties on a now-stale/out-of-range index throws —
+    //      which used to abort the function entirely, skipping the
+    //      cleanup loop below and leaving whatever frame was last drawn
+    //      stuck visible forever. try/finally guarantees cleanup runs
+    //      regardless.
+    try {
+        for (let frameIndex = 0; frameIndex < FRAME_COUNT; frameIndex++) {
+            for (let slot = 0; slot < DISCS_NEEDED; slot++) {
+                const f = framesBySlot[slot][frameIndex];
+                let props = HIDDEN_DISC;
+                if (f.radius > 0) {
+                    const x = f.x * scale * mirror;
+                    const y = f.y * scale;
+                    const radius = clearGoalpost(stadium, x, y, f.radius * scale);
+                    props = radius > 0 ? { x, y, radius, color: f.color } : HIDDEN_DISC;
+                }
+                room.setDiscProperties(discStart + slot, props);
+            }
+            await sleep(FRAME_DELAY_MS);
         }
-        await sleep(FRAME_DELAY_MS);
-    }
-
-    for (let slot = 0; slot < DISCS_NEEDED; slot++) {
-        room.setDiscProperties(discStart + slot, HIDDEN_DISC);
+    } finally {
+        for (let slot = 0; slot < DISCS_NEEDED; slot++) {
+            try {
+                room.setDiscProperties(discStart + slot, HIDDEN_DISC);
+            } catch {
+                // The stadium itself changed out from under this animation
+                // (see above) — that stadium's own fresh disc set already
+                // has these helper discs correctly hidden by definition, so
+                // a failed cleanup write here is a no-op, not a leak.
+            }
+        }
     }
 }
 

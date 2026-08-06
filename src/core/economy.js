@@ -38,7 +38,7 @@
  * VIP on the same side has one), before the captain's own choice is even
  * considered. Re-checked live on every call, not cached — a VIP form drops
  * out of consideration the instant its wearer's VIP itself lapses, same as
- * goalAnimation's access gate (see hasGoalAnimationAccess).
+ * the big goalAnimation items' own access check (see hasBigAnimationAccess).
  *
  * Mutable room state is reached through `state`, never captured by value.
  */
@@ -76,13 +76,11 @@ module.exports = function createEconomy({
     const CLUB_TEAMMATE_MULTIPLIER = 1.25;
 
     const itemsById = new Map(items.map((item) => [item.id, item]));
-    // !shop display split only — item.type stays 'goalAnimation' for both
-    // (access gating, equip slot, everything else) since smoke/fireworks
-    // are still that same VIP-gated slot underneath. This just separates
-    // the simple avatar-flash items from the bigger disc-based spectacle
-    // ones ("Аватарка после гола" was misleading for a full smoke/fireworks
-    // burst — neither touches the avatar at all) into their own listed
-    // section, purely for readability.
+    // Both a display split (formatCatalogSection below) AND the actual
+    // access-tier boundary (hasBigAnimationAccess) — item.type stays plain
+    // 'goalAnimation' for both subtypes (same equip slot), this is what
+    // actually distinguishes "free coin-shop cosmetic" (avatar flashes)
+    // from "VIP perk, or a 50000-coin buy" (smoke/fireworks).
     const isBigGoalAnimation = (item) => item.type === 'goalAnimation' && (item.smokeColor || item.smokeFamily || item.fireworks);
     const CATEGORY_LABELS = {
         form: 'Формы',
@@ -91,19 +89,20 @@ module.exports = function createEconomy({
         bigGoalAnimation: 'Анимации после гола',
     };
 
-    // goalAnimation items (see shopItems.js) are a VIP perk — free for any
-    // VIP+, or unlocked for anyone the moment they own the smoke bundle or
-    // fireworks (see shopItems.js's `grantsAccess` and the smoke family's
-    // `smokeFamily`/`hidden` items) — there's no separate standalone unlock
-    // purchase anymore, buying either of those IS the unlock.
     const SMOKE_COLOR_ITEM_IDS = items.filter((item) => item.smokeColor).map((item) => item.id);
-    const ACCESS_GRANTING_ITEM_IDS = items.filter((item) => item.grantsAccess).map((item) => item.id);
 
-    async function hasGoalAnimationAccess(player) {
+    // The bigger disc-based animations (smoke/fireworks) are the VIP perk:
+    // free for any CURRENT VIP+ with no purchase at all, or usable by
+    // anyone — VIP or not — who's bought that SPECIFIC item outright
+    // (50000 coins, never expires). Re-checked live every time (not cached
+    // at equip time), so a lapsed VIP's still-equipped big animation just
+    // stops firing/equipping the instant their VIP does, no re-equip
+    // needed to restore it once VIP renews either. Plain avatar flashes
+    // (fire/star/skull/crown) never call this at all — ordinary coin-shop
+    // cosmetics, no access tier above plain ownership.
+    async function hasBigAnimationAccess(player, item) {
         if (getRole(player) >= Role.VIP) return true;
-        const auth = getAuth(player);
-        const checks = [SMOKE_COLOR_ITEM_IDS[0], ...ACCESS_GRANTING_ITEM_IDS].map((id) => db.ownsItem(auth, id));
-        return (await Promise.all(checks)).some(Boolean);
+        return db.ownsItem(getAuth(player), item.id);
     }
 
     // Whether `auth` owns the smoke family — checked via a single
@@ -250,7 +249,7 @@ module.exports = function createEconomy({
     // filtered fresh on every call (no caching) specifically so a lapsed VIP
     // grant makes their vipOnly form stop counting immediately, without
     // needing to be re-equipped — same live-recheck reasoning as
-    // hasGoalAnimationAccess.
+    // hasBigAnimationAccess.
     // Returns { item, sourcePlayer } (not just a color) — the caller still
     // needs to decide home/away, and announceTeamForms below needs to credit
     // whoever the form actually came from.
@@ -395,11 +394,14 @@ module.exports = function createEconomy({
         if (!equipped.goalAnimation) return;
         const item = itemsById.get(equipped.goalAnimation);
         if (!item) return;
-        // Re-checked live, not just at buy/equip time: a VIP grant can lapse
-        // mid-session (see !setvip) without the player ever unequipping —
-        // their goalAnimation stays wearable-in-the-db but simply stops
-        // firing the moment VIP (or a permanent 'unlock' purchase) is gone.
-        if (!(await hasGoalAnimationAccess(player))) return;
+        // Only the bigger animations carry an access check at all — a
+        // plain avatar flash fires unconditionally, ownership (already
+        // required to equip it) is enough. Re-checked live, not just at
+        // buy/equip time: a VIP grant can lapse mid-session (see !setvip)
+        // without the player ever unequipping — their still-equipped
+        // smoke/fireworks simply stops firing the moment VIP (and no
+        // outright purchase) is gone.
+        if (isBigGoalAnimation(item) && !(await hasBigAnimationAccess(player, item))) return;
         if (item.smokeColor) {
             // player.team is guaranteed to be the scoring side here — the
             // caller (gameManagement.js's onTeamGoal) only ever invokes
@@ -569,24 +571,12 @@ module.exports = function createEconomy({
             return;
         }
 
-        // Gate new purchases only — an item already owned always falls
-        // through to buyItem below, which reports "already have it" instead
-        // (a lapsed VIP shouldn't be told they can't afford something they
-        // already bought; see equipCommand for the separate, stricter check
-        // that DOES apply even to already-owned items). `grantsAccess` items
-        // (fireworks — see shopItems.js) are exempt from this gate too, same
-        // reasoning as the smoke bundle above: buying one of them IS how a
-        // non-VIP gets goalAnimation access in the first place.
-        if (item.type === 'goalAnimation' && !item.grantsAccess && !(await db.ownsItem(auth, item.id)) && !(await hasGoalAnimationAccess(player))) {
-            room.sendAnnouncement(
-                `Анимации после гола доступны только VIP, либо после покупки "Дым" (!shop smoke) или "Фейерверк" (!shop fireworks).`,
-                player.id,
-                errorColor,
-                'bold',
-                HaxNotification.CHAT
-            );
-            return;
-        }
+        // goalAnimation items (avatar flashes AND smoke/fireworks alike)
+        // have no purchase-time access gate at all — anyone can buy any of
+        // them outright, VIP or not (a VIP buying smoke/fireworks anyway
+        // just means they keep it after their VIP eventually lapses). The
+        // VIP-free path is a separate, parallel way to USE the big ones
+        // without ever owning them — see hasBigAnimationAccess.
 
         // vipOnly forms have no coin-bought bypass at all, unlike
         // goalAnimation — this is a hard role check, not an ownsItem escape
@@ -694,12 +684,12 @@ module.exports = function createEconomy({
             return;
         }
         const auth = getAuth(player);
-        const owned = await db.ownsItem(auth, item.id);
-        if (!owned) {
-            room.sendAnnouncement(`Вы еще не купили "${item.name}". Загляните в "!shop".`, player.id, errorColor, 'bold', HaxNotification.CHAT);
-            return;
-        }
         const equipped = await db.getEquipped(auth);
+        // Checked BEFORE the ownership gate below: a VIP's big animation
+        // (smoke/fireworks) can be equipped for free without ever being
+        // recorded as owned in the db (see hasBigAnimationAccess) — the
+        // toggle-off has to work for that case too, not just a normally
+        // bought item.
         if (equipped[item.type] === item.id) {
             await db.setEquipped(auth, item.type, null);
             // Same reasoning as the equip path below: a form is a whole-side
@@ -710,14 +700,13 @@ module.exports = function createEconomy({
             room.sendAnnouncement(`✔️ Снято: ${item.name} !`, player.id, announcementColor, 'bold', HaxNotification.CHAT);
             return;
         }
-        if (item.type === 'goalAnimation' && !(await hasGoalAnimationAccess(player))) {
-            room.sendAnnouncement(
-                `Анимации после гола доступны только VIP, либо после покупки "Дым" (!shop smoke) или "Фейерверк" (!shop fireworks).`,
-                player.id,
-                errorColor,
-                'bold',
-                HaxNotification.CHAT
-            );
+        const owned = await db.ownsItem(auth, item.id);
+        // A big animation is equippable without ownership for a current
+        // VIP (free perk — see hasBigAnimationAccess); everything else
+        // (avatar flashes included) needs a real purchase, no exceptions.
+        const freeAsVip = isBigGoalAnimation(item) && getRole(player) >= Role.VIP;
+        if (!owned && !freeAsVip) {
+            room.sendAnnouncement(`Вы еще не купили "${item.name}". Загляните в "!shop".`, player.id, errorColor, 'bold', HaxNotification.CHAT);
             return;
         }
         if (item.vipOnly && getRole(player) < Role.VIP) {

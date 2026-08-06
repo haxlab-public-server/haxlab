@@ -877,7 +877,7 @@ console.log('\n--- db + roomStats.js/player.js: player data actually round-trips
     db.close();
 })();
 
-console.log('\n--- stats/roomStats.js: VIP lottery — 1% roll per WINNING-team player on a genuine 4v4 ---');
+console.log('\n--- stats/roomStats.js: VIP lottery — 0.5% roll per WINNING-team player on a genuine 4v4 ---');
 (async () => {
     const Team = { RED: 1, BLUE: 2, SPECTATORS: 0 };
     const HaxNotificationMock = { CHAT: 1 };
@@ -937,10 +937,10 @@ console.log('\n--- stats/roomStats.js: VIP lottery — 1% roll per WINNING-team 
     sent.length = 0;
     state.vipList = [['AUTH_ALREADY_VIP', 'Winner2', null]];
 
-    randomValue = 0.5; // forces every roll to "lose" (>= 1% chance)
+    randomValue = 0.5; // forces every roll to "lose" (>= 0.5% chance)
     await roomStats.updateStats();
 
-    check('nobody wins when every roll comes up short of 1%', grantCalls.length, 0);
+    check('nobody wins when every roll comes up short of 0.5%', grantCalls.length, 0);
     check('no lottery announcement is sent either', sent.some((s) => s.msg.includes('🎰')), false);
 
     // A draw (state.lastWinner outside RED/BLUE) never rolls at all, even
@@ -1484,7 +1484,7 @@ console.log('\n--- core/commands/trophies.js + db.getTopPlayers(): top-3 trophie
         game: { scores: { time: 300, timeLimit: 300, red: 3, blue: 0, scoreLimit: 3 } },
         clubMembers: [],
         // The VIP lottery (see roomStats.js's rollVipLottery) only fires on
-        // a genuine ~1% roll, but updateStats() always reaches the check
+        // a genuine ~0.5% roll, but updateStats() always reaches the check
         // that reads state.vipList regardless — must exist even though this
         // test doesn't care about the lottery itself.
         vipList: [],
@@ -5424,44 +5424,26 @@ console.log('\n--- core/economy.js: coin awards, playtime ticker, shop/inventory
     await economy.shopCommand({ id: 2, name: 'Blue1' }, '!shop gold');
     check('!shop <id> too expensive for the current balance is rejected', /Недостаточно монет/.test(sentLocal[0].msg), true);
 
-    // goalAnimation items are VIP-gated: a plain PLAYER can't buy one at all,
-    // even with the balance for it, until they either hold VIP+ or own the
-    // smoke bundle or fireworks (see economy.js's hasGoalAnimationAccess —
-    // there's no separate standalone unlock purchase anymore).
+    // Avatar flashes (fire/star/skull/crown) are ordinary coin-shop
+    // cosmetics — no VIP or access prerequisite at all, unlike the old
+    // model (see economy.js's isBigGoalAnimation/hasBigAnimationAccess).
     sentLocal.length = 0;
     await economy.shopCommand({ id: 2, name: 'Blue1' }, '!shop fire');
-    check('a non-VIP without access cannot buy a goalAnimation item', /доступны только VIP/.test(sentLocal[0].msg), true);
-    check('the rejected goalAnimation purchase never touches the balance', await db.getBalance('AUTH_BLUE1'), 100);
-
-    // A VIP bypasses the gate entirely — no access purchase needed.
-    rolesLocal[2] = Role.VIP;
-    sentLocal.length = 0;
-    await economy.shopCommand({ id: 2, name: 'Blue1' }, '!shop fire');
-    check('a VIP can buy a goalAnimation item without any access purchase', /Куплено: Огонь/.test(sentLocal[0].msg), true);
+    check('a plain non-VIP can buy an avatar-flash goalAnimation item directly', /Куплено: Огонь/.test(sentLocal[0].msg), true);
     check('the price was actually deducted', await db.getBalance('AUTH_BLUE1'), 0);
-    rolesLocal[2] = Role.PLAYER;
 
     sentLocal.length = 0;
     await economy.shopCommand({ id: 2, name: 'Blue1' }, '!shop fire');
     check('!shop <already-owned id> is rejected without charging again', /уже есть/.test(sentLocal[0].msg), true);
 
-    // Losing VIP afterward doesn't un-equip anything already owned, but a
-    // now-plain player still can't buy a SECOND goalAnimation item on the
-    // strength of their old VIP — owning the smoke bundle or fireworks is
-    // the only lasting bypass now.
+    // The bigger animations (smoke/fireworks) are ALSO buyable outright by
+    // a plain non-VIP with no prerequisite — the VIP angle is a separate,
+    // free-to-USE-without-owning path (see the playGoalAnimation block
+    // further down), not a purchase gate.
     await db.addCoins('AUTH_BLUE1', 'Blue1', 350);
     sentLocal.length = 0;
-    await economy.shopCommand({ id: 2, name: 'Blue1' }, '!shop smoke-red');
-    check('a lapsed VIP is gated again on a second goalAnimation item', /доступны только VIP/.test(sentLocal[0].msg), true);
-    check('the rejection never touches the balance', await db.getBalance('AUTH_BLUE1'), 350);
-
-    // The smoke bundle ('smoke' — see shopItems.js's smokeFamily) is itself
-    // exempt from the access gate (buying it IS how a non-VIP gets access)
-    // and, charged once, grants every real hidden color at once — !equip is
-    // left to pick which of the now-owned colors is actually worn.
-    sentLocal.length = 0;
     await economy.shopCommand({ id: 2, name: 'Blue1' }, '!shop smoke');
-    check('the smoke bundle is buyable without any prior access', /Куплено: Дым за/.test(sentLocal[0].msg), true);
+    check('the smoke bundle is buyable by a plain non-VIP with no prerequisite', /Куплено: Дым за/.test(sentLocal[0].msg), true);
     check('buying the bundle grants smoke-red', await db.ownsItem('AUTH_BLUE1', 'smoke-red'), true);
     check('...and smoke-blue too', await db.ownsItem('AUTH_BLUE1', 'smoke-blue'), true);
     check('...and smoke-purple too', await db.ownsItem('AUTH_BLUE1', 'smoke-purple'), true);
@@ -5474,13 +5456,6 @@ console.log('\n--- core/economy.js: coin awards, playtime ticker, shop/inventory
     await economy.shopCommand({ id: 2, name: 'Blue1' }, '!shop smoke');
     check('re-buying the smoke bundle is rejected as already owned, not re-charged', /уже есть/.test(sentLocal[0].msg), true);
     check('the rejection never touches the balance', await db.getBalance('AUTH_BLUE1'), 50);
-
-    // Owning the smoke bundle unlocks goalAnimation access broadly, not just
-    // for smoke colors — a totally unrelated item (star) is now buyable too.
-    sentLocal.length = 0;
-    await economy.shopCommand({ id: 2, name: 'Blue1' }, '!shop star');
-    check('owning the smoke bundle unlocks any goalAnimation item, not just smoke colors', /Куплено: Звезда/.test(sentLocal[0].msg), true);
-    check('the price was actually deducted', await db.getBalance('AUTH_BLUE1'), 0);
 
     sentLocal.length = 0;
     await economy.shopCommand({ id: 2, name: 'Blue1' }, '!shop');
@@ -5517,6 +5492,28 @@ console.log('\n--- core/economy.js: coin awards, playtime ticker, shop/inventory
     check('!equip <owned goalAnimation> confirms', /Надето: Огонь/.test(sentLocal[0].msg), true);
     check('equipping a goalAnimation never touches the disc', roomCallsLocal, []);
     check('equipping a goalAnimation records it in that slot', await db.getEquipped('AUTH_BLUE1'), { form: null, goalAnimation: 'fire', size: null });
+
+    // A current VIP can !equip a big animation (smoke/fireworks) without
+    // ever having bought it — the free-while-VIP path (see economy.js's
+    // hasBigAnimationAccess), exercised here through the real equipCommand
+    // rather than a direct db.setEquipped like the playGoalAnimation block
+    // further down does.
+    authArray[19] = ['AUTH_VIP_EQUIP_TEST'];
+    rolesLocal[19] = Role.VIP;
+    sentLocal.length = 0;
+    await economy.equipCommand({ id: 19, name: 'VipEquipTest' }, '!equip fireworks');
+    check('a VIP can equip a big animation with no purchase at all', /Надето: Фейерверк/.test(sentLocal[0].msg), true);
+    check('...and it is NOT recorded as owned in the db (still genuinely free, not a stealth purchase)', await db.ownsItem('AUTH_VIP_EQUIP_TEST', 'fireworks'), false);
+
+    sentLocal.length = 0;
+    await economy.equipCommand({ id: 19, name: 'VipEquipTest' }, '!equip fireworks');
+    check('the same VIP can toggle it back off again, despite never owning it', /Снято: Фейерверк/.test(sentLocal[0].msg), true);
+    check('unequipping clears the slot', (await db.getEquipped('AUTH_VIP_EQUIP_TEST')).goalAnimation, null);
+
+    rolesLocal[19] = Role.PLAYER;
+    sentLocal.length = 0;
+    await economy.equipCommand({ id: 19, name: 'VipEquipTest' }, '!equip fireworks');
+    check('a lapsed (non-VIP) player without ownership cannot equip a big animation', /еще не купили/.test(sentLocal[0].msg), true);
 
     // Equipping a form goes through equipCommand -> applyTeamForms, i.e. one
     // setTeamColors call per side, not a per-player disc update.
@@ -5816,10 +5813,11 @@ console.log('\n--- core/economy.js: coin awards, playtime ticker, shop/inventory
     check('a current VIP can equip a vipOnly form they own', /Надето: VIP Royal/.test(sentLocal[0].msg), true);
     rolesLocal[2] = Role.PLAYER;
 
-    // !shop fireworks — `grantsAccess` itself (see shopItems.js), so it's
-    // buyable regardless of prior access, same as the smoke bundle (Blue1
-    // already has access from owning the smoke bundle anyway by this point).
-    await db.addCoins('AUTH_BLUE1', 'Blue1', 50000);
+    // !shop fireworks — buyable outright by anyone, no prerequisite (see
+    // the earlier smoke-bundle tests). Blue1 has 50 left over from that
+    // purchase, so only topped up to exactly the 50000 price, not a round
+    // 50000 add — keeps the "fully spent" balance check below exact.
+    await db.addCoins('AUTH_BLUE1', 'Blue1', 49950);
     sentLocal.length = 0;
     await economy.shopCommand({ id: 2, name: 'Blue1' }, '!shop fireworks');
     check('!shop fireworks charges the full 50000', /Куплено: Фейерверк/.test(sentLocal[0].msg), true);
@@ -5883,8 +5881,8 @@ console.log('\n--- core/economy.js: coin awards, playtime ticker, shop/inventory
     // burst (smokeAnimation.js) instead of an avatar swap. Real
     // playSmokeAnimation is wired in above, so this genuinely runs the
     // 5-frame animation (~650ms of real setTimeout delay). Red1 has never
-    // bought the goalAnimation unlock, so this needs VIP to actually fire
-    // (see the access-gate tests below for the lapsed/unlocked cases).
+    // bought this specific item, so this needs VIP to actually fire (see
+    // the lapsed/owned cases right below).
     rolesLocal[1] = Role.VIP;
     await db.setEquipped('AUTH_RED1', 'goalAnimation', 'smoke-red');
     roomCallsLocal.length = 0;
@@ -5895,21 +5893,30 @@ console.log('\n--- core/economy.js: coin awards, playtime ticker, shop/inventory
     check('every helper disc ends up hidden again (radius 0) once it finishes', roomCallsLocal.slice(-7).every((c) => c.includes('"radius":0')), true);
 
     // Losing VIP mid-session (no re-equip, nothing touched in the db) makes
-    // an equipped goalAnimation simply stop firing — it's re-checked live on
-    // every goal, not just at the moment it was equipped.
+    // an equipped BIG animation simply stop firing — it's re-checked live on
+    // every goal, not just at equip time. Avatar flashes (tested above)
+    // have no such gate at all, VIP or not.
     rolesLocal[1] = Role.PLAYER;
     roomCallsLocal.length = 0;
     await economy.playGoalAnimation({ id: 1, name: 'Red1', team: Team.RED });
-    check('a lapsed VIP\'s still-equipped goalAnimation no longer fires', roomCallsLocal, []);
+    check('a lapsed VIP\'s still-equipped big animation stops firing once they own nothing', roomCallsLocal, []);
     check('the db still has it equipped underneath (only the FIRING is gated)', (await db.getEquipped('AUTH_RED1')).goalAnimation, 'smoke-red');
 
-    // A `grantsAccess` purchase (fireworks — see shopItems.js) survives this,
-    // unlike VIP — same equipped item, same never-re-equipped state, but it
-    // fires again the moment ANY access-granting item is owned.
+    // Buying a DIFFERENT big animation (fireworks) does NOT retroactively
+    // unlock the one still equipped (smoke-red) — access is strictly
+    // per-item now, unlike the old "own any unlock item, use everything"
+    // model.
     await db.buyItem('AUTH_RED1', 'Red1', 'fireworks', 0);
     roomCallsLocal.length = 0;
     await economy.playGoalAnimation({ id: 1, name: 'Red1', team: Team.RED });
-    check('a non-VIP who owns an access-granting item keeps firing their equipped animation permanently', roomCallsLocal.length > 0, true);
+    check('owning a DIFFERENT big animation does not unlock this unowned, still-equipped one', roomCallsLocal, []);
+
+    // Buying the SPECIFIC equipped item outright makes it fire permanently,
+    // VIP or not, from then on.
+    await db.buyItem('AUTH_RED1', 'Red1', 'smoke-red', 0);
+    roomCallsLocal.length = 0;
+    await economy.playGoalAnimation({ id: 1, name: 'Red1', team: Team.RED });
+    check('owning the SPECIFIC equipped big animation outright fires it regardless of VIP', roomCallsLocal.length > 0, true);
 
     // playGoalAnimation + a `fireworks` item (shopItems.js) — routes to the
     // real playFireworksAnimation wired in above, same disc-based mechanism
@@ -6128,6 +6135,81 @@ console.log('\n--- core/smokeAnimation.js: disc-based smoke burst, scaled per st
 
     check('SMOKE_COLORS has all 4 requested variants', Object.keys(SMOKE_COLORS).sort(), ['blue', 'purple', 'red', 'white']);
 })();
+
+console.log('\n--- core/smokeAnimation.js: clearGoalpost keeps every celebration disc off the real goalpost ---');
+{
+    // Bug (reported live, both stadiums, every play — not an occasional
+    // race): the hand-tuned smoke frames and the randomized fireworks
+    // burst were both tuned without checking this room's actual goalpost
+    // coordinates (see stadiums.js's own discs 0-3) — several landed a
+    // disc close enough to visually swallow a post permanently. Direct
+    // unit coverage of the fix itself; the full-stadium sweep further
+    // below (via the real playSmokeAnimation/playFireworksAnimation) is
+    // the integration-level proof no overlap survives in practice.
+    const { clearGoalpost } = require(path.join(CORE, 'smokeAnimation'));
+
+    check('a disc nowhere near a goalpost is left completely untouched', clearGoalpost('classic', 0, 0, 20), 20);
+    check('a disc dead-center on the real goalpost (368,-50) is fully hidden (clamped to 0)', clearGoalpost('classic', 368, -50, 25), 0);
+    check('the exact reported worst offender (373,-43,r=25 on classic) is shrunk, not left overlapping', clearGoalpost('classic', 373, -43, 25) < 25, true);
+    check('...specifically shrunk enough to actually clear the post (5) + clearance (3)', clearGoalpost('classic', 373, -43, 25) <= Math.hypot(373 - 368, -43 - -50) - 5 - 3, true);
+    check('the mirror side (negative x) checks against the mirrored post, not the positive one', clearGoalpost('classic', -368, -50, 25), 0);
+    check('an unknown stadium key is a safe no-op (returns the radius unchanged)', clearGoalpost('training', 368, -50, 20), 20);
+    check('a radius of 0 in is 0 out, no crash from touching a hidden disc', clearGoalpost('classic', 368, -50, 0), 0);
+
+    // Full-stadium sweep: every frame smokeAnimation.js/fireworksAnimation.js
+    // can actually produce, for both teams and both stadiums, run through
+    // the SAME clamp the real render loop uses — none may still overlap a
+    // real goalpost afterward. Mirrors the exact reproduction script used
+    // to find and confirm-fix this bug.
+    const { STADIUM_GOAL_X } = require(path.join(CORE, 'smokeAnimation'));
+    const { buildFireworksFrames, DISCS_NEEDED, FRAME_COUNT: FIREWORKS_FRAME_COUNT } = require(path.join(CORE, 'fireworksAnimation'));
+    const SMOKE_FRAMES_FIXTURE = [
+        [{ x: 381, y: -2, radius: 10 }, { x: 381, y: -2, radius: 20 }, { x: 394, y: -7, radius: 25 }, { x: 393, y: -47, radius: 15 }, { x: 371, y: -83, radius: 8 }],
+        [{ x: 378, y: -18, radius: 10 }, { x: 371, y: 20, radius: 20 }, { x: 378, y: 29, radius: 25 }, { x: 373, y: -56, radius: 15 }, { x: 408, y: -50, radius: 5 }],
+        [{ x: 374, y: -11, radius: 10 }, { x: 371, y: -24, radius: 15 }, { x: 356, y: -10, radius: 25 }, { x: 324, y: -46, radius: 5 }, { x: 325, y: -6, radius: 10 }],
+        [null, { x: 404, y: -11, radius: 15 }, { x: 373, y: -43, radius: 25 }, { x: 340, y: -7, radius: 20 }, { x: 379, y: 59, radius: 5 }],
+        [null, null, { x: 403, y: 18, radius: 5 }, { x: 333, y: 44, radius: 10 }, null],
+        [null, null, { x: 344, y: 23, radius: 15 }, { x: 373, y: 35, radius: 15 }, null],
+        [null, null, { x: 337, y: -37, radius: 15 }, { x: 414, y: 26, radius: 5 }, null],
+    ];
+    const GOALPOSTS_FIXTURE = {
+        classic: [{ x: -368, y: 50, r: 5 }, { x: -368, y: -50, r: 5 }, { x: 368, y: 50, r: 5 }, { x: 368, y: -50, r: 5 }],
+        big: [{ x: -665, y: 80, r: 5 }, { x: -665, y: -80, r: 5 }, { x: 665, y: 80, r: 5 }, { x: 665, y: -80, r: 5 }],
+    };
+    let overlapsFound = 0;
+    for (const stadium of ['classic', 'big']) {
+        const scale = STADIUM_GOAL_X[stadium] / 372;
+        for (const mirror of [1, -1]) {
+            for (const slot of SMOKE_FRAMES_FIXTURE) {
+                for (const fr of slot) {
+                    if (!fr) continue;
+                    const x = fr.x * scale * mirror, y = fr.y * scale;
+                    const radius = clearGoalpost(stadium, x, y, fr.radius * scale);
+                    if (radius <= 0) continue;
+                    for (const post of GOALPOSTS_FIXTURE[stadium]) {
+                        if (Math.hypot(x - post.x, y - post.y) - post.r - radius < 0) overlapsFound++;
+                    }
+                }
+            }
+            for (let trial = 0; trial < 40; trial++) {
+                const framesBySlot = buildFireworksFrames();
+                for (let slot = 0; slot < DISCS_NEEDED; slot++) {
+                    for (let f = 0; f < FIREWORKS_FRAME_COUNT; f++) {
+                        const fr = framesBySlot[slot][f];
+                        if (fr.radius <= 0) continue;
+                        const x = fr.x * scale * mirror, y = fr.y * scale;
+                        const radius = clearGoalpost(stadium, x, y, fr.radius * scale);
+                        if (radius <= 0) continue;
+                        for (const post of GOALPOSTS_FIXTURE[stadium]) {
+                            if (Math.hypot(x - post.x, y - post.y) - post.r - radius < 0) overlapsFound++;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    check('sweeping every smoke frame + 300 randomized fireworks bursts per team/stadium finds zero remaining overlaps', overlapsFound, 0);
+}
 
 console.log('\n--- core/fireworksAnimation.js: recursive cascade, regenerated (randomized) fresh on every call ---');
 {

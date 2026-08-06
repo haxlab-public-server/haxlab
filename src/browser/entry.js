@@ -479,9 +479,14 @@ const swapTime = 5;
 const AFKSet = new Map();
 const AFKMinSet = new Set();
 const AFKCooldownSet = new Set();
-const minAFKDuration = 0;
-const maxAFKDuration = 30;
-const AFKCooldown = 0;
+// Matches !help afk's own advertised numbers (commands.js) — these had
+// drifted to 0/30/0 (leftover test/debug values), so non-admins were
+// sitting AFK for 30 real minutes before auto-return instead of the
+// documented 5, reported live as "people who've been AFK 15+ minutes never
+// get kicked back".
+const minAFKDuration = 1;
+const maxAFKDuration = 15;
+const AFKCooldown = 10;
 
 // !hide toggle (admins/master only) — suppresses the room admin badge and
 // the chat prefix without touching adminList/masterList, so the underlying

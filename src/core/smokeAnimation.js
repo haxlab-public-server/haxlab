@@ -45,6 +45,43 @@ const REFERENCE_GOAL_X = 372;
 const SMOKE_DISC_START_INDEX = { classic: 8, big: 4 };
 const STADIUM_GOAL_X = { classic: 372, big: 674 };
 
+// Real, physical goalpost positions (see stadiums.js's own discs 0-3 —
+// trait: 'goalPost') — duplicated here rather than read live, since these
+// animation files only ever get a bare scale factor from playGoalAnimation,
+// never the actual stadium data. Needed by clearGoalpost below: this
+// file's own hand-tuned SMOKE_FRAMES (and fireworksAnimation.js's
+// randomized burst, which imports this) were tuned against a reference
+// celebration library's own map, never checked against THIS room's actual
+// goalpost coordinates — confirmed live to fly discs (up to a 25-radius
+// one) almost exactly on top of a post, on both stadiums, every single
+// time. "штанга пропадает после анимации" was that post, still physically
+// there, just visually buried under a stuck-in-place decoration.
+const GOALPOSTS = {
+    classic: { x: 368, ys: [50, -50] },
+    big: { x: 665, ys: [80, -80] },
+};
+const GOALPOST_RADIUS = 5;
+const GOALPOST_CLEARANCE = 3; // extra breathing room beyond a bare edge-touch
+
+// Shrinks (never repositions) a disc's radius just enough to clear
+// whichever real goalpost it would otherwise overlap, on the side it's
+// already drawn on (`x`'s own sign — call this AFTER scaling/mirroring, so
+// sign already matches the scored-into side). Clamps to 0 if even a
+// razor-thin disc still wouldn't clear — same as this file's own
+// null/HIDDEN_DISC frames, just for one specific frame instead of a whole
+// slot.
+function clearGoalpost(stadium, x, y, radius) {
+    const post = GOALPOSTS[stadium];
+    if (!post || radius <= 0) return radius;
+    const postX = x < 0 ? -post.x : post.x;
+    let clamped = radius;
+    for (const postY of post.ys) {
+        const maxRadius = Math.hypot(x - postX, y - postY) - GOALPOST_RADIUS - GOALPOST_CLEARANCE;
+        if (maxRadius < clamped) clamped = maxRadius;
+    }
+    return Math.max(0, clamped);
+}
+
 // 7 slots (one per helper disc) x 5 frames each. null = that disc goes
 // invisible (radius 0) for that frame, same as the reference library's
 // `{ ...defaultDiscProperties }` frames — most slots only "exist" for part
@@ -132,19 +169,34 @@ async function playSmokeAnimation({ room, Team, stadium, team, colorName }) {
     const scale = (STADIUM_GOAL_X[stadium] ?? REFERENCE_GOAL_X) / REFERENCE_GOAL_X;
     const mirror = team === Team.RED ? 1 : -1;
 
-    for (let frame = 0; frame < FRAME_COUNT; frame++) {
-        for (let slot = 0; slot < SMOKE_FRAMES.length; slot++) {
-            const f = SMOKE_FRAMES[slot][frame];
-            const props = f
-                ? { x: f.x * scale * mirror, y: f.y * scale, radius: f.radius * scale, color: colors[f.tier] }
-                : HIDDEN_DISC;
-            room.setDiscProperties(discStart + slot, props);
+    // Same "stadium switched mid-animation -> setDiscProperties throws ->
+    // cleanup skipped -> a bright disc stays stuck visible near the goal"
+    // failure mode as fireworksAnimation.js's own playFireworksAnimation —
+    // see its comment. try/finally guarantees cleanup runs regardless.
+    try {
+        for (let frame = 0; frame < FRAME_COUNT; frame++) {
+            for (let slot = 0; slot < SMOKE_FRAMES.length; slot++) {
+                const f = SMOKE_FRAMES[slot][frame];
+                let props = HIDDEN_DISC;
+                if (f) {
+                    const x = f.x * scale * mirror;
+                    const y = f.y * scale;
+                    const radius = clearGoalpost(stadium, x, y, f.radius * scale);
+                    props = radius > 0 ? { x, y, radius, color: colors[f.tier] } : HIDDEN_DISC;
+                }
+                room.setDiscProperties(discStart + slot, props);
+            }
+            await sleep(FRAME_DELAY_MS);
         }
-        await sleep(FRAME_DELAY_MS);
-    }
-
-    for (let slot = 0; slot < SMOKE_FRAMES.length; slot++) {
-        room.setDiscProperties(discStart + slot, HIDDEN_DISC);
+    } finally {
+        for (let slot = 0; slot < SMOKE_FRAMES.length; slot++) {
+            try {
+                room.setDiscProperties(discStart + slot, HIDDEN_DISC);
+            } catch {
+                // The stadium itself already changed — its own fresh disc
+                // set has these helper discs hidden by definition.
+            }
+        }
     }
 }
 
@@ -152,5 +204,6 @@ module.exports = {
     SMOKE_COLORS,
     SMOKE_DISC_START_INDEX,
     STADIUM_GOAL_X,
+    clearGoalpost,
     playSmokeAnimation,
 };

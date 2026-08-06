@@ -30,7 +30,7 @@ module.exports = function createRoomStats({
 }) {
     // Each player on the WINNING side of a genuine full 4v4 quals match
     // (same gate updateStats() already requires below) gets an independent
-    // 1% roll at a week of VIP — a fun rare bonus, not a grind reward like
+    // 0.5% roll at a week of VIP — a fun rare bonus, not a grind reward like
     // the coin economy. Draws never roll at all (nobody "won"). A player
     // who's already VIP just quietly doesn't win again (see rollVipLottery)
     // rather than stacking or extending — same "already VIP" no-op every
@@ -44,7 +44,7 @@ module.exports = function createRoomStats({
     // tools/smoke-test.js), so temporarily replacing a REAL global here
     // would risk leaking into some other, unrelated test's randomness
     // mid-await.
-    const VIP_LOTTERY_CHANCE = 0.01;
+    const VIP_LOTTERY_CHANCE = 0.005;
     const VIP_LOTTERY_DAYS = 7;
 
     async function rollVipLottery(player) {

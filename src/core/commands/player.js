@@ -228,6 +228,8 @@ module.exports = function createPlayerCommands({
             '⭐ Команды VIP:',
             '!vipcolor <hex> — изменить цвет вашего VIP-префикса в чате, или без аргумента чтобы сбросить на стандартный. Пример: !vipcolor ff8800.',
             '!viphelp — эта команда.',
+            '',
+            '⭐ Также, пока у вас есть VIP: анимации "Дым" и "Фейерверк" после гола доступны бесплатно — просто наденьте их через "!equip smoke-<цвет>" или "!equip fireworks", без покупки.',
         ].join('\n');
         room.sendAnnouncement(text, player.id, announcementColor, 'bold', HaxNotification.CHAT);
     }
@@ -337,6 +339,10 @@ module.exports = function createPlayerCommands({
                     );
                 } else {
                     AFKSet.set(player.id, Date.now());
+                    // Admins are fully exempt from all three timers on
+                    // purpose — including the max-duration auto-return: an
+                    // admin AFK is meant to be indefinite, not just exempt
+                    // from the min/cooldown abuse limits.
                     if (!player.admin) {
                         AFKMinSet.add(player.id);
                         AFKCooldownSet.add(player.id);
