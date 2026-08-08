@@ -262,6 +262,25 @@ function handleGuildMemberUpdate(oldMember, newMember, { discordVipRoleId, db, g
     grantVipByAuth(auth, newMember.displayName);
 }
 
+// The gap handleGuildMemberUpdate's own false->true edge can never cover:
+// a player who ALREADY had the VIP role on Discord (a giveaway, a boost,
+// an admin manually granting it — anything) from BEFORE they ever ran
+// !discord in the room. That edge already fired, at a moment
+// db.getAuthByDiscordId returned nothing, and got silently dropped — there
+// was never anything left to retroactively catch it, until now. Triggered
+// once, from commands/player.js's linkDiscordCommand, every time a player
+// links (harmless no-op via grantVipByAuth's own de-dupe if they don't
+// actually have the role, or already have room VIP). Single-guild
+// assumption, same as the rest of this bot — `guild` is passed in rather
+// than looked up here so this stays independently testable without a real
+// discord.js Client.
+async function checkVipRoleOnLink(guild, discordId, auth, targetName, { discordVipRoleId, grantVipByAuth }) {
+    if (!discordVipRoleId || !guild) return;
+    const member = await guild.members.fetch(discordId).catch(() => null);
+    if (!member || !member.roles.cache.has(discordVipRoleId)) return;
+    grantVipByAuth(auth, targetName);
+}
+
 const OWNER_ONLY_REPLY = { content: 'Только владелец может использовать эту команду.', ephemeral: true };
 const OWNER_OR_ADMIN_ONLY_REPLY = { content: 'Только владелец или админ может использовать эту команду.', ephemeral: true };
 
@@ -611,6 +630,14 @@ module.exports = function createDiscordBot({
         }).catch((err) => console.error('Discord sendMentionAlert failed:', err));
     }
 
+    // commands/player.js's linkDiscordCommand, via the discordId/auth/
+    // targetName bridged over IPC (see discordProcess.js's 'checkVipRoleOnLink'
+    // handling) — see checkVipRoleOnLink above for why this exists.
+    function checkVipRoleOnLinkForGuild(discordId, auth, targetName) {
+        checkVipRoleOnLink(client.guilds.cache.first(), discordId, auth, targetName, { discordVipRoleId, grantVipByAuth })
+            .catch((err) => console.error('Discord checkVipRoleOnLink failed:', err));
+    }
+
     return {
         init,
         sendLog,
@@ -622,6 +649,7 @@ module.exports = function createDiscordBot({
         sendAdminCall,
         sendVoteBanNotification,
         sendMentionAlert,
+        checkVipRoleOnLink: checkVipRoleOnLinkForGuild,
     };
 };
 
@@ -631,5 +659,6 @@ module.exports.handleIncomingMessage = handleIncomingMessage;
 module.exports.handleSlashCommand = handleSlashCommand;
 module.exports.handleGuildMemberAdd = handleGuildMemberAdd;
 module.exports.handleGuildMemberUpdate = handleGuildMemberUpdate;
+module.exports.checkVipRoleOnLink = checkVipRoleOnLink;
 module.exports.resolveStatsByName = resolveStatsByName;
 module.exports.listCurrentPlayers = listCurrentPlayers;

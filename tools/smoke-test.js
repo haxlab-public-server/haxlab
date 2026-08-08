@@ -526,7 +526,7 @@ console.log('\n--- db + roomStats.js/player.js: player data actually round-trips
         getCommands: () => ({}),
         formatCoins,
         formatBanRemaining,
-        discordBot: { sendAdminCall: (playerName) => discordBotCalls.push(playerName) },
+        discordBot: { sendAdminCall: (playerName) => discordBotCalls.push(playerName), checkVipRoleOnLink: () => {} },
     });
 
     // topsCommand: dispatch logic only (printRankings/printAllRankings
@@ -803,15 +803,15 @@ console.log('\n--- db + roomStats.js/player.js: player data actually round-trips
     check('getItemLevel now reports level 2', db.getItemLevel('AUTH_NEWBIE', 'bigtest'), 2);
     check('the balance reflects both upgrades', db.getBalance('AUTH_NEWBIE'), 0);
 
-    check('getEquipped starts with all slots empty', db.getEquipped('AUTH_NEWBIE'), { form: null, goalAnimation: null, size: null, trophy: null });
-    db.setEquipped('AUTH_NEWBIE', 'goalAnimation', 'fire');
-    check('setEquipped fills only the targeted slot', db.getEquipped('AUTH_NEWBIE'), { form: null, goalAnimation: 'fire', size: null, trophy: null });
+    check('getEquipped starts with all slots empty', db.getEquipped('AUTH_NEWBIE'), { form: null, goalAnimation: null, avatar: null, size: null, trophy: null });
+    db.setEquipped('AUTH_NEWBIE', 'avatar', 'fire');
+    check('setEquipped fills only the targeted slot', db.getEquipped('AUTH_NEWBIE'), { form: null, goalAnimation: null, avatar: 'fire', size: null, trophy: null });
     db.buyItem('AUTH_NEWBIE', 'Newbie', 'gold', 0);
     db.setEquipped('AUTH_NEWBIE', 'form', 'gold');
-    check('setEquipped on a second slot leaves the first untouched', db.getEquipped('AUTH_NEWBIE'), { form: 'gold', goalAnimation: 'fire', size: null, trophy: null });
+    check('setEquipped on a second slot leaves the first untouched', db.getEquipped('AUTH_NEWBIE'), { form: 'gold', goalAnimation: null, avatar: 'fire', size: null, trophy: null });
     db.buyItem('AUTH_NEWBIE', 'Newbie', 'small', 0);
     db.setEquipped('AUTH_NEWBIE', 'size', 'small');
-    check('setEquipped on the size slot leaves the other two untouched', db.getEquipped('AUTH_NEWBIE'), { form: 'gold', goalAnimation: 'fire', size: 'small', trophy: null });
+    check('setEquipped on the size slot leaves the others untouched', db.getEquipped('AUTH_NEWBIE'), { form: 'gold', goalAnimation: null, avatar: 'fire', size: 'small', trophy: null });
 
     // Daily login bonus streak (see db.claimDailyBonus / economy.js's
     // claimDailyBonus) — day N pays N*coinsPerStreak, capped at maxStreak
@@ -1538,7 +1538,7 @@ console.log('\n--- db/sqlite.js: closeSeason() freezes top-3, resets stats, pres
     }
     db.addCoins('AUTH_1', 'P1', 1234);
     db.buyItem('AUTH_1', 'P1', 'fire', 0);
-    db.setEquipped('AUTH_1', 'goalAnimation', 'fire');
+    db.setEquipped('AUTH_1', 'avatar', 'fire');
 
     const closed = db.closeSeason();
     check('closeSeason(): 5 categories x up to 3 ranks = 15 trophy rows for a full quorum', closed.trophiesSaved, 15);
@@ -1553,7 +1553,7 @@ console.log('\n--- db/sqlite.js: closeSeason() freezes top-3, resets stats, pres
     check('...goals too', db.getPlayerStats('AUTH_1').goals, 0);
     check('balance survives a season close untouched', db.getBalance('AUTH_1'), 1234);
     check('owned shop items survive a season close untouched', db.ownsItem('AUTH_1', 'fire'), true);
-    check('equipped cosmetics survive a season close untouched', db.getEquipped('AUTH_1').goalAnimation, 'fire');
+    check('equipped cosmetics survive a season close untouched', db.getEquipped('AUTH_1').avatar, 'fire');
     check('currentSeason advanced from 0 to 1', db.getCurrentSeason(), 1);
 
     db.close();
@@ -1918,7 +1918,7 @@ console.log('\n--- discord.js: message/interaction-handling logic (no live Disco
 // enough for it to finish before counting pass/fail.
 (async () => {
     const { createSqliteDatabase } = require(path.join(__dirname, '..', 'db', 'sqlite'));
-    const { handleIncomingMessage, handleSlashCommand, handleGuildMemberAdd, handleGuildMemberUpdate, listCurrentPlayers } = require(path.join(CORE, 'discord'));
+    const { handleIncomingMessage, handleSlashCommand, handleGuildMemberAdd, handleGuildMemberUpdate, checkVipRoleOnLink, listCurrentPlayers } = require(path.join(CORE, 'discord'));
     const db = createSqliteDatabase(':memory:');
     db.init();
     db.savePlayerStats('AUTH_X', { playerName: 'Xara', games: 3, wins: 2, goals: 7, assists: 1, ownGoals: 0, CS: 1, playtime: 900 });
@@ -2157,6 +2157,36 @@ console.log('\n--- discord.js: message/interaction-handling logic (no live Disco
     handleGuildMemberUpdate(unlinkedWithout, unlinkedWith, { discordVipRoleId: 'VIP_ROLE_ID', db, grantVipByAuth });
     check('handleGuildMemberUpdate is a no-op for a Discord account with no linked auth', granted, []);
 
+    // checkVipRoleOnLink: the gap handleGuildMemberUpdate's own false->true
+    // edge can never cover — a Discord account that ALREADY had the VIP
+    // role from BEFORE it was ever linked in-game (that edge already fired
+    // and was dropped, with no linked auth to grant to at the time).
+    // Triggered once, from commands/player.js's linkDiscordCommand, every
+    // time a player links.
+    const vipMember = { id: 'DISCORD_PRELINKED_VIP', roles: { cache: new Set(['VIP_ROLE_ID']) } };
+    const nonVipMember = { id: 'DISCORD_PRELINKED_PLAIN', roles: { cache: new Set() } };
+    const guildWith = (member) => ({ members: { fetch: (id) => (id === member.id ? Promise.resolve(member) : Promise.reject(new Error('unknown member'))) } });
+
+    granted.length = 0;
+    await checkVipRoleOnLink(guildWith(vipMember), 'DISCORD_PRELINKED_VIP', 'AUTH_PRELINKED', 'PrelinkedGuy', { discordVipRoleId: 'VIP_ROLE_ID', grantVipByAuth });
+    check('checkVipRoleOnLink grants VIP when the member already has the role', granted, [{ auth: 'AUTH_PRELINKED', targetName: 'PrelinkedGuy' }]);
+
+    granted.length = 0;
+    await checkVipRoleOnLink(guildWith(nonVipMember), 'DISCORD_PRELINKED_PLAIN', 'AUTH_PLAIN', 'PlainGuy', { discordVipRoleId: 'VIP_ROLE_ID', grantVipByAuth });
+    check('checkVipRoleOnLink is a no-op when the member does not have the role', granted, []);
+
+    granted.length = 0;
+    await checkVipRoleOnLink(guildWith(vipMember), 'DISCORD_PRELINKED_VIP', 'AUTH_PRELINKED', 'PrelinkedGuy', { discordVipRoleId: '', grantVipByAuth });
+    check('checkVipRoleOnLink is a no-op when no VIP role is configured', granted, []);
+
+    granted.length = 0;
+    await checkVipRoleOnLink(null, 'DISCORD_PRELINKED_VIP', 'AUTH_PRELINKED', 'PrelinkedGuy', { discordVipRoleId: 'VIP_ROLE_ID', grantVipByAuth });
+    check('checkVipRoleOnLink is a no-op when there is no guild to check', granted, []);
+
+    granted.length = 0;
+    await checkVipRoleOnLink(guildWith(vipMember), 'DISCORD_SOME_OTHER_ID', 'AUTH_PRELINKED', 'PrelinkedGuy', { discordVipRoleId: 'VIP_ROLE_ID', grantVipByAuth });
+    check('checkVipRoleOnLink is a no-op if the member can\'t even be fetched (e.g. left the server)', granted, []);
+
     db.close();
 })();
 
@@ -2382,6 +2412,67 @@ console.log('\n--- events/activity.js: every chat message goes through room.send
     state.topPlayers = {};
     state.equippedTrophies = {};
     state.seasonTrophies = [];
+}
+
+console.log('\n--- events/activity.js: choose-mode picking beats a stale vote for a bare "1"/"2" ---');
+{
+    // Bug (reported live): !voteban runs on its own 60s clock with nothing
+    // tied to match transitions (unlike pauseVote's state, reset on every
+    // game start/stop), so it can still be mid-vote when a match ends and
+    // choose-mode picking begins right after. voteban's eligible-voter pool
+    // is "everyone in the room", so the picking captain is almost always
+    // one of them — their "1"/"2" pick was being silently swallowed as a
+    // stale vote response instead of an actual pick. chooseModeFunction is
+    // now checked FIRST for a bare "1"/"2" — this proves the ordering
+    // itself (both handleVoteMessage/handleVoteBanMessage are simple call
+    // recorders here, not the real vote logic — that's covered separately
+    // by pauseVote.js's and voteBan.js's own tests).
+    const sentLocal = [];
+    const roomLocal = { sendAnnouncement: (msg, id, color, style) => sentLocal.push({ msg, id, style }) };
+    const Team = { RED: 1, BLUE: 2, SPECTATORS: 0 };
+    const HaxNotificationMock = { CHAT: 1, MENTION: 2 };
+    const stateLocal = { chooseMode: true, teamRed: [{ id: 1 }], teamBlue: [{ id: 2 }, { id: 3 }] };
+    const voteCalls = [];
+    const activity = require(path.join(CORE, 'events', 'activity'))({
+        room: roomLocal, state: stateLocal, authArray: [], BallTouch: class {}, HaxNotification: HaxNotificationMock,
+        Role: {}, Situation: {}, State: {}, Team, Trophies: {},
+        adminChatColor: '', masterChatColor: '', vipChatColor: '',
+        commands: {}, discordBot: { sendLog: () => {} }, errorColor: 2,
+        hiddenAdminsSet: new Set(), silencedAuths: new Map(), muteArray: { getByAuth: () => null },
+        checkGoalKickTouch: () => null,
+        // Only red (id 1) is entitled to pick right now (teamRed no longer
+        // than teamBlue), matching choosing.js's own turn condition — this
+        // stand-in mirrors that exact shape rather than the real
+        // chooseModeFunction, so the test is about activity.js's dispatch
+        // order, not choosing.js's own turn logic (covered separately).
+        chooseModeFunction: (player, message) =>
+            player.id === 1 && stateLocal.teamRed.length <= stateLocal.teamBlue.length && (message.trim() === '1' || message.trim() === '2'),
+        formatTrophyLabel: () => '', resolveTrophyRank: () => null,
+        getCommand: () => false, getDate: () => 'DATE', getGoalGame: () => null,
+        getPlayerComp: () => null, getRole: () => 0,
+        // handleVoteMessage always "misses" (false) here so both handlers'
+        // own call order is visible — production falls through pause ->
+        // voteban the same way when a message isn't a pause vote.
+        handleVoteMessage: (player, message) => { voteCalls.push(['pause', player.id, message]); return false; },
+        handleVoteBanMessage: (player, message) => { voteCalls.push(['ban', player.id, message]); return true; },
+        playerChat: () => {}, slowModeFunction: () => false, teamChat: () => {},
+    });
+
+    voteCalls.length = 0;
+    const captainPickResult = activity.onPlayerChat({ id: 1, name: 'RedCap', team: Team.RED, admin: false }, '1');
+    check('the picking captain\'s "1" is consumed by choose-mode, not treated as chat', captainPickResult, false);
+    check('...and never even reaches either vote handler', voteCalls, []);
+
+    voteCalls.length = 0;
+    const otherVoterResult = activity.onPlayerChat({ id: 4, name: 'Randomer', team: Team.SPECTATORS, admin: false }, '1');
+    check('an ordinary player\'s "1" (not the picking captain) still reaches the vote handlers as before', voteCalls, [['pause', 4, '1'], ['ban', 4, '1']]);
+    check('...and is correctly swallowed by whichever vote claims it (voteban mock returns true here)', otherVoterResult, false);
+
+    voteCalls.length = 0;
+    stateLocal.teamRed = [{ id: 1 }, { id: 5 }]; // red now LONGER than blue — it's BLUE's turn, not red's
+    stateLocal.teamBlue = [{ id: 2 }];
+    activity.onPlayerChat({ id: 1, name: 'RedCap', team: Team.RED, admin: false }, '1');
+    check('outside their own turn, the same captain\'s "1" falls through to the vote handlers normally', voteCalls, [['pause', 1, '1'], ['ban', 1, '1']]);
 }
 
 console.log('\n--- events/movement.js: auth-bans block a join regardless of connection, small-font auth broadcast on join/leave ---');
@@ -5158,8 +5249,8 @@ console.log('\n--- core/economy.js: coin awards, playtime ticker, shop/inventory
     const rolesLocal = {};
     const getRole = (player) => rolesLocal[player.id] ?? Role.PLAYER;
     const testItems = [
-        { id: 'fire', type: 'goalAnimation', name: 'Огонь', price: 100, avatar: '🔥' },
-        { id: 'star', type: 'goalAnimation', name: 'Звезда', price: 50, avatar: '⭐' },
+        { id: 'fire', type: 'avatar', name: 'Огонь', price: 100, avatar: '🔥' },
+        { id: 'star', type: 'avatar', name: 'Звезда', price: 50, avatar: '⭐' },
         {
             id: 'gold', type: 'form', name: 'Золотой', price: 200,
             home: { colors: [0xffd700], textColor: 0x1a1a1a, angle: 0 },
@@ -5211,7 +5302,8 @@ console.log('\n--- core/economy.js: coin awards, playtime ticker, shop/inventory
         { id: 'smoke-blue', type: 'goalAnimation', name: 'Дым (синий)', price: 300, smokeColor: 'blue', hidden: true },
         { id: 'smoke-purple', type: 'goalAnimation', name: 'Дым (фиолетовый)', price: 300, smokeColor: 'purple', hidden: true },
         { id: 'smoke-white', type: 'goalAnimation', name: 'Дым (белый)', price: 300, smokeColor: 'white', hidden: true },
-        { id: 'fireworks', type: 'goalAnimation', name: 'Фейерверк', price: 50000, fireworks: true, grantsAccess: true },
+        { id: 'fireworks', type: 'goalAnimation', name: 'Фейерверк', price: 50000, fireworks: true },
+        { id: 'blackhole', type: 'goalAnimation', name: 'Черная дыра', price: 50000, blackhole: true },
     ];
 
     // Minimal in-memory stand-in for the real db, shaped exactly like the
@@ -5256,12 +5348,12 @@ console.log('\n--- core/economy.js: coin awards, playtime ticker, shop/inventory
                 return Promise.resolve(true);
             },
             setEquipped: (auth, slot, itemId) => {
-                const current = equipped.get(auth) ?? { form: null, goalAnimation: null, size: null };
+                const current = equipped.get(auth) ?? { form: null, goalAnimation: null, avatar: null, size: null };
                 current[slot] = itemId;
                 equipped.set(auth, current);
                 return Promise.resolve();
             },
-            getEquipped: (auth) => Promise.resolve(equipped.get(auth) ?? { form: null, goalAnimation: null, size: null }),
+            getEquipped: (auth) => Promise.resolve(equipped.get(auth) ?? { form: null, goalAnimation: null, avatar: null, size: null }),
             _balances: balances,
         };
     }
@@ -5274,6 +5366,11 @@ console.log('\n--- core/economy.js: coin awards, playtime ticker, shop/inventory
         setPlayerAvatar: (id, avatar) => roomCallsLocal.push(`setPlayerAvatar:${id}:${avatar}`),
         setTeamColors: (team, angle, textColor, colors) => roomCallsLocal.push(`setTeamColors:${team}:${JSON.stringify(colors)}`),
         setDiscProperties: (id, props) => roomCallsLocal.push(`setDiscProperties:${id}:${JSON.stringify(props)}`),
+        // classic: DISC_START=9 (ball + 8 stadium discs, see
+        // smokeAnimation.js's DISC_START) — resolveDiscStart only checks
+        // that index 9 itself is radius 0, so that's all this needs to
+        // model correctly.
+        getDiscProperties: (id) => (id === 9 ? { radius: 0 } : { radius: 5 }),
         sendAnnouncement: (msg, id) => sentLocal.push({ msg, id }),
     };
     const authArray = [];
@@ -5293,11 +5390,13 @@ console.log('\n--- core/economy.js: coin awards, playtime ticker, shop/inventory
     const { getRandomInt } = require(path.join(CORE, 'utils'));
     const { playSmokeAnimation } = require(path.join(CORE, 'smokeAnimation'));
     const { playFireworksAnimation } = require(path.join(CORE, 'fireworksAnimation'));
+    const blackholeCalls = [];
+    const playBlackholeAnimation = async (args) => { blackholeCalls.push(args); };
     const economy = require(path.join(CORE, 'economy'))({
         room: roomMock, state, authArray, db, items: testItems,
         Team, State, HaxNotification: HaxNotificationMock,
         announcementColor: 1, errorColor: 2, formatCoins, getRandomInt,
-        playSmokeAnimation, playFireworksAnimation, Role, getRole,
+        playSmokeAnimation, playFireworksAnimation, playBlackholeAnimation, Role, getRole,
     });
 
     sentLocal.length = 0;
@@ -5367,6 +5466,54 @@ console.log('\n--- core/economy.js: coin awards, playtime ticker, shop/inventory
     state.teamBlue = savedTeamBlue;
     state.clubMembers = [];
 
+    // VIP earnings bonus — double, on every payout, for as long as VIP
+    // itself lasts (re-checked live, not cached at any point). Stacks with
+    // the club bonus above rather than replacing it. Its own temporary
+    // roster/auth, same isolation reasoning as the club bonus block above.
+    authArray[9] = ['AUTH_VIP_EARNER'];
+    rolesLocal[9] = Role.VIP;
+    state.teamRed = [{ id: 9, name: 'VipEarner' }];
+    state.teamBlue = [{ id: 6, name: 'Solo' }];
+
+    sentLocal.length = 0;
+    await economy.awardMatchCoins(Team.RED);
+    check('a current VIP earns double on a win (10 -> 20)', await db.getBalance('AUTH_VIP_EARNER'), 20);
+    check('a non-VIP on the same match still earns the plain rate', await db.getBalance('AUTH_SOLO'), 5 + 1 + 5);
+
+    sentLocal.length = 0;
+    economy.tickPlaytime(600);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    check('a current VIP also earns double on a playtime payout (1 -> 2)', await db.getBalance('AUTH_VIP_EARNER'), 20 + 2);
+
+    // A lapsed VIP drops straight back to the plain rate on the very next
+    // payout — no different from any other VIP perk in this file (goal
+    // animations, vipOnly forms): nothing here is cached from when they
+    // still had VIP.
+    rolesLocal[9] = Role.PLAYER;
+    sentLocal.length = 0;
+    await economy.awardMatchCoins(Team.RED);
+    check('a lapsed VIP earns the plain rate on their very next payout', await db.getBalance('AUTH_VIP_EARNER'), 20 + 2 + 10);
+
+    // VIP + a clubmate on the same side: both bonuses apply — club first
+    // (1.25x, rounded), then VIP (2x, rounded again) — not just whichever
+    // is bigger. 10 * 1.25 = 12.5 -> rounds to 13, then 13 * 2 = 26 (each
+    // bonus rounds its own step, same as applyClubBonus/applyVipBonus each
+    // independently do — not one combined 10 * 2.5 = 25 computation).
+    rolesLocal[9] = Role.VIP;
+    state.clubMembers = [
+        { auth: 'AUTH_VIP_EARNER', clubId: 2, playerName: 'VipEarner' },
+        { auth: 'AUTH_CLUBBED_A', clubId: 2, playerName: 'ClubbedA' },
+    ];
+    state.teamRed = [{ id: 9, name: 'VipEarner' }, { id: 4, name: 'ClubbedA' }];
+    sentLocal.length = 0;
+    await economy.awardMatchCoins(Team.RED);
+    check('VIP + clubmate stacks both bonuses (round(10*1.25)=13, round(13*2)=26)', await db.getBalance('AUTH_VIP_EARNER'), 20 + 2 + 10 + 26);
+    rolesLocal[9] = Role.PLAYER;
+    state.clubMembers = [];
+
+    state.teamRed = savedTeamRed;
+    state.teamBlue = savedTeamBlue;
+
     // !balance: a plain, on-demand balance check.
     sentLocal.length = 0;
     await economy.balanceCommand({ id: 1, name: 'Red1' }, '!balance');
@@ -5424,12 +5571,13 @@ console.log('\n--- core/economy.js: coin awards, playtime ticker, shop/inventory
     await economy.shopCommand({ id: 2, name: 'Blue1' }, '!shop gold');
     check('!shop <id> too expensive for the current balance is rejected', /Недостаточно монет/.test(sentLocal[0].msg), true);
 
-    // Avatar flashes (fire/star/skull/crown) are ordinary coin-shop
-    // cosmetics — no VIP or access prerequisite at all, unlike the old
-    // model (see economy.js's isBigGoalAnimation/hasBigAnimationAccess).
+    // Avatar flashes (fire/star/skull/crown, type: 'avatar') are ordinary
+    // coin-shop cosmetics — no VIP or access prerequisite at all, unlike
+    // type: 'goalAnimation' items below (see economy.js's
+    // hasGoalAnimationAccess).
     sentLocal.length = 0;
     await economy.shopCommand({ id: 2, name: 'Blue1' }, '!shop fire');
-    check('a plain non-VIP can buy an avatar-flash goalAnimation item directly', /Куплено: Огонь/.test(sentLocal[0].msg), true);
+    check('a plain non-VIP can buy an avatar item directly', /Куплено: Огонь/.test(sentLocal[0].msg), true);
     check('the price was actually deducted', await db.getBalance('AUTH_BLUE1'), 0);
 
     sentLocal.length = 0;
@@ -5489,20 +5637,23 @@ console.log('\n--- core/economy.js: coin awards, playtime ticker, shop/inventory
     roomCallsLocal.length = 0;
     sentLocal.length = 0;
     await economy.equipCommand({ id: 2, name: 'Blue1' }, '!equip fire');
-    check('!equip <owned goalAnimation> confirms', /Надето: Огонь/.test(sentLocal[0].msg), true);
-    check('equipping a goalAnimation never touches the disc', roomCallsLocal, []);
-    check('equipping a goalAnimation records it in that slot', await db.getEquipped('AUTH_BLUE1'), { form: null, goalAnimation: 'fire', size: null });
+    check('!equip <owned avatar item> confirms', /Надето: Огонь/.test(sentLocal[0].msg), true);
+    check('equipping an avatar item never touches the disc', roomCallsLocal, []);
+    // goalAnimation is still 'smoke-blue' from the earlier equip test above
+    // (line ~5468) — untouched proof that avatar and goalAnimation really
+    // are independent slots now, not that equipping fire cleared it.
+    check('equipping an avatar item records it in its own slot', await db.getEquipped('AUTH_BLUE1'), { form: null, goalAnimation: 'smoke-blue', avatar: 'fire', size: null });
 
-    // A current VIP can !equip a big animation (smoke/fireworks) without
-    // ever having bought it — the free-while-VIP path (see economy.js's
-    // hasBigAnimationAccess), exercised here through the real equipCommand
-    // rather than a direct db.setEquipped like the playGoalAnimation block
-    // further down does.
+    // A current VIP can !equip a goalAnimation item (smoke/fireworks)
+    // without ever having bought it — the free-while-VIP path (see
+    // economy.js's hasGoalAnimationAccess), exercised here through the real
+    // equipCommand rather than a direct db.setEquipped like the
+    // playGoalAnimation block further down does.
     authArray[19] = ['AUTH_VIP_EQUIP_TEST'];
     rolesLocal[19] = Role.VIP;
     sentLocal.length = 0;
     await economy.equipCommand({ id: 19, name: 'VipEquipTest' }, '!equip fireworks');
-    check('a VIP can equip a big animation with no purchase at all', /Надето: Фейерверк/.test(sentLocal[0].msg), true);
+    check('a VIP can equip a goalAnimation item with no purchase at all', /Надето: Фейерверк/.test(sentLocal[0].msg), true);
     check('...and it is NOT recorded as owned in the db (still genuinely free, not a stealth purchase)', await db.ownsItem('AUTH_VIP_EQUIP_TEST', 'fireworks'), false);
 
     sentLocal.length = 0;
@@ -5513,7 +5664,38 @@ console.log('\n--- core/economy.js: coin awards, playtime ticker, shop/inventory
     rolesLocal[19] = Role.PLAYER;
     sentLocal.length = 0;
     await economy.equipCommand({ id: 19, name: 'VipEquipTest' }, '!equip fireworks');
-    check('a lapsed (non-VIP) player without ownership cannot equip a big animation', /еще не купили/.test(sentLocal[0].msg), true);
+    check('a lapsed (non-VIP) player without ownership cannot equip a goalAnimation item', /еще не купили/.test(sentLocal[0].msg), true);
+
+    // !inventory surfaces every goalAnimation item for a CURRENT VIP too —
+    // not just what they actually own — tagged [VIP] instead of [куплено]
+    // so it doesn't read as a real purchase (see economy.js's
+    // inventoryCommand/GOAL_ANIMATION_ITEM_IDS). AUTH_VIP_EQUIP_TEST owns
+    // nothing at all at this point.
+    check('a non-VIP with nothing owned has an empty inventory', await db.getOwnedItemIds('AUTH_VIP_EQUIP_TEST'), []);
+    rolesLocal[19] = Role.VIP;
+    sentLocal.length = 0;
+    await economy.inventoryCommand({ id: 19, name: 'VipEquipTest' }, '!inventory');
+    check('a current VIP sees every goalAnimation item in !inventory despite owning none', /fireworks — Фейерверк/.test(sentLocal[0].msg), true);
+    check('...every smoke color too', /smoke-red — Дым \(красный\)/.test(sentLocal[0].msg), true);
+    check('VIP-granted entries are tagged [VIP], not [куплено]', /fireworks — Фейерверк \(50000 монеток\) \[VIP\]/.test(sentLocal[0].msg), true);
+    check('a VIP\'s !inventory never lists the smoke bundle id itself (never ownable/equippable)', /^smoke —/m.test(sentLocal[0].msg), false);
+    check('avatar items (fire/star/skull/crown) are never VIP-granted — no access tier above plain ownership', /star —/.test(sentLocal[0].msg), false);
+
+    rolesLocal[19] = Role.PLAYER;
+    sentLocal.length = 0;
+    await economy.inventoryCommand({ id: 19, name: 'VipEquipTest' }, '!inventory');
+    check('a lapsed VIP\'s !inventory drops back to actually-owned items only', sentLocal[0].msg, `У вас пока нет купленных аксессуаров. Загляните в "!shop".`);
+
+    // Owning one goalAnimation item outright doesn't affect the VIP-granted
+    // display of the OTHERS — the owned one shows [куплено], the rest still
+    // show [VIP].
+    await db.buyItem('AUTH_VIP_EQUIP_TEST', 'VipEquipTest', 'fireworks', 0);
+    rolesLocal[19] = Role.VIP;
+    sentLocal.length = 0;
+    await economy.inventoryCommand({ id: 19, name: 'VipEquipTest' }, '!inventory');
+    check('an item actually owned by a current VIP is tagged [куплено], not [VIP]', /fireworks — Фейерверк \(50000 монеток\) \[куплено\]/.test(sentLocal[0].msg), true);
+    check('a sibling not actually owned is still tagged [VIP]', /smoke-blue — Дым \(синий\) \(300 монеток\) \[VIP\]/.test(sentLocal[0].msg), true);
+    rolesLocal[19] = Role.PLAYER;
 
     // Equipping a form goes through equipCommand -> applyTeamForms, i.e. one
     // setTeamColors call per side, not a per-player disc update.
@@ -5828,10 +6010,14 @@ console.log('\n--- core/economy.js: coin awards, playtime ticker, shop/inventory
     await economy.equipCommand({ id: 2, name: 'Blue1' }, '!equip fireworks');
     check('fireworks can be equipped like any other goalAnimation item', /Надето: Фейерверк/.test(sentLocal[0].msg), true);
     check('equipping fireworks never touches a disc directly (only playGoalAnimation does, on an actual goal)', roomCallsLocal, []);
-    // Restores the 'fire' equip from the earlier !equip test above — the
-    // later "playGoalAnimation flashes the equipped avatar" check still
-    // relies on that exact state, not this test's own 'fireworks' pick.
-    await db.setEquipped('AUTH_BLUE1', 'goalAnimation', 'fire');
+    // Unequip fireworks from Blue1's own (independent) goalAnimation slot —
+    // 'fire' is still equipped in their SEPARATE avatar slot from the
+    // earlier !equip test and was never touched by any of this, but leaving
+    // fireworks equipped here would make it ALSO fire (a real 25-disc burst)
+    // alongside the avatar flash in the "playGoalAnimation flashes the
+    // equipped avatar" check further down, which means to isolate just the
+    // avatar path.
+    await db.setEquipped('AUTH_BLUE1', 'goalAnimation', null);
 
     // announceTeamForms: match-start-only, credits whoever the form actually
     // came from, and says nothing at all if neither side has a custom form.
@@ -5873,6 +6059,26 @@ console.log('\n--- core/economy.js: coin awards, playtime ticker, shop/inventory
     await economy.playGoalAnimation({ id: 2, name: 'Blue1' });
     check('playGoalAnimation flashes the equipped avatar', roomCallsLocal, ['setPlayerAvatar:2:🔥']);
 
+    // avatar and goalAnimation are independent equip slots (see the
+    // shopItems.js/economy.js file-level comments) — a player with one of
+    // each equipped sees BOTH fire on the same goal, not just whichever one
+    // used to "win" the shared slot under the old model. A dedicated fresh
+    // auth, not Blue1 — isolates this from Blue1's own pending 3-second
+    // avatar-revert timer (from the check just above) and from the
+    // exact-array-equality checks elsewhere in this block that depend on
+    // Blue1/Red1's own roomCallsLocal staying free of extra noise. A
+    // smokeColor item (5 frames x 130ms, fully awaited) rather than
+    // fireworks on purpose — no leftover background timers either way.
+    authArray[20] = ['AUTH_BOTH_SLOTS_TEST'];
+    await db.buyItem('AUTH_BOTH_SLOTS_TEST', 'BothSlots', 'star', 0);
+    await db.buyItem('AUTH_BOTH_SLOTS_TEST', 'BothSlots', 'smoke-red', 0);
+    await economy.equipCommand({ id: 20, name: 'BothSlots' }, '!equip star');
+    await economy.equipCommand({ id: 20, name: 'BothSlots' }, '!equip smoke-red');
+    roomCallsLocal.length = 0;
+    await economy.playGoalAnimation({ id: 20, name: 'BothSlots', team: Team.RED });
+    check('avatar and goalAnimation fire together when both are equipped', roomCallsLocal.some((c) => c === 'setPlayerAvatar:20:⭐'), true);
+    check('...the disc-based one fires too, not just the avatar', roomCallsLocal.some((c) => c.startsWith('setDiscProperties')), true);
+
     roomCallsLocal.length = 0;
     await economy.playGoalAnimation({ id: 1, name: 'Red1' });
     check('playGoalAnimation is a no-op with nothing equipped', roomCallsLocal, []);
@@ -5888,35 +6094,35 @@ console.log('\n--- core/economy.js: coin awards, playtime ticker, shop/inventory
     roomCallsLocal.length = 0;
     await economy.playGoalAnimation({ id: 1, name: 'Red1', team: Team.RED });
     check('a smokeColor item never touches the avatar', roomCallsLocal.some((c) => c.startsWith('setPlayerAvatar')), false);
-    check('it animates classic\'s 7 helper discs (indices 8-14)', [...new Set(roomCallsLocal.map((c) => c.split(':')[1]))].sort(), ['10', '11', '12', '13', '14', '8', '9']);
+    check('it animates classic\'s 7 helper discs (indices 9-15)', [...new Set(roomCallsLocal.map((c) => c.split(':')[1]))].sort(), ['10', '11', '12', '13', '14', '15', '9']);
     check('the burst mirrors positive-x for a RED goal (blue\'s goal mouth)', roomCallsLocal.some((c) => c.includes('"x":381')), true);
     check('every helper disc ends up hidden again (radius 0) once it finishes', roomCallsLocal.slice(-7).every((c) => c.includes('"radius":0')), true);
 
     // Losing VIP mid-session (no re-equip, nothing touched in the db) makes
-    // an equipped BIG animation simply stop firing — it's re-checked live on
-    // every goal, not just at equip time. Avatar flashes (tested above)
-    // have no such gate at all, VIP or not.
+    // an equipped goalAnimation item simply stop firing — it's re-checked
+    // live on every goal, not just at equip time. Avatar flashes (tested
+    // above) have no such gate at all, VIP or not.
     rolesLocal[1] = Role.PLAYER;
     roomCallsLocal.length = 0;
     await economy.playGoalAnimation({ id: 1, name: 'Red1', team: Team.RED });
-    check('a lapsed VIP\'s still-equipped big animation stops firing once they own nothing', roomCallsLocal, []);
+    check('a lapsed VIP\'s still-equipped goalAnimation item stops firing once they own nothing', roomCallsLocal, []);
     check('the db still has it equipped underneath (only the FIRING is gated)', (await db.getEquipped('AUTH_RED1')).goalAnimation, 'smoke-red');
 
-    // Buying a DIFFERENT big animation (fireworks) does NOT retroactively
-    // unlock the one still equipped (smoke-red) — access is strictly
-    // per-item now, unlike the old "own any unlock item, use everything"
-    // model.
+    // Buying a DIFFERENT goalAnimation item (fireworks) does NOT
+    // retroactively unlock the one still equipped (smoke-red) — access is
+    // strictly per-item now, unlike the old "own any unlock item, use
+    // everything" model.
     await db.buyItem('AUTH_RED1', 'Red1', 'fireworks', 0);
     roomCallsLocal.length = 0;
     await economy.playGoalAnimation({ id: 1, name: 'Red1', team: Team.RED });
-    check('owning a DIFFERENT big animation does not unlock this unowned, still-equipped one', roomCallsLocal, []);
+    check('owning a DIFFERENT goalAnimation item does not unlock this unowned, still-equipped one', roomCallsLocal, []);
 
     // Buying the SPECIFIC equipped item outright makes it fire permanently,
     // VIP or not, from then on.
     await db.buyItem('AUTH_RED1', 'Red1', 'smoke-red', 0);
     roomCallsLocal.length = 0;
     await economy.playGoalAnimation({ id: 1, name: 'Red1', team: Team.RED });
-    check('owning the SPECIFIC equipped big animation outright fires it regardless of VIP', roomCallsLocal.length > 0, true);
+    check('owning the SPECIFIC equipped goalAnimation item outright fires it regardless of VIP', roomCallsLocal.length > 0, true);
 
     // playGoalAnimation + a `fireworks` item (shopItems.js) — routes to the
     // real playFireworksAnimation wired in above, same disc-based mechanism
@@ -5944,8 +6150,26 @@ console.log('\n--- core/economy.js: coin awards, playtime ticker, shop/inventory
     // what's under test here (Red1's fireworks item).
     check('a fireworks item never touches Red1\'s own avatar', roomCallsLocal.some((c) => c.startsWith('setPlayerAvatar:1:')), false);
     const discCallsLocal = roomCallsLocal.filter((c) => c.startsWith('setDiscProperties'));
-    check('it animates all 25 of the classic helper discs (indices 8-32)', [...new Set(discCallsLocal.map((c) => Number(c.split(':')[1])))].sort((a, b) => a - b), Array.from({ length: 25 }, (_, i) => 8 + i));
+    check('it animates all 25 of the classic helper discs (indices 9-33)', [...new Set(discCallsLocal.map((c) => Number(c.split(':')[1])))].sort((a, b) => a - b), Array.from({ length: 25 }, (_, i) => 9 + i));
     check('the build-phase circle sits at the goal center, mirrored positive for RED', discCallsLocal.some((c) => c.includes('"x":372')), true);
+
+    // playGoalAnimation + a `blackhole` item (shopItems.js) — routes to
+    // playBlackholeAnimation (mocked here, its own real disc/pull mechanics
+    // are covered directly in core/blackholeAnimation.js's own dedicated
+    // test block) with the live roster (minus nobody yet — scorerId is
+    // Red1's own id) and the scorer excluded via scorerId, not by filtering
+    // the roster passed in.
+    await db.buyItem('AUTH_RED1', 'Red1', 'blackhole', 0);
+    await db.setEquipped('AUTH_RED1', 'goalAnimation', 'blackhole');
+    blackholeCalls.length = 0;
+    state.teamRed = [{ id: 1, name: 'Red1' }];
+    state.teamBlue = [{ id: 2, name: 'Blue1' }];
+    await economy.playGoalAnimation({ id: 1, name: 'Red1', team: Team.RED });
+    check('a blackhole item routes to playBlackholeAnimation exactly once', blackholeCalls.length, 1);
+    check('...with the current stadium', blackholeCalls[0].stadium, state.currentStadium);
+    check('...the live roster (both sides) as the players to consider', blackholeCalls[0].players.map((p) => p.id).sort(), [1, 2]);
+    check('...and the scorer excluded via scorerId, not pre-filtered out of players', blackholeCalls[0].scorerId, 1);
+    check('...the scoring team, for which goal mouth the hole opens at', blackholeCalls[0].team, Team.RED);
 
     // playGoalSizeEffect: Blue1 has 'small' equipped at level 1 (from the
     // !equip test above) — briefly swaps the LEVEL-derived radius in
@@ -6106,13 +6330,23 @@ console.log('\n--- core/smokeAnimation.js: disc-based smoke burst, scaled per st
 // ~650ms real wall time per call below, well inside the file's overall
 // 2800ms tally window since this runs concurrently with everything else.
 (async () => {
-    const { playSmokeAnimation, SMOKE_COLORS, SMOKE_DISC_START_INDEX } = require(path.join(CORE, 'smokeAnimation'));
+    const { playSmokeAnimation, SMOKE_COLORS } = require(path.join(CORE, 'smokeAnimation'));
     const TeamLocal = { RED: 1, BLUE: 2 };
     const calls = [];
-    const roomLocal = { setDiscProperties: (id, props) => calls.push({ id, props }) };
+    // DISC_START is a static per-stadium constant now (see
+    // smokeAnimation.js) — ball (disc 0) + however far into the stadium's
+    // own discs array the helper pool starts: 9 for classic (1 + 8), 5 for
+    // big (1 + 4). classic here: discs 0-8 are "real" (nonzero radius —
+    // the ball plus whatever else precedes the helper pool) then 25 helper
+    // discs (indices 9-33, radius 0) — matches stadiums.js's own
+    // classicMap layout, offset by the ball.
+    const roomLocal = {
+        setDiscProperties: (id, props) => calls.push({ id, props }),
+        getDiscProperties: (id) => (id >= 0 && id < 34 ? { radius: id < 9 ? 5 : 0 } : null),
+    };
 
     await playSmokeAnimation({ room: roomLocal, Team: TeamLocal, stadium: 'classic', team: TeamLocal.RED, colorName: 'red' });
-    check('classic uses its own 7 helper discs (SMOKE_DISC_START_INDEX.classic = 8)', [...new Set(calls.map((c) => c.id))].sort((a, b) => a - b), [8, 9, 10, 11, 12, 13, 14]);
+    check('classic uses DISC_START=9 (ball + 8 stadium discs precede the 25 helpers)', [...new Set(calls.map((c) => c.id))].sort((a, b) => a - b), [9, 10, 11, 12, 13, 14, 15]);
     check('classic needs no rescaling (matches the reference library 1:1)', calls[0].props.x, 381);
     check('RED scoring mirrors x positive (blue\'s goal mouth)', calls.every((c) => c.props.x == null || c.props.x >= 0), true);
     check('the requested color variant\'s ramp is actually used (tier 0)', calls[0].props.color, SMOKE_COLORS.red[0]);
@@ -6122,18 +6356,78 @@ console.log('\n--- core/smokeAnimation.js: disc-based smoke burst, scaled per st
     await playSmokeAnimation({ room: roomLocal, Team: TeamLocal, stadium: 'classic', team: TeamLocal.BLUE, colorName: 'blue' });
     check('BLUE scoring mirrors x negative (red\'s goal mouth)', calls[0].props.x, -381);
 
+    // big: ball + 4 real goalposts (indices 0-4) precede its own 25 helpers
+    // (indices 5-29) — no extra corner discs like classic has.
     calls.length = 0;
+    const bigRoom = {
+        setDiscProperties: (id, props) => calls.push({ id, props }),
+        getDiscProperties: (id) => (id >= 0 && id < 30 ? { radius: id < 5 ? 5 : 0 } : null),
+    };
     const bigScale = 674 / 372;
-    await playSmokeAnimation({ room: roomLocal, Team: TeamLocal, stadium: 'big', team: TeamLocal.RED, colorName: 'white' });
-    check('big uses its own 7 helper discs (SMOKE_DISC_START_INDEX.big = 4)', [...new Set(calls.map((c) => c.id))].sort((a, b) => a - b), [4, 5, 6, 7, 8, 9, 10]);
+    await playSmokeAnimation({ room: bigRoom, Team: TeamLocal, stadium: 'big', team: TeamLocal.RED, colorName: 'white' });
+    check('big uses DISC_START=5 (ball + 4 goalposts precede the 25 helpers)', [...new Set(calls.map((c) => c.id))].sort((a, b) => a - b), [5, 6, 7, 8, 9, 10, 11]);
     check('big scales x by its own goal-x / the reference 372', calls[0].props.x, 381 * bigScale);
     check('big scales radius by the same factor', calls[0].props.radius, 10 * bigScale);
+
+    // Player discs get appended to the END of the array as they join (not
+    // inserted before the stadium's own discs — see smokeAnimation.js's
+    // DISC_START comment for how this was actually confirmed) — however
+    // many player discs exist PAST the helper pool makes no difference to
+    // DISC_START at all, since it's a fixed constant, not derived from the
+    // room's current total disc count. This is the real regression
+    // coverage: an earlier getDiscCount()-based attempt broke exactly this
+    // case live.
+    calls.length = 0;
+    const manyPlayersRoom = {
+        setDiscProperties: (id, props) => calls.push({ id, props }),
+        getDiscProperties: (id) => {
+            if (id < 5) return { radius: 5 }; // ball + big's 4 real goalposts
+            if (id < 30) return { radius: 0 }; // 25 helper discs
+            if (id < 30 + 8) return { radius: 5 }; // 8 player discs appended after
+            return null;
+        },
+    };
+    await playSmokeAnimation({ room: manyPlayersRoom, Team: TeamLocal, stadium: 'big', team: TeamLocal.RED, colorName: 'white' });
+    check('DISC_START is unaffected by however many player discs are appended AFTER the helper pool', [...new Set(calls.map((c) => c.id))].sort((a, b) => a - b), [5, 6, 7, 8, 9, 10, 11]);
 
     calls.length = 0;
     await playSmokeAnimation({ room: roomLocal, Team: TeamLocal, stadium: 'training', team: TeamLocal.RED, colorName: 'red' });
     check('a stadium with no helper discs (training has no goals at all) is silently skipped', calls, []);
 
     check('SMOKE_COLORS has all 4 requested variants', Object.keys(SMOKE_COLORS).sort(), ['blue', 'purple', 'red', 'white']);
+})();
+
+console.log('\n--- core/smokeAnimation.js: discStart resolution refuses to run when the sanity check fails ---');
+(async () => {
+    // Direct coverage of resolveDiscStart itself, independent of
+    // playSmokeAnimation, plus proof that playSmokeAnimation actually
+    // refuses to touch ANY disc (not just skips a bad one) when the check
+    // fails — the whole point is never partially corrupting a real disc,
+    // not degrading gracefully into doing it anyway.
+    const { playSmokeAnimation, resolveDiscStart } = require(path.join(CORE, 'smokeAnimation'));
+    const TeamLocal = { RED: 1, BLUE: 2 };
+
+    check('resolveDiscStart returns the static DISC_START when the sanity check passes', resolveDiscStart({ getDiscProperties: (id) => (id === 9 ? { radius: 0 } : { radius: 5 }) }, 'classic'), 9);
+    check('resolveDiscStart returns null for a stadium with no helper discs at all', resolveDiscStart({ getDiscProperties: () => ({ radius: 5 }) }, 'training'), null);
+    check('resolveDiscStart returns null if DISC_START itself is not actually radius 0', resolveDiscStart({ getDiscProperties: () => ({ radius: 5 }) }, 'classic'), null);
+    check('resolveDiscStart returns null if the index does not even exist', resolveDiscStart({ getDiscProperties: () => null }, 'classic'), null);
+
+    // A room where DISC_START isn't actually radius 0 (as if a future
+    // stadium edit ever moved these discs without updating DISC_START to
+    // match) — playSmokeAnimation must refuse to write anything at all
+    // rather than write onto whatever real disc is actually there.
+    const calls = [];
+    const badRoom = {
+        setDiscProperties: (id, props) => calls.push({ id, props }),
+        getDiscProperties: () => ({ radius: 5 }), // every disc "real" — no helper pool where expected
+    };
+    const originalConsoleError = console.error;
+    let loggedError = false;
+    console.error = () => { loggedError = true; };
+    await playSmokeAnimation({ room: badRoom, Team: TeamLocal, stadium: 'classic', team: TeamLocal.RED, colorName: 'red' });
+    console.error = originalConsoleError;
+    check('DISC_START not checking out makes playSmokeAnimation refuse to touch ANYTHING', calls, []);
+    check('the refusal is logged, not silent', loggedError, true);
 })();
 
 console.log('\n--- core/smokeAnimation.js: clearGoalpost keeps every celebration disc off the real goalpost ---');
@@ -6280,32 +6574,166 @@ console.log('\n--- core/fireworksAnimation.js: playFireworksAnimation — real d
     const TeamLocal = { RED: 1, BLUE: 2 };
 
     const calls = [];
-    const roomLocal = { setDiscProperties: (id, props) => calls.push({ id, props }) };
+    // See smokeAnimation.js's DISC_START — a static per-stadium constant
+    // (ball + however far into the stadium's own discs the helper pool
+    // starts), sanity-checked once via resolveDiscStart rather than
+    // scanned/derived from a live count. classic: DISC_START=9 (ball + 8
+    // stadium discs), then 25 helpers (indices 9-33).
+    const roomLocal = {
+        setDiscProperties: (id, props) => calls.push({ id, props }),
+        getDiscProperties: (id) => (id >= 0 && id < 34 ? { radius: id < 9 ? 5 : 0 } : null),
+    };
     await playFireworksAnimation({ room: roomLocal, Team: TeamLocal, stadium: 'classic', team: TeamLocal.RED });
 
-    check('classic actually uses all 25 of its helper discs (indices 8-32)', [...new Set(calls.map((c) => c.id))].sort((a, b) => a - b), Array.from({ length: 25 }, (_, i) => 8 + i));
+    check('classic actually uses all 25 of its helper discs (indices 9-33)', [...new Set(calls.map((c) => c.id))].sort((a, b) => a - b), Array.from({ length: 25 }, (_, i) => 9 + i));
     check('RED scoring mirrors every visible x positive (blue\'s goal mouth)', calls.every((c) => c.props.x == null || c.props.x >= 0), true);
     check('the whole cascade ends with every disc hidden (radius 0)', calls.slice(-DISCS_NEEDED * 2, -DISCS_NEEDED).every((c) => c.props.radius === 0), true);
     check('...and stays hidden through the explicit trailing cleanup too', calls.slice(-DISCS_NEEDED).every((c) => c.props.radius === 0), true);
 
     // Not awaited — each gets its own fresh calls/room so a still-running
     // background continuation can never contaminate a later check's array.
-    function firstFrame(args) {
+    function firstFrame(args, discStart) {
         const localCalls = [];
-        playFireworksAnimation({ room: { setDiscProperties: (id, props) => localCalls.push({ id, props }) }, Team: TeamLocal, ...args });
+        const room = {
+            setDiscProperties: (id, props) => localCalls.push({ id, props }),
+            getDiscProperties: (id) => (id === discStart ? { radius: 0 } : { radius: 5 }),
+        };
+        playFireworksAnimation({ room, Team: TeamLocal, ...args });
         return localCalls;
     }
 
-    const blueCalls = firstFrame({ stadium: 'classic', team: TeamLocal.BLUE });
+    const blueCalls = firstFrame({ stadium: 'classic', team: TeamLocal.BLUE }, 9);
     check('BLUE scoring mirrors the goal center x negative (red\'s goal mouth)', blueCalls[0].props.x, -ORIGIN.x);
 
     const bigScale = 674 / 372;
-    const bigCalls = firstFrame({ stadium: 'big', team: TeamLocal.RED });
-    check('big uses all 25 of its own helper discs (indices 4-28)', [...new Set(bigCalls.map((c) => c.id))].sort((a, b) => a - b), Array.from({ length: 25 }, (_, i) => 4 + i));
+    const bigCalls = firstFrame({ stadium: 'big', team: TeamLocal.RED }, 5); // big: DISC_START=5 (ball + 4 goalposts)
+    check('big uses all 25 of its own helper discs (indices 5-29)', [...new Set(bigCalls.map((c) => c.id))].sort((a, b) => a - b), Array.from({ length: 25 }, (_, i) => 5 + i));
     check('big scales the goal center x by its own goal-x / the reference 372', bigCalls[0].props.x, ORIGIN.x * bigScale);
 
-    const trainingCalls = firstFrame({ stadium: 'training', team: TeamLocal.RED });
+    const trainingCalls = firstFrame({ stadium: 'training', team: TeamLocal.RED }, 5);
     check('a stadium with no helper discs (training has no goals at all) is silently skipped', trainingCalls, []);
+})();
+
+console.log('\n--- core/blackholeAnimation.js: playBlackholeAnimation — real player pull + disc growth, scorer excluded ---');
+// One full real-timed run is ~2160ms (FRAME_COUNT x FRAME_DELAY_MS) — the
+// only one actually awaited to completion here, same "fits comfortably
+// under the file's own 3600ms tally window" reasoning as
+// fireworksAnimation.js's own ~1800ms block above. Everything else below
+// only needs the FIRST frame's synchronous snapshot.
+(async () => {
+    const { playBlackholeAnimation, goalCenter, FRAME_COUNT, START_RADIUS, END_RADIUS, easeIn } = require(path.join(CORE, 'blackholeAnimation'));
+    const TeamLocal = { RED: 1, BLUE: 2 };
+
+    // classic: DISC_START=9 (ball + 8 stadium discs), same layout as the
+    // smoke/fireworks tests above. Player discs live in a separate map
+    // keyed by id, read/written via get/setPlayerDiscProperties — NOT the
+    // same numeric index space as setDiscProperties.
+    const discCalls = [];
+    const playerPositions = new Map([
+        [1, { x: 100, y: 50 }], // scorer — must never move
+        [2, { x: -200, y: 30 }],
+        [3, { x: 150, y: -80 }],
+    ]);
+    const playerDiscCalls = [];
+    const stateLocal = { playersAll: [{ id: 1 }, { id: 2 }, { id: 3 }] };
+    const roomLocal = {
+        setDiscProperties: (id, props) => discCalls.push({ id, props }),
+        getDiscProperties: (id) => (id >= 0 && id < 34 ? { radius: id < 9 ? 5 : 0 } : null),
+        getPlayerDiscProperties: (id) => playerPositions.get(id) ?? null,
+        setPlayerDiscProperties: (id, props) => {
+            playerDiscCalls.push({ id, props });
+            playerPositions.set(id, { ...playerPositions.get(id), ...props });
+        },
+    };
+    const players = [{ id: 1 }, { id: 2 }, { id: 3 }];
+    const redGoalCenter = goalCenter('classic', TeamLocal.RED, TeamLocal);
+
+    await playBlackholeAnimation({ room: roomLocal, state: stateLocal, Team: TeamLocal, stadium: 'classic', team: TeamLocal.RED, players, scorerId: 1 });
+
+    check('the hole opens at the goal RED just scored into (positive x, blue\'s goal mouth)', redGoalCenter.x > 0, true);
+    check('the scorer (id 1) is never pulled at all', playerDiscCalls.some((c) => c.id === 1), false);
+    check('every non-scorer gets pulled on every frame', playerDiscCalls.filter((c) => c.id === 2).length, FRAME_COUNT);
+    check('a pulled player ends up exactly at the goal mouth by the last frame', playerPositions.get(2), redGoalCenter);
+    check('...the other pulled player too', playerPositions.get(3), redGoalCenter);
+    check('the visual disc uses classic\'s own helper-disc start (9)', new Set(discCalls.map((c) => c.id)), new Set([9]));
+    check('the disc is drawn at the same goal-mouth center the players are pulled toward', discCalls[0].props.x, redGoalCenter.x);
+    check('the disc grows on the way there — the last GROWING frame is near the full end radius', discCalls[discCalls.length - 2].props.radius, START_RADIUS + (END_RADIUS - START_RADIUS) * easeIn(1));
+    check('the disc is hidden again once the show ends (trailing cleanup)', discCalls[discCalls.length - 1].props.radius, 0);
+
+    // BLUE scoring opens the hole at the mirror-image goal (red's own goal
+    // mouth, negative x) — same mirroring rule as smoke/fireworks.
+    const blueGoalCenter = goalCenter('classic', TeamLocal.BLUE, TeamLocal);
+    check('BLUE scoring mirrors the goal mouth to negative x (red\'s own goal)', blueGoalCenter.x, -redGoalCenter.x);
+
+    // First-frame-only checks below — synchronous (an async function runs
+    // up to its first `await` before yielding), no need to wait out a
+    // second full ~2160ms run.
+    function firstFrame(stadium, team, playersArg, scorerId, discStart, positions) {
+        const localDiscCalls = [];
+        const localPlayerCalls = [];
+        const localPositions = new Map(positions);
+        const localRoom = {
+            setDiscProperties: (id, props) => localDiscCalls.push({ id, props }),
+            getDiscProperties: (id) => (id === discStart ? { radius: 0 } : { radius: 5 }),
+            getPlayerDiscProperties: (id) => localPositions.get(id) ?? null,
+            setPlayerDiscProperties: (id, props) => localPlayerCalls.push({ id, props }),
+        };
+        const localState = { playersAll: playersArg };
+        playBlackholeAnimation({ room: localRoom, state: localState, Team: TeamLocal, stadium, team, players: playersArg, scorerId });
+        return { discCalls: localDiscCalls, playerCalls: localPlayerCalls };
+    }
+
+    const bigScale = 674 / 372;
+    const bigGoalCenter = goalCenter('big', TeamLocal.RED, TeamLocal);
+    // Player 6 starts at midfield (0,0), well away from the goal mouth
+    // (positive x) it's about to get pulled toward — starting AT the
+    // target would leave nothing to observe moving on frame 1.
+    const bigFirst = firstFrame('big', TeamLocal.RED, [{ id: 5 }, { id: 6 }], 5, 5, [[5, { x: 0, y: 0 }], [6, { x: 0, y: 0 }]]);
+    check('big uses its own helper-disc start (5)', bigFirst.discCalls[0].id, 5);
+    check('big scales the end radius by its own goal-x / the reference 372 (visible from frame 1\'s partial growth)', bigFirst.discCalls[0].props.radius, START_RADIUS + (END_RADIUS * bigScale - START_RADIUS) * easeIn(1 / FRAME_COUNT));
+    check('frame 1 pulls the non-scorer only slightly toward the goal mouth, not all the way yet', bigFirst.playerCalls[0].props.x > 0 && bigFirst.playerCalls[0].props.x < bigGoalCenter.x, true);
+
+    const trainingFirst = firstFrame('training', TeamLocal.RED, [{ id: 7 }], 99, 5, [[7, { x: 10, y: 10 }]]);
+    check('a stadium with no helper discs (training has no goals at all) is silently skipped', trainingFirst.discCalls, []);
+    check('...nobody gets pulled either', trainingFirst.playerCalls, []);
+
+    // A player who's already gone (not in state.playersAll at all) is
+    // skipped every frame rather than erroring — same tolerance as
+    // smoke/fireworks' own "stadium changed mid-animation" cleanup catch.
+    const goneRoom = {
+        setDiscProperties: () => {},
+        getDiscProperties: (id) => (id === 5 ? { radius: 0 } : { radius: 5 }),
+        getPlayerDiscProperties: (id) => (id === 6 ? { x: 674, y: 0 } : null),
+        setPlayerDiscProperties: () => { throw new Error('should never be called for a player who already left'); },
+    };
+    const goneState = { playersAll: [] }; // nobody currently in the room at all
+    let goneThrew = false;
+    try {
+        await playBlackholeAnimation({ room: goneRoom, state: goneState, Team: TeamLocal, stadium: 'big', team: TeamLocal.RED, players: [{ id: 6 }], scorerId: 99 });
+    } catch {
+        goneThrew = true;
+    }
+    check('a player no longer in state.playersAll is skipped, not erroring the whole animation', goneThrew, false);
+
+    // discStart safety check: same "refuse to touch anything real" guard
+    // as smoke/fireworks — proven directly here since blackhole ALSO moves
+    // real player discs, the highest-stakes case of all of them to get
+    // wrong.
+    const badDiscCalls = [];
+    const badPlayerCalls = [];
+    const badRoom = {
+        setDiscProperties: (id, props) => badDiscCalls.push({ id, props }),
+        getDiscProperties: () => ({ radius: 5 }), // nothing here looks like our own helper disc
+        getPlayerDiscProperties: (id) => ({ x: 100, y: 100 }),
+        setPlayerDiscProperties: (id, props) => badPlayerCalls.push({ id, props }),
+    };
+    const originalConsoleError = console.error;
+    let loggedError = false;
+    console.error = () => { loggedError = true; };
+    await playBlackholeAnimation({ room: badRoom, state: { playersAll: [{ id: 8 }] }, Team: TeamLocal, stadium: 'classic', team: TeamLocal.RED, players: [{ id: 8 }], scorerId: 99 });
+    console.error = originalConsoleError;
+    check('a discStart that does not check out makes playBlackholeAnimation refuse to touch ANYTHING, including players', [...badDiscCalls, ...badPlayerCalls], []);
+    check('the refusal is logged, not silent', loggedError, true);
 })();
 
 console.log('\n--- events/activity.js: onPlayerChat relays "@<MENTION_WATCH_NAME>" mentions to Discord ---');

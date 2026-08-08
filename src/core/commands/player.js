@@ -229,7 +229,7 @@ module.exports = function createPlayerCommands({
             '!vipcolor <hex> — изменить цвет вашего VIP-префикса в чате, или без аргумента чтобы сбросить на стандартный. Пример: !vipcolor ff8800.',
             '!viphelp — эта команда.',
             '',
-            '⭐ Также, пока у вас есть VIP: анимации "Дым" и "Фейерверк" после гола доступны бесплатно — просто наденьте их через "!equip smoke-<цвет>" или "!equip fireworks", без покупки.',
+            '⭐ Также, пока у вас есть VIP: анимации "Дым", "Фейерверк" и "Черная дыра" после гола доступны бесплатно — просто наденьте их через "!equip smoke-<цвет>", "!equip fireworks" или "!equip blackhole", без покупки.',
         ].join('\n');
         room.sendAnnouncement(text, player.id, announcementColor, 'bold', HaxNotification.CHAT);
     }
@@ -255,6 +255,15 @@ module.exports = function createPlayerCommands({
             'bold',
             HaxNotification.CHAT
         );
+        // Catches a VIP role already sitting on this Discord account from
+        // BEFORE it was ever linked (a giveaway, a boost, a manual grant —
+        // whatever) — the live guildMemberUpdate edge that would normally
+        // catch a role grant already fired and was silently dropped at that
+        // point, since there was no linked auth yet to grant it to (see
+        // discord.js's handleGuildMemberUpdate/checkVipRoleOnLink). Safe to
+        // call every link, not just a first-time one — grantVipByAuth is
+        // already a no-op for someone who's not VIP-eligible or already VIP.
+        discordBot.checkVipRoleOnLink(discordId, auth, player.name);
         if (isNewLink) {
             await db.addCoins(auth, player.name, DISCORD_LINK_BONUS_COINS);
             const newBalance = await db.getBalance(auth);

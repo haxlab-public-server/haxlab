@@ -3,16 +3,22 @@
  * (see core/shopItems.js for the catalog) worn via !equip and shown in
  * !inventory.
  *
- * Three independent equip slots — 'form', 'size' and 'goalAnimation' — so
- * owning/wearing one never touches the others. An item's `type` is always
- * the same string as its slot name, so no mapping table is needed between
- * the two.
+ * Four independent equip slots — 'form', 'size', 'avatar' and
+ * 'goalAnimation' — so owning/wearing one never touches the others. An
+ * item's `type` is always the same string as its slot name, so no mapping
+ * table is needed between the two. 'avatar' (fire/star/skull/crown) and
+ * 'goalAnimation' (smoke/fireworks) used to be one slot/type with a runtime
+ * split (isBigGoalAnimation) — split for real once it became clear they're
+ * not the same kind of thing: a player can now have one of each equipped and
+ * have both fire on the same goal (see playGoalAnimation).
  *
- * 'size' and 'goalAnimation' are both personal, per-player, POST-GOAL-ONLY
- * effects — a radius bump and an avatar flash respectively, triggered on the
- * scorer at the moment they score and reverted a few seconds later. Neither
- * is ever applied while a match is actually being played, on purpose: 'size'
- * changes the real physics collision radius, so making it a standing equip
+ * 'size', 'avatar' and 'goalAnimation' are all personal, per-player,
+ * POST-GOAL-ONLY effects — a radius bump, an avatar flash, and a disc burst
+ * respectively, triggered on the scorer at the moment they score and
+ * reverted (or, for goalAnimation, simply finished) a few seconds later.
+ * None of these are ever applied while a match is actually being played, on
+ * purpose: 'size' changes the real physics collision radius, so making it a
+ * standing equip
  * would mean spending coins to change the game's balance. Confined to the
  * celebration window, it never affects ongoing play (see playGoalSizeEffect).
  * 'small'/'big' are further upgradeable — 10 levels each, ±1 radius per
@@ -38,7 +44,7 @@
  * VIP on the same side has one), before the captain's own choice is even
  * considered. Re-checked live on every call, not cached — a VIP form drops
  * out of consideration the instant its wearer's VIP itself lapses, same as
- * the big goalAnimation items' own access check (see hasBigAnimationAccess).
+ * goalAnimation items' own access check (see hasGoalAnimationAccess).
  *
  * Mutable room state is reached through `state`, never captured by value.
  */
@@ -57,6 +63,7 @@ module.exports = function createEconomy({
     getRandomInt,
     playSmokeAnimation,
     playFireworksAnimation,
+    playBlackholeAnimation,
     Role,
     getRole,
 }) {
@@ -74,33 +81,36 @@ module.exports = function createEconomy({
     // Two clubmates (see commands/club.js) on the same side get a coin
     // bonus — applies uniformly to every payout (win, loss, playtime tick).
     const CLUB_TEAMMATE_MULTIPLIER = 1.25;
+    // A current VIP+ earns double on every payout (win, loss, playtime
+    // tick) — see applyVipBonus. Only for as long as VIP itself lasts, not
+    // a permanent unlock.
+    const VIP_EARNINGS_MULTIPLIER = 2;
 
     const itemsById = new Map(items.map((item) => [item.id, item]));
-    // Both a display split (formatCatalogSection below) AND the actual
-    // access-tier boundary (hasBigAnimationAccess) — item.type stays plain
-    // 'goalAnimation' for both subtypes (same equip slot), this is what
-    // actually distinguishes "free coin-shop cosmetic" (avatar flashes)
-    // from "VIP perk, or a 50000-coin buy" (smoke/fireworks).
-    const isBigGoalAnimation = (item) => item.type === 'goalAnimation' && (item.smokeColor || item.smokeFamily || item.fireworks);
     const CATEGORY_LABELS = {
         form: 'Формы',
         size: 'Размер шара после гола',
-        goalAnimation: 'Аватарка после гола',
-        bigGoalAnimation: 'Анимации после гола',
+        avatar: 'Аватарка после гола',
+        goalAnimation: 'Анимации после гола',
     };
 
     const SMOKE_COLOR_ITEM_IDS = items.filter((item) => item.smokeColor).map((item) => item.id);
+    // Every real (ownable/equippable) goalAnimation item — the 4 smoke
+    // colors plus fireworks — EXCLUDING the 'smoke' bundle id itself (never
+    // owned/equipped directly, see shopCommand's smokeFamily branch). This
+    // is the exact set a current VIP gets surfaced in !inventory for free
+    // (see inventoryCommand) and the set hasGoalAnimationAccess checks.
+    const GOAL_ANIMATION_ITEM_IDS = items.filter((item) => item.type === 'goalAnimation' && !item.smokeFamily).map((item) => item.id);
 
-    // The bigger disc-based animations (smoke/fireworks) are the VIP perk:
-    // free for any CURRENT VIP+ with no purchase at all, or usable by
-    // anyone — VIP or not — who's bought that SPECIFIC item outright
-    // (50000 coins, never expires). Re-checked live every time (not cached
-    // at equip time), so a lapsed VIP's still-equipped big animation just
-    // stops firing/equipping the instant their VIP does, no re-equip
-    // needed to restore it once VIP renews either. Plain avatar flashes
-    // (fire/star/skull/crown) never call this at all — ordinary coin-shop
-    // cosmetics, no access tier above plain ownership.
-    async function hasBigAnimationAccess(player, item) {
+    // goalAnimation items (smoke/fireworks) are a VIP perk: any CURRENT
+    // VIP+ can play/equip one without ever owning it, re-checked live every
+    // time (not cached at equip time) — a lapsed VIP's still-equipped
+    // goalAnimation just stops firing the instant their VIP does, no
+    // re-equip needed to restore it once VIP renews either. Buying one
+    // outright (50000 coins) is the only way to keep it after VIP lapses.
+    // 'avatar' items (fire/star/skull/crown) never call this at all —
+    // ordinary coin-shop cosmetics, no access tier above plain ownership.
+    async function hasGoalAnimationAccess(player, item) {
         if (getRole(player) >= Role.VIP) return true;
         return db.ownsItem(getAuth(player), item.id);
     }
@@ -146,6 +156,18 @@ module.exports = function createEconomy({
         return hasClubmateOnSide(player, sidePlayers) ? Math.round(amount * CLUB_TEAMMATE_MULTIPLIER) : amount;
     }
 
+    // A perk of CURRENTLY being VIP+, not something earned once and kept —
+    // re-checked live on every single payout (never cached), same
+    // "re-checked every time" reasoning as hasGoalAnimationAccess/vipOnly
+    // forms: the instant VIP lapses, earnings drop back to normal on the
+    // very next payout, no different from any other VIP perk in this file.
+    // Stacks with the club bonus above (club first, then VIP, both
+    // multiplicative) rather than picking whichever is bigger — a VIP with
+    // a clubmate on their side gets both boosts at once.
+    function applyVipBonus(amount, player) {
+        return getRole(player) >= Role.VIP ? Math.round(amount * VIP_EARNINGS_MULTIPLIER) : amount;
+    }
+
     // Private to the player only (id, not null) — nobody else needs to see
     // every payout scroll past in the room chat. "Баланс: X (+Y монеток)"
     // per the requested format: new total first, the just-earned delta after.
@@ -169,7 +191,7 @@ module.exports = function createEconomy({
     async function awardMatchCoins(winner) {
         async function payAndNotify(player, amount, sidePlayers) {
             const auth = getAuth(player);
-            const boosted = applyClubBonus(amount, player, sidePlayers);
+            const boosted = applyVipBonus(applyClubBonus(amount, player, sidePlayers), player);
             await db.addCoins(auth, player.name, boosted);
             const newBalance = await db.getBalance(auth);
             notifyCoinsEarned(player, boosted, newBalance);
@@ -204,7 +226,7 @@ module.exports = function createEconomy({
                 const auth = getAuth(player);
                 const accumulated = (playtimeSecondsSinceLastPayout.get(auth) ?? 0) + elapsedSeconds;
                 if (accumulated >= PLAYTIME_INTERVAL_SECONDS) {
-                    const amount = applyClubBonus(PLAYTIME_COINS, player, side);
+                    const amount = applyVipBonus(applyClubBonus(PLAYTIME_COINS, player, side), player);
                     db.addCoins(auth, player.name, amount)
                         .then(() => db.getBalance(auth))
                         .then((newBalance) => notifyCoinsEarned(player, amount, newBalance))
@@ -249,7 +271,7 @@ module.exports = function createEconomy({
     // filtered fresh on every call (no caching) specifically so a lapsed VIP
     // grant makes their vipOnly form stop counting immediately, without
     // needing to be re-equipped — same live-recheck reasoning as
-    // hasBigAnimationAccess.
+    // hasGoalAnimationAccess.
     // Returns { item, sourcePlayer } (not just a color) — the caller still
     // needs to decide home/away, and announceTeamForms below needs to credit
     // whoever the form actually came from.
@@ -383,45 +405,59 @@ module.exports = function createEconomy({
         room.sendAnnouncement(`Форма ${parts.join(', ')}`, null, announcementColor, 'bold', HaxNotification.CHAT);
     }
 
-    // Not a persistent look — briefly swaps the scorer's avatar in, then back
-    // out, so it reads as a "goal animation" rather than a permanent skin.
-    // A `smokeColor` item (see shopItems.js) is a different kind of
-    // celebration entirely — a disc-based smoke burst at the goal instead
-    // of an avatar swap (see smokeAnimation.js) — and returns early rather
-    // than falling through to the avatar logic below.
+    // Two independent celebrations, both checked and fired on every goal —
+    // 'avatar' (a brief avatar swap) and 'goalAnimation' (a disc-based burst
+    // at the goal just scored into) are separate equip slots now (see the
+    // file-level comment above), so a player with one of each equipped sees
+    // both at once. player.team is guaranteed to be the scoring side here —
+    // the caller (gameManagement.js's onTeamGoal) only ever invokes
+    // playGoalAnimation for a genuine goal (scorer.team === team), never an
+    // own goal.
     async function playGoalAnimation(player) {
-        const equipped = await db.getEquipped(getAuth(player));
-        if (!equipped.goalAnimation) return;
-        const item = itemsById.get(equipped.goalAnimation);
-        if (!item) return;
-        // Only the bigger animations carry an access check at all — a
-        // plain avatar flash fires unconditionally, ownership (already
-        // required to equip it) is enough. Re-checked live, not just at
-        // buy/equip time: a VIP grant can lapse mid-session (see !setvip)
-        // without the player ever unequipping — their still-equipped
-        // smoke/fireworks simply stops firing the moment VIP (and no
-        // outright purchase) is gone.
-        if (isBigGoalAnimation(item) && !(await hasBigAnimationAccess(player, item))) return;
-        if (item.smokeColor) {
-            // player.team is guaranteed to be the scoring side here — the
-            // caller (gameManagement.js's onTeamGoal) only ever invokes
-            // playGoalAnimation for a genuine goal (scorer.team === team),
-            // never an own goal.
-            await playSmokeAnimation({ room, Team, stadium: state.currentStadium, team: player.team, colorName: item.smokeColor });
-            return;
+        const auth = getAuth(player);
+        const equipped = await db.getEquipped(auth);
+
+        const avatarItem = equipped.avatar && itemsById.get(equipped.avatar);
+        if (avatarItem) {
+            room.setPlayerAvatar(player.id, avatarItem.avatar);
+            setTimeout(() => {
+                // The scorer may have left in the meantime — only revert if
+                // they're still actually in the room.
+                if (state.playersAll.some((p) => p.id === player.id)) {
+                    room.setPlayerAvatar(player.id, null);
+                }
+            }, GOAL_CELEBRATION_DURATION_MS);
         }
-        if (item.fireworks) {
-            await playFireworksAnimation({ room, Team, stadium: state.currentStadium, team: player.team });
-            return;
-        }
-        room.setPlayerAvatar(player.id, item.avatar);
-        setTimeout(() => {
-            // The scorer may have left in the meantime — only revert if
-            // they're still actually in the room.
-            if (state.playersAll.some((p) => p.id === player.id)) {
-                room.setPlayerAvatar(player.id, null);
+
+        const animationItem = equipped.goalAnimation && itemsById.get(equipped.goalAnimation);
+        // Re-checked live, not just at buy/equip time: a VIP grant can
+        // lapse mid-session (see !setvip) without the player ever
+        // unequipping — their still-equipped smoke/fireworks simply stops
+        // firing the moment VIP (and no outright purchase) is gone.
+        if (animationItem && (await hasGoalAnimationAccess(player, animationItem))) {
+            if (animationItem.smokeColor) {
+                await playSmokeAnimation({ room, Team, stadium: state.currentStadium, team: player.team, colorName: animationItem.smokeColor });
+            } else if (animationItem.fireworks) {
+                await playFireworksAnimation({ room, Team, stadium: state.currentStadium, team: player.team });
+            } else if (animationItem.blackhole) {
+                // Snapshotted here, not re-read mid-animation — same "who
+                // was actually on the field the moment the goal was
+                // scored" convention as smoke/fireworks' own `team`
+                // parameter. player.id (the scorer) is excluded inside
+                // playBlackholeAnimation itself, never pulled. Team/team
+                // decide which goal mouth the hole opens at — same
+                // mirroring rule as smoke/fireworks.
+                await playBlackholeAnimation({
+                    room,
+                    state,
+                    Team,
+                    stadium: state.currentStadium,
+                    team: player.team,
+                    players: [...state.teamRed, ...state.teamBlue],
+                    scorerId: player.id,
+                });
             }
-        }, GOAL_CELEBRATION_DURATION_MS);
+        }
     }
 
     // Same idea as playGoalAnimation, but for the scorer's disc radius —
@@ -462,8 +498,11 @@ module.exports = function createEconomy({
     // wrong (see shopCommand's unconditional retired rejection). This only
     // ever actually renders for an existing owner, in !inventory — retired
     // items are excluded from formatCatalogSection's !shop listing entirely.
-    function formatItemLine(item, owned, equippedId, level) {
-        const tag = !owned ? '' : item.id === equippedId ? ' [надето]' : ' [куплено]';
+    // `viaVip` — this item isn't actually owned, it's just surfaced for a
+    // current VIP (see inventoryCommand/GOAL_ANIMATION_ITEM_IDS) — tagged
+    // distinctly so it doesn't read as a real purchase.
+    function formatItemLine(item, owned, equippedId, level, viaVip) {
+        const tag = !owned ? '' : item.id === equippedId ? ' [надето]' : viaVip ? ' [VIP]' : ' [куплено]';
         if (item.retired) {
             return `${item.id} — ${item.name} (снят с продажи)${tag}`;
         }
@@ -493,13 +532,7 @@ module.exports = function createEconomy({
         // items (past seasons' now-unbuyable forms) are the same story —
         // still fully equippable by whoever already owns one, just no
         // longer worth advertising in a list of things you CAN buy.
-        // 'bigGoalAnimation'/'goalAnimation' both draw from the same real
-        // item.type ('goalAnimation') — see isBigGoalAnimation above — so
-        // equipped[i.type] (not equipped[sectionKey]) is the real slot key.
-        const matchesSection = (i) => sectionKey === 'bigGoalAnimation'
-            ? isBigGoalAnimation(i)
-            : i.type === sectionKey && !isBigGoalAnimation(i);
-        const lines = items.filter((i) => matchesSection(i) && !i.hidden && !i.retired).map((i) => formatItemLine(i, isOwned(i, owned), equipped[i.type], levels[i.id]));
+        const lines = items.filter((i) => i.type === sectionKey && !i.hidden && !i.retired).map((i) => formatItemLine(i, isOwned(i, owned), equipped[i.type], levels[i.id]));
         return `${CATEGORY_LABELS[sectionKey]}:\n${lines.join('\n')}`;
     }
 
@@ -518,7 +551,7 @@ module.exports = function createEconomy({
         if (msgArray.length === 0) {
             const [balance, owned, equipped] = await Promise.all([db.getBalance(auth), db.getOwnedItemIds(auth), db.getEquipped(auth)]);
             const levels = await getUpgradeableLevels(auth, items);
-            const sections = ['form', 'size', 'goalAnimation', 'bigGoalAnimation'].map((key) => formatCatalogSection(key, owned, equipped, levels)).join('\n');
+            const sections = ['form', 'size', 'avatar', 'goalAnimation'].map((key) => formatCatalogSection(key, owned, equipped, levels)).join('\n');
             room.sendAnnouncement(
                 `🛒 Магазин (баланс: ${formatCoins(balance)})\n${sections}\nКупить/улучшить: !shop <id>. Надеть: !equip <id>.`,
                 player.id,
@@ -571,12 +604,12 @@ module.exports = function createEconomy({
             return;
         }
 
-        // goalAnimation items (avatar flashes AND smoke/fireworks alike)
-        // have no purchase-time access gate at all — anyone can buy any of
-        // them outright, VIP or not (a VIP buying smoke/fireworks anyway
-        // just means they keep it after their VIP eventually lapses). The
-        // VIP-free path is a separate, parallel way to USE the big ones
-        // without ever owning them — see hasBigAnimationAccess.
+        // avatar and goalAnimation items have no purchase-time access gate
+        // at all — anyone can buy any of them outright, VIP or not (a VIP
+        // buying smoke/fireworks anyway just means they keep it after their
+        // VIP eventually lapses). The VIP-free path is a separate, parallel
+        // way to USE a goalAnimation item without ever owning it — see
+        // hasGoalAnimationAccess.
 
         // vipOnly forms have no coin-bought bypass at all, unlike
         // goalAnimation — this is a hard role check, not an ownsItem escape
@@ -655,14 +688,24 @@ module.exports = function createEconomy({
     async function inventoryCommand(player, message) {
         const auth = getAuth(player);
         const owned = await db.getOwnedItemIds(auth);
-        if (owned.length === 0) {
+        // VIP perk: every goalAnimation item (smoke colors + fireworks)
+        // shows up here for as long as VIP lasts, even though nothing was
+        // actually bought — same effective access hasGoalAnimationAccess
+        // grants at equip/play time, just surfaced here too so !inventory
+        // doesn't lie about what a VIP can currently use (see
+        // GOAL_ANIMATION_ITEM_IDS).
+        const vipGranted = getRole(player) >= Role.VIP
+            ? GOAL_ANIMATION_ITEM_IDS.filter((id) => !owned.includes(id))
+            : [];
+        const allIds = [...owned, ...vipGranted];
+        if (allIds.length === 0) {
             room.sendAnnouncement(`У вас пока нет купленных аксессуаров. Загляните в "!shop".`, player.id, announcementColor, 'bold', HaxNotification.CHAT);
             return;
         }
         const equipped = await db.getEquipped(auth);
-        const ownedItems = owned.map((id) => itemsById.get(id)).filter(Boolean);
-        const levels = await getUpgradeableLevels(auth, ownedItems);
-        const lines = ownedItems.map((item) => formatItemLine(item, true, equipped[item.type], levels[item.id]));
+        const allItems = allIds.map((id) => itemsById.get(id)).filter(Boolean);
+        const levels = await getUpgradeableLevels(auth, allItems);
+        const lines = allItems.map((item) => formatItemLine(item, true, equipped[item.type], levels[item.id], vipGranted.includes(item.id)));
         room.sendAnnouncement(`🎒 Ваши аксессуары:\n${lines.join('\n')}`, player.id, announcementColor, 'bold', HaxNotification.CHAT);
     }
 
@@ -685,11 +728,10 @@ module.exports = function createEconomy({
         }
         const auth = getAuth(player);
         const equipped = await db.getEquipped(auth);
-        // Checked BEFORE the ownership gate below: a VIP's big animation
-        // (smoke/fireworks) can be equipped for free without ever being
-        // recorded as owned in the db (see hasBigAnimationAccess) — the
-        // toggle-off has to work for that case too, not just a normally
-        // bought item.
+        // Checked BEFORE the ownership gate below: a VIP's goalAnimation
+        // item can be equipped for free without ever being recorded as
+        // owned in the db (see hasGoalAnimationAccess) — the toggle-off has
+        // to work for that case too, not just a normally bought item.
         if (equipped[item.type] === item.id) {
             await db.setEquipped(auth, item.type, null);
             // Same reasoning as the equip path below: a form is a whole-side
@@ -700,12 +742,14 @@ module.exports = function createEconomy({
             room.sendAnnouncement(`✔️ Снято: ${item.name} !`, player.id, announcementColor, 'bold', HaxNotification.CHAT);
             return;
         }
-        const owned = await db.ownsItem(auth, item.id);
-        // A big animation is equippable without ownership for a current
-        // VIP (free perk — see hasBigAnimationAccess); everything else
-        // (avatar flashes included) needs a real purchase, no exceptions.
-        const freeAsVip = isBigGoalAnimation(item) && getRole(player) >= Role.VIP;
-        if (!owned && !freeAsVip) {
+        // goalAnimation items are equippable without ownership for a
+        // current VIP (free perk — see hasGoalAnimationAccess); everything
+        // else (avatar flashes included) needs a real purchase, no
+        // exceptions.
+        const owned = item.type === 'goalAnimation'
+            ? await hasGoalAnimationAccess(player, item)
+            : await db.ownsItem(auth, item.id);
+        if (!owned) {
             room.sendAnnouncement(`Вы еще не купили "${item.name}". Загляните в "!shop".`, player.id, errorColor, 'bold', HaxNotification.CHAT);
             return;
         }

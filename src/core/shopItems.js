@@ -7,10 +7,16 @@
  *   type  — 'form' (a whole SIDE's kit, not per-player — see below),
  *           'size' (a brief disc radius bump on the SCORER only, the moment
  *           they score, via room.setPlayerDiscProperties — never a standing
- *           effect, see economy.js's playGoalSizeEffect), or 'goalAnimation'
- *           (a brief avatar flash on scoring a goal, via
- *           room.setPlayerAvatar). Both 'size' and 'goalAnimation' revert a
- *           few seconds later.
+ *           effect, see economy.js's playGoalSizeEffect), 'avatar' (a brief
+ *           avatar flash on scoring a goal, via room.setPlayerAvatar), or
+ *           'goalAnimation' (a disc-based burst at the goal just scored
+ *           into — smoke/fireworks, see below). 'avatar' and 'goalAnimation'
+ *           are independent equip slots — a player can have one of each
+ *           active at once, both firing on the same goal — unlike a plain
+ *           coin-shop cosmetic vs. a VIP-perk-or-paid one, they're just
+ *           different KINDS of celebration, not tiers of the same thing.
+ *           'size', 'avatar' and 'goalAnimation' all revert a few seconds
+ *           later.
  *   name  — shown in !shop/!inventory.
  *   price — in coins.
  *   home/away — required for type: 'form'. Each is a full kit, passed
@@ -64,11 +70,10 @@
  *            window, never during actual play, precisely so this can't
  *            become a paid gameplay advantage — it's fine for these to be
  *            dramatic (small/huge) since it's purely a flex.
- *   avatar — required for type: 'goalAnimation', UNLESS `smokeColor` is set
- *            (see below) — the two are mutually exclusive celebration kinds
- *            within the same 'goalAnimation' slot.
- *   smokeColor — type: 'goalAnimation' only, instead of `avatar`. A "smoke
- *            burst" celebration — 7 helper discs animate a puff of color at
+ *   avatar — required for type: 'avatar' — the emoji flashed onto the
+ *            scorer via room.setPlayerAvatar.
+ *   smokeColor — type: 'goalAnimation' only. A "smoke burst" celebration —
+ *            7 helper discs animate a puff of color at
  *            the goal that was just scored into (see smokeAnimation.js),
  *            rather than a simple avatar swap. Value is one of
  *            smokeAnimation.js's SMOKE_COLORS keys ('blue'/'red'/'purple'/
@@ -84,22 +89,35 @@
  *            "!equip smoke-red". The bundle id itself is never recorded as
  *            owned/equippable; ownership is always checked via any one real
  *            color (see economy.js's ownsSmokeFamily).
- *   fireworks — type: 'goalAnimation' only, instead of `avatar`/`smokeColor`.
- *            A one-shot explosion burst (see fireworksAnimation.js) reusing
+ *   fireworks — type: 'goalAnimation' only, instead of `smokeColor`. A
+ *            one-shot explosion burst (see fireworksAnimation.js) reusing
  *            the exact same 7 helper discs as smokeColor — set to `true`,
  *            single fixed palette, no color variants.
+ *   blackhole — type: 'goalAnimation' only, instead of `smokeColor`/
+ *            `fireworks`. A growing black hole at the field's own center
+ *            that pulls every player except the scorer toward it (see
+ *            blackholeAnimation.js) — set to `true`, only ever needs 1 of
+ *            smokeAnimation.js's own helper discs for its own visual.
+ *            Unlike every other goalAnimation, this one actually moves
+ *            real player positions, not just decorative discs.
  *
- * type: 'goalAnimation' splits into two access tiers (see economy.js's
- * isBigGoalAnimation/hasBigAnimationAccess):
- *   - Plain avatar flashes (`avatar` set — fire/star/skull/crown) are
- *     ordinary coin-shop cosmetics, open to every player — no VIP or
- *     unlock prerequisite at all, same as a 'form'/'size' item.
- *   - The bigger disc-based ones (`smokeColor`/`smokeFamily`/`fireworks`
- *     set) are a VIP perk: free to use for any CURRENT VIP+ without owning
- *     anything, re-checked live every goal (a lapsed VIP simply stops
- *     seeing it fire, no re-equip needed) — or usable by anyone, VIP or
- *     not, who's bought that specific item outright (50000 coins each),
- *     which then never expires.
+ * type: 'avatar' items (fire/star/skull/crown) are ordinary coin-shop
+ * cosmetics, open to every player — no VIP or unlock prerequisite at all,
+ * same as a 'form'/'size' item.
+ *
+ * type: 'goalAnimation' items (smokeColor/smokeFamily/fireworks/blackhole)
+ * are pricier (50000 coins) and doubly a VIP perk (see economy.js's
+ * hasGoalAnimationAccess/GOAL_ANIMATION_ITEM_IDS):
+ *   - Anyone who's bought one outright owns it forever, VIP or not.
+ *   - Any CURRENT VIP+ sees every one of these items listed in their own
+ *     !inventory too, tagged [VIP] instead of [куплено] — equippable and
+ *     playable exactly like an owned one, for as long as their VIP lasts,
+ *     with nothing ever recorded as bought. The moment VIP lapses, it drops
+ *     back out of !inventory and (re-checked live, not just at equip time)
+ *     simply stops firing if still equipped — no re-equip needed either way
+ *     if VIP renews. Buying one outright is the only way to keep it after
+ *     VIP eventually lapses (see the shopItems.js top-level comment's own
+ *     framing: "for a permanent basis, buy it in !shop").
  *
  *   smokeFamily — type: 'goalAnimation' only, on the single 'smoke' catalog
  *            entry. Marks it as a bundle purchase: buying it charges once
@@ -214,16 +232,15 @@ module.exports = [
         basePrice: 1000, priceStep: 1000,
     },
 
-    { id: 'fire', type: 'goalAnimation', name: 'Огонь', price: 150, avatar: '🔥' },
-    { id: 'star', type: 'goalAnimation', name: 'Звезда', price: 150, avatar: '⭐' },
-    { id: 'skull', type: 'goalAnimation', name: 'Череп', price: 250, avatar: '💀' },
-    { id: 'crown', type: 'goalAnimation', name: 'Корона', price: 400, avatar: '👑' },
+    { id: 'fire', type: 'avatar', name: 'Огонь', price: 150, avatar: '🔥' },
+    { id: 'star', type: 'avatar', name: 'Звезда', price: 150, avatar: '⭐' },
+    { id: 'skull', type: 'avatar', name: 'Череп', price: 250, avatar: '💀' },
+    { id: 'crown', type: 'avatar', name: 'Корона', price: 400, avatar: '👑' },
 
     // 'smoke' is the single catalog entry (!shop smoke) — buying it grants
-    // all 4 real colors below at once (see economy.js's shopCommand) and
-    // also unlocks goalAnimation access for a non-VIP. The colors themselves
-    // are `hidden` (not shown in !shop), picked between via !equip once
-    // owned — e.g. "!equip smoke-red".
+    // all 4 real colors below at once (see economy.js's shopCommand). The
+    // colors themselves are `hidden` (not shown in !shop), picked between
+    // via !equip once owned — e.g. "!equip smoke-red".
     { id: 'smoke', type: 'goalAnimation', name: 'Дым', price: 50000, smokeFamily: true },
     { id: 'smoke-blue', type: 'goalAnimation', name: 'Дым (синий)', price: 50000, smokeColor: 'blue', hidden: true },
     { id: 'smoke-red', type: 'goalAnimation', name: 'Дым (красный)', price: 50000, smokeColor: 'red', hidden: true },
@@ -231,4 +248,5 @@ module.exports = [
     { id: 'smoke-white', type: 'goalAnimation', name: 'Дым (белый)', price: 50000, smokeColor: 'white', hidden: true },
 
     { id: 'fireworks', type: 'goalAnimation', name: 'Фейерверк', price: 50000, fireworks: true },
+    { id: 'blackhole', type: 'goalAnimation', name: 'Черная дыра', price: 50000, blackhole: true },
 ];

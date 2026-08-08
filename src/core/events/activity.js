@@ -72,6 +72,26 @@ module.exports = function createActivityEvents({
                 );
             return false;
         }
+        // Checked BEFORE either vote system, specifically for a bare "1"/"2":
+        // a !voteban session runs on its own 60s clock with nothing tied to
+        // match transitions (unlike pauseVote's own state, reset on every
+        // game start/stop — see gameManagement.js's resetPauseVotes calls),
+        // so it can still be mid-vote when a match ends and choose-mode
+        // picking begins right after. Since a voteban's eligible-voter pool
+        // is "everyone currently in the room", the picking captain is
+        // almost always one of them — their "1"/"2" pick was being silently
+        // swallowed as a stale vote response instead of a pick (reported
+        // live: "после голосования, кэп не может пикать цифрами 1 и 2").
+        // chooseModeFunction only ever reacts to the CURRENT captain's own
+        // message on their OWN turn (falsy for anyone/anything else — see
+        // its own fallthrough), so checking it first here can only ever
+        // steal a "1"/"2" from the one player it's actually meant for, at
+        // the exact moment it's their turn to pick — never from an
+        // ordinary voter, and never outside that captain's own turn.
+        if (state.chooseMode && state.teamRed.length * state.teamBlue.length != 0) {
+            const choosingMessageCheck = chooseModeFunction(player, message);
+            if (choosingMessageCheck) return false;
+        }
         if (handleVoteMessage(player, message)) {
             return false;
         }
@@ -89,10 +109,6 @@ module.exports = function createActivityEvents({
         if (msgArray[0].substring(0, 2) === '@@') {
             playerChat(player, message);
             return false;
-        }
-        if (state.chooseMode && state.teamRed.length * state.teamBlue.length != 0) {
-            const choosingMessageCheck = chooseModeFunction(player, message);
-            if (choosingMessageCheck) return false;
         }
         if (state.swapMode) {
             const swapMessageCheck = swapModeFunction(player, message);

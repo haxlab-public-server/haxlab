@@ -241,6 +241,7 @@ const { checkOverflowPassword } = createOverflowPassword({
 const shopItems = require('../core/shopItems');
 const { playSmokeAnimation } = require('../core/smokeAnimation');
 const { playFireworksAnimation } = require('../core/fireworksAnimation');
+const { playBlackholeAnimation } = require('../core/blackholeAnimation');
 const createEconomy = require('../core/economy');
 const {
     awardMatchCoins,
@@ -270,6 +271,7 @@ const {
     getRandomInt,
     playSmokeAnimation,
     playFireworksAnimation,
+    playBlackholeAnimation,
     Role,
     getRole,
 });

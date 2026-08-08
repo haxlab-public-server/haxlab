@@ -227,6 +227,9 @@ process.on('message', (msg) => {
         case 'mentionAlert':
             discordBot.sendMentionAlert(msg.speakerName, msg.text);
             break;
+        case 'checkVipRoleOnLink':
+            discordBot.checkVipRoleOnLink(msg.discordId, msg.auth, msg.targetName);
+            break;
         case 'roster':
             state.playersAll = msg.players.map((p) => ({ id: p.id, name: p.name }));
             authArray.length = 0;

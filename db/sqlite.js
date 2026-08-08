@@ -248,6 +248,7 @@ function createSqliteDatabase(filePath = path.join(__dirname, 'haxlab.sqlite')) 
         addColumnIfMissing('player_stats', 'balance INTEGER NOT NULL DEFAULT 0');
         addColumnIfMissing('player_stats', 'equipped_form TEXT');
         addColumnIfMissing('player_stats', 'equipped_goal_animation TEXT');
+        addColumnIfMissing('player_stats', 'equipped_avatar TEXT');
         addColumnIfMissing('player_stats', 'equipped_size TEXT');
         addColumnIfMissing('player_stats', 'equipped_trophy TEXT');
         addColumnIfMissing('player_stats', 'hide_custom_colors INTEGER NOT NULL DEFAULT 0');
@@ -728,13 +729,18 @@ function createSqliteDatabase(filePath = path.join(__dirname, 'haxlab.sqlite')) 
         return true;
     }
 
-    // slot is 'form', 'goalAnimation' or 'size' (validated by the caller,
-    // core/economy.js, which is also the only place that knows the shop
-    // catalog and can check ownership before calling this) or 'trophy'
-    // (validated by core/commands/trophies.js the same way).
+    // slot is 'form', 'goalAnimation', 'avatar' or 'size' (validated by the
+    // caller, core/economy.js, which is also the only place that knows the
+    // shop catalog and can check ownership before calling this) or 'trophy'
+    // (validated by core/commands/trophies.js the same way). 'avatar' (the
+    // fire/star/skull/crown flashes) and 'goalAnimation' (smoke/fireworks)
+    // used to share one slot/type — split into their own columns so both can
+    // be equipped and fire at once, since they're not actually the same kind
+    // of thing (see shopItems.js).
     const EQUIPPED_SLOT_COLUMNS = {
         form: 'equipped_form',
         goalAnimation: 'equipped_goal_animation',
+        avatar: 'equipped_avatar',
         size: 'equipped_size',
         trophy: 'equipped_trophy',
     };
@@ -746,9 +752,9 @@ function createSqliteDatabase(filePath = path.join(__dirname, 'haxlab.sqlite')) 
 
     function getEquipped(auth) {
         const row = database
-            .prepare('SELECT equipped_form AS form, equipped_goal_animation AS goalAnimation, equipped_size AS size, equipped_trophy AS trophy FROM player_stats WHERE auth = ?')
+            .prepare('SELECT equipped_form AS form, equipped_goal_animation AS goalAnimation, equipped_avatar AS avatar, equipped_size AS size, equipped_trophy AS trophy FROM player_stats WHERE auth = ?')
             .get(auth);
-        return row ? row : { form: null, goalAnimation: null, size: null, trophy: null };
+        return row ? row : { form: null, goalAnimation: null, avatar: null, size: null, trophy: null };
     }
 
     // Every auth with a trophy currently equipped — loaded once at startup

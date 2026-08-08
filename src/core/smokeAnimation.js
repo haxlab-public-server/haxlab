@@ -11,16 +11,28 @@
  *     cMask/cGroup empty so they never collide with anything, at any point,
  *     visible frames included — the reference library never re-enables
  *     collision on them either) were appended to the END of classicMap's
- *     and bigMap's own `discs` arrays for exactly this purpose. If either
- *     map's discs array is ever restructured, SMOKE_DISC_START_INDEX below
- *     (that array's length at the time these were added) must move with it.
+ *     and bigMap's own `discs` arrays for exactly this purpose.
  *     trainingMap has no goals at all (empty `goals` array — it's a
  *     shooting-practice map, not scored), so it was never given any.
  *     Both maps were later given 18 MORE of the same discs in two rounds
  *     (25 total) for fireworksAnimation.js's own, busier cascade — smoke
- *     itself still only ever touches the first 7 (SMOKE_DISC_START_INDEX
- *     unchanged), it just no longer marks the true end of the helper-disc
- *     pool.
+ *     itself still only ever touches the first 7 of them, it just no
+ *     longer marks the true end of the helper-disc pool (see
+ *     HELPER_DISC_COUNT below).
+ *
+ *     The actual room.setDiscProperties index these land at is NOT simply
+ *     "position within the stadium's own discs array" — disc 0 is always
+ *     the ball (confirmed elsewhere in this codebase — browser/entry.js's
+ *     and stats/global.js's own room.getDiscProperties(0) calls both read
+ *     it), and the stadium's own custom discs start right after it, at
+ *     index 1. A hardcoded per-stadium constant that skipped this +1 (the
+ *     original code here) was the "штанга пропадает" bug: every symptom
+ *     ever reported traces back to exactly this one missing offset — see
+ *     DISC_START below for the full reasoning, including why two earlier
+ *     attempts at finding this dynamically at runtime (via the unverified
+ *     room.getDiscCount(), then a full live disc-array scan) both made
+ *     things WORSE than the original bug rather than better, and were
+ *     abandoned in favor of this single static correction instead.
  *
  *   - Frame coordinates were tuned against the reference library's own
  *     420-wide stadium, whose goal sits at x=~372 — close enough to
@@ -42,8 +54,76 @@ const SMOKE_COLORS = {
 };
 
 const REFERENCE_GOAL_X = 372;
-const SMOKE_DISC_START_INDEX = { classic: 8, big: 4 };
 const STADIUM_GOAL_X = { classic: 372, big: 674 };
+
+// Where our own helper-disc pool starts: 1 (the ball, disc 0) + however far
+// into the stadium's own `discs` array (see stadiums.js) our first helper
+// disc sits — 8 for classic (past its 4 goalposts + 4 corner-line discs),
+// 4 for big (past its 4 goalposts only). Written as `N + 1` rather than the
+// summed value so the ball offset stays visible in the source, not buried
+// in a number.
+//
+// This +1 is the WHOLE fix for "штанга пропадает" — every reported symptom
+// traces back to exactly this one missing offset, no more and no less:
+//   - The original code used the raw stadium-relative position (no +1) AS
+//     the real index. On big, that means it wrote to real index 4, which —
+//     under the correct +1 accounting — is actually stadium-relative
+//     position 3: blue's own y=-80 goalpost (see stadiums.js's bigMap
+//     discs[3]). Always that ONE disc, regardless of team or which goal
+//     the animation rendered at, because this was a pure index bug with
+//     zero dependence on scoring geometry — exactly what was reported
+//     live ("всегда одно и то же место, независимо от того, кто забил").
+//     (On classic the same off-by-one lands on stadium-relative position 7
+//     — a corner decoration, not a goalpost, which is presumably why that
+//     map was never specifically singled out in the reports.)
+//   - Two later attempts at finding this at runtime instead of as a static
+//     constant both made things WORSE, live, rather than better:
+//     room.getDiscCount() (never verified against a real room — nothing
+//     else in this codebase had ever called it) produced a number that
+//     happened to work for smoke's short burst once, by what looks in
+//     hindsight like coincidence (an empty-ish room at that exact test
+//     moment), but was wrong the moment real players were actually
+//     present — HaxBall appears to append player discs to the END of the
+//     whole array as they join, not insert them before the stadium's own
+//     discs, so counting backward from a getDiscCount()-style live total
+//     drifts further wrong the more players are in the room, landing on
+//     player discs instead (confirmed live: players became firework
+//     particles). A follow-up attempt at fully scanning the live disc
+//     array for a run of 25 radius-0 discs made this total, not partial:
+//     with players' discs appended at the end, "the last 25 discs" is
+//     essentially never purely our own pool anymore the moment anyone is
+//     in the room at all, so the animation stopped running altogether
+//     (confirmed live: no animation played on any goal). A plain static
+//     constant, corrected by the one offset that was actually missing,
+//     doesn't have either failure mode — nothing about it depends on how
+//     many players happen to be in the room.
+const DISC_START = { classic: 8 + 1, big: 4 + 1 };
+
+// Total helper discs available from DISC_START onward (see stadiums.js) —
+// smoke only ever touches the first 7 of them, fireworks needs all 25.
+const HELPER_DISC_COUNT = { classic: 25, big: 25 };
+
+// Fast pre-loop check, no room needed — lets both animation functions bail
+// out before ever touching `room` for a stadium that was never given the
+// helper discs this needs (e.g. trainingMap, which has no goals at all).
+function isStadiumSupported(stadium) {
+    return HELPER_DISC_COUNT[stadium] != null;
+}
+
+// Cheap, one-time sanity check — NOT a search, just a confirmation that
+// DISC_START's own static math still points at one of our own placeholder
+// discs (radius 0, per stadiums.js) rather than something real, in case a
+// future stadium edit ever moves these without updating DISC_START to
+// match. Checks only the first disc of the range (not the whole 25) — see
+// the DISC_START comment above for why a full-range version of this
+// specific check was tried and made things worse, not better.
+function resolveDiscStart(room, stadium) {
+    const discStart = DISC_START[stadium];
+    if (discStart == null) return null;
+    const first = room.getDiscProperties(discStart);
+    if (!first || first.radius !== 0) return null;
+    return discStart;
+}
 
 // Real, physical goalpost positions (see stadiums.js's own discs 0-3 —
 // trait: 'goalPost') — duplicated here rather than read live, since these
@@ -163,8 +243,12 @@ function sleep(ms) {
 // RED scoring mirrors every x positive (blue's goal is on the positive
 // side of both these stadiums), BLUE scoring keeps them negative.
 async function playSmokeAnimation({ room, Team, stadium, team, colorName }) {
-    const discStart = SMOKE_DISC_START_INDEX[stadium];
-    if (discStart == null) return;
+    if (!isStadiumSupported(stadium)) return;
+    const discStart = resolveDiscStart(room, stadium);
+    if (discStart == null) {
+        console.error(`[smokeAnimation] disc ${DISC_START[stadium]} for stadium=${stadium} does not look like our own helper disc (radius !== 0) — skipping to avoid corrupting a real disc.`);
+        return;
+    }
     const colors = SMOKE_COLORS[colorName] ?? SMOKE_COLORS.purple;
     const scale = (STADIUM_GOAL_X[stadium] ?? REFERENCE_GOAL_X) / REFERENCE_GOAL_X;
     const mirror = team === Team.RED ? 1 : -1;
@@ -202,8 +286,10 @@ async function playSmokeAnimation({ room, Team, stadium, team, colorName }) {
 
 module.exports = {
     SMOKE_COLORS,
-    SMOKE_DISC_START_INDEX,
     STADIUM_GOAL_X,
+    HELPER_DISC_COUNT,
+    isStadiumSupported,
+    resolveDiscStart,
     clearGoalpost,
     playSmokeAnimation,
 };

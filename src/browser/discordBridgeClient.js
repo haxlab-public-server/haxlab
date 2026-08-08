@@ -53,6 +53,9 @@ function createBridgedDiscordBot({ state, authArray }) {
         sendVoteBanNotification({ targetName, durationMinutes, votesFor, votesAgainst, abstained }) {
             window.__discordSend('voteBanNotification', { targetName, durationMinutes, votesFor, votesAgainst, abstained });
         },
+        checkVipRoleOnLink(discordId, auth, targetName) {
+            window.__discordSend('checkVipRoleOnLink', { discordId, auth, targetName });
+        },
         updateRoomStatus() {
             window.__discordSend('roster', {
                 players: state.playersAll.map((p) => ({ id: p.id, name: p.name, auth: authArray[p.id]?.[0] ?? null })),

@@ -17,14 +17,14 @@
  * than this file's own earlier 16-disc version), so stadiums.js's
  * classicMap/bigMap were each given 9 MORE helper discs on top of the
  * previous expansion (still radius-0/no-collision, same as the rest),
- * bringing the pool reused from smokeAnimation.js's own
- * SMOKE_DISC_START_INDEX up to 25 total.
+ * bringing the pool reused from smokeAnimation.js's own helper-disc range
+ * up to 25 total (see HELPER_DISC_COUNT/resolveDiscStart there).
  *
  * goalAnimation is a single equip slot, so a player only ever has ONE of
  * smoke/fireworks active at a time, meaning the two animations never touch
  * these discs simultaneously and can safely share the same pool.
  *
- * Slot roles (0-24, relative to SMOKE_DISC_START_INDEX):
+ * Slot roles (0-24, relative to resolveDiscStart's own result):
  *   - slots 0-4: the 5 main pieces (slot 0 also plays the build-phase core).
  *   - slots 5-24: 5 groups of 4 sub-sparks, one group per main piece, all
  *     active on the same frames once the sub-burst starts.
@@ -33,7 +33,7 @@
  * established for classic), so the same "no rescaling for classic, scale
  * by stadium-goal-x/372 for big" reasoning applies unchanged here too.
  */
-const { SMOKE_DISC_START_INDEX, STADIUM_GOAL_X, clearGoalpost } = require('./smokeAnimation');
+const { isStadiumSupported, resolveDiscStart, STADIUM_GOAL_X, clearGoalpost } = require('./smokeAnimation');
 
 const REFERENCE_GOAL_X = 372;
 const ORIGIN = { x: REFERENCE_GOAL_X, y: 0 };
@@ -159,19 +159,29 @@ function sleep(ms) {
 // — the scorer's own team, own goals excluded) — the burst appears at the
 // goal that was just scored INTO, same mirroring rule as smokeAnimation.js.
 async function playFireworksAnimation({ room, Team, stadium, team }) {
-    const discStart = SMOKE_DISC_START_INDEX[stadium];
-    if (discStart == null) return;
+    if (!isStadiumSupported(stadium)) return;
+    const discStart = resolveDiscStart(room, stadium);
+    if (discStart == null) {
+        console.error(`[fireworksAnimation] disc for stadium=${stadium} does not look like our own helper disc (radius !== 0) — skipping to avoid corrupting a real disc.`);
+        return;
+    }
     const scale = (STADIUM_GOAL_X[stadium] ?? REFERENCE_GOAL_X) / REFERENCE_GOAL_X;
     const mirror = team === Team.RED ? 1 : -1;
     const framesBySlot = buildFireworksFrames();
 
-    // Bug (reported live: "штанга пропадает после фейерверка" — confirmed
-    // on both stadiums, every play, not just an occasional race):
-    //   1. The randomized burst can fly a disc close enough to visually
-    //      overlap a real goalpost (see smokeAnimation.js's clearGoalpost,
-    //      which this reuses — its own hand-tuned frames had the exact
-    //      same problem, worse even). Clamped below, per frame.
-    //   2. Separately, if the stadium switches (or the room restarts)
+    // Bugs (reported live, both stadiums, every play):
+    //   1. discStart used to be a hardcoded per-stadium constant that
+    //      didn't account for the ball (disc 0, always) sitting before the
+    //      stadium's own custom discs — see DISC_START in smokeAnimation.js
+    //      for the full story, including two dynamic-resolution attempts
+    //      that made this WORSE before landing on the simple +1 fix. This
+    //      was the actual "штанга пропадает" cause, not overlap.
+    //   2. The randomized burst can ALSO fly a disc close enough to
+    //      visually overlap a real goalpost even with a correct discStart
+    //      (see smokeAnimation.js's clearGoalpost, which this reuses).
+    //      Clamped below, per frame, as defense in depth alongside #1's
+    //      fix, not a replacement for it.
+    //   3. Separately, if the stadium switches (or the room restarts)
     //      while this ~1.8s async loop is still mid-flight,
     //      setDiscProperties on a now-stale/out-of-range index throws —
     //      which used to abort the function entirely, skipping the
