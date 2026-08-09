@@ -473,6 +473,16 @@ module.exports = function createDiscordBot({
     let mentionAlertChannel = null;
     let roomLink = null;
 
+    // Bug (reported live): a transient Discord API hiccup (503 Service
+    // Unavailable, a proxy connect timeout — both seen in production) left
+    // the status message showing a DEAD room link — !edit failing just
+    // logged an error and gave up, with nothing to naturally retry it
+    // until the next player join/leave happened to call updateRoomStatus()
+    // again. In a freshly-restarted, still-empty room (nobody around yet
+    // to trigger that), the stale link could sit there indefinitely.
+    // Retried with backoff instead of a single silent failure.
+    const STATUS_UPDATE_RETRY_DELAYS_MS = [3000, 10000, 30000];
+
     // Keeps a single message live in discordStatusChannelId, with a real
     // "Присоединиться" link button — edited in place rather than reposted so
     // it doesn't get buried, and so a bot restart never leaves a stale message
@@ -481,7 +491,7 @@ module.exports = function createDiscordBot({
     // changes. The message ID is persisted (db.setSetting) since `statusMessage`
     // itself is only an in-memory reference — without that, every restart would
     // forget the old message and post a brand new one instead of editing it.
-    function updateRoomStatus() {
+    function updateRoomStatus(attempt = 0) {
         if (!statusChannel || !roomLink) return;
         const playerCount = state.playersAll.length;
         const payload = {
@@ -497,15 +507,21 @@ module.exports = function createDiscordBot({
                 ),
             ],
         };
+        const retry = (err) => {
+            console.error('Discord room status update failed:', err);
+            if (attempt < STATUS_UPDATE_RETRY_DELAYS_MS.length) {
+                setTimeout(() => updateRoomStatus(attempt + 1), STATUS_UPDATE_RETRY_DELAYS_MS[attempt]);
+            }
+        };
         if (statusMessage) {
-            statusMessage.edit(payload).catch((err) => console.error('Discord room status edit failed:', err));
+            statusMessage.edit(payload).catch(retry);
         } else {
             statusChannel.send(payload)
                 .then((msg) => {
                     statusMessage = msg;
                     db.setSetting(STATUS_MESSAGE_SETTING_KEY, msg.id);
                 })
-                .catch((err) => console.error('Discord room status send failed:', err));
+                .catch(retry);
         }
     }
 
