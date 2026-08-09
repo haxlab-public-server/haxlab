@@ -1078,6 +1078,23 @@ function createSqliteDatabase(filePath = path.join(__dirname, 'haxlab.sqlite')) 
         database.prepare('UPDATE clubs SET emoji = ? WHERE id = ?').run(emoji, clubId);
     }
 
+    // Atomic in the same sense as buyClubSlot/unlockClubColor: checks the
+    // owner's balance and deducts it in the same synchronous call that
+    // renames the club, so a retry after a false return can never
+    // double-charge.
+    function renameClub(auth, clubId, name, prefix, cost) {
+        if (getBalance(auth) < cost) return false;
+        database
+            .prepare(
+                `INSERT INTO player_stats (auth, player_name, balance)
+                 VALUES (@auth, '', -@cost)
+                 ON CONFLICT(auth) DO UPDATE SET balance = balance - @cost`
+            )
+            .run({ auth, cost });
+        database.prepare('UPDATE clubs SET name = ?, prefix = ? WHERE id = ?').run(name, prefix, clubId);
+        return true;
+    }
+
     // auth may be null to clear the assistant (e.g. !clubassistent with no
     // argument, or the caller clearing it after the assistant leaves/is
     // kicked — see commands/club.js).
@@ -1222,6 +1239,7 @@ function createSqliteDatabase(filePath = path.join(__dirname, 'haxlab.sqlite')) 
         setClubColor,
         unlockClubColor,
         setClubEmoji,
+        renameClub,
         setClubAssistant,
         buyClubSlot,
         addClubStats,

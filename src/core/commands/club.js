@@ -26,17 +26,18 @@ module.exports = function createClubCommands({
     HaxNotification,
     formatCoins,
 }) {
-    const CLUB_CREATE_COST = 1000;  
+    const CLUB_CREATE_COST = 1000;
     const CLUB_BASE_SLOTS = 5;
     const CLUB_SLOT_BASE_COST = 500;
     const CLUB_SLOT_COST_STEP = 100;
     const CLUB_INVITE_DURATION_SECONDS = 60;
     const CLUB_COLOR_UNLOCK_COST = 10000;
+    const CLUB_RENAME_COST = 100;
 
-    // The displayed prefix is capped at "1 emoji + 4 letters" — the emoji is
-    // set separately (!club emoji), so what !club create takes here is just
-    // the 1-4 letter part, letters only (no digits/symbols/emoji).
-    const CLUB_PREFIX_REGEX = /^[a-zA-Zа-яА-ЯёЁ]{1,4}$/;
+    // The displayed prefix is capped at "1 emoji + 4 letters/digits" — the
+    // emoji is set separately (!club emoji), so what !club create/rename
+    // takes here is just the 1-4 character part (no symbols/emoji).
+    const CLUB_PREFIX_REGEX = /^[a-zA-Z0-9а-яА-ЯёЁ]{1,4}$/;
     // A single pictographic character, optionally followed by a variation
     // selector (U+FE0F) or joined into a ZWJ (U+200D) sequence — covers
     // most real emoji, including multi-codepoint ones like flags/skin
@@ -88,7 +89,7 @@ module.exports = function createClubCommands({
             return;
         }
         if (!CLUB_PREFIX_REGEX.test(prefix)) {
-            announceError(player, `Префикс должен состоять из 1-4 букв (без цифр, символов и эмодзи). Эмодзи можно добавить отдельно командой "!club emoji". Пример: !club create Falcons FLC.`);
+            announceError(player, `Префикс должен состоять из 1-4 букв и/или цифр (без символов и эмодзи). Эмодзи можно добавить отдельно командой "!club emoji". Пример: !club create Falcons FLC.`);
             return;
         }
         const auth = getAuth(player);
@@ -107,6 +108,45 @@ module.exports = function createClubCommands({
         room.sendAnnouncement(
             `🏆 Клуб "${club.name}" ${clubTag(club)} создан ! Приглашайте игроков командой "!club invite".`,
             player.id,
+            announcementColor,
+            'bold',
+            HaxNotification.CHAT
+        );
+    }
+
+    async function clubRenameCommand(player, message) {
+        const msgArray = message.split(/ +/).slice(1);
+        const [name, prefix] = msgArray;
+        if (!name || !prefix) {
+            announceError(player, `Использование: !club rename <название> <префикс> (${formatCoins(CLUB_RENAME_COST)}). Пример: !club rename Falcons FLC2.`);
+            return;
+        }
+        if (!CLUB_PREFIX_REGEX.test(prefix)) {
+            announceError(player, `Префикс должен состоять из 1-4 букв и/или цифр (без символов и эмодзи). Эмодзи можно добавить отдельно командой "!club emoji". Пример: !club rename Falcons FLC2.`);
+            return;
+        }
+        const auth = getAuth(player);
+        const club = findClubByAuth(auth);
+        if (!club) {
+            announceError(player, `Вы не состоите в клубе !`);
+            return;
+        }
+        if (club.ownerAuth !== auth) {
+            announceError(player, `Только владелец клуба может переименовать его !`);
+            return;
+        }
+        const renamed = await db.renameClub(auth, club.id, name, prefix, CLUB_RENAME_COST);
+        if (!renamed) {
+            const balance = await db.getBalance(auth);
+            announceError(player, `Недостаточно монет. Нужно ${formatCoins(CLUB_RENAME_COST)}, у вас ${formatCoins(balance)}.`);
+            return;
+        }
+        const oldName = club.name;
+        club.name = name;
+        club.prefix = prefix;
+        room.sendAnnouncement(
+            `🏆 Клуб "${oldName}" переименован в "${club.name}" ${clubTag(club)} !`,
+            null,
             announcementColor,
             'bold',
             HaxNotification.CHAT
@@ -514,7 +554,8 @@ module.exports = function createClubCommands({
         const text = [
             '🏆 Команды клуба (!club <команда>):',
             `!club show — показать информацию о вашем клубе (по умолчанию — то же самое, что и без аргумента "!club").`,
-            `!club create <название> <префикс> — создать клуб (${formatCoins(CLUB_CREATE_COST)}). Префикс — 1-4 буквы. Пример: !club create Falcons FLC.`,
+            `!club create <название> <префикс> — создать клуб (${formatCoins(CLUB_CREATE_COST)}). Префикс — 1-4 буквы и/или цифры. Пример: !club create Falcons FLC.`,
+            `!club rename <название> <префикс> — переименовать клуб (${formatCoins(CLUB_RENAME_COST)}, только владелец). Пример: !club rename Falcons FLC2.`,
             `!club invite #<id> — пригласить игрока в клуб (владелец и ассистент). У приглашения есть ${CLUB_INVITE_DURATION_SECONDS} секунд на принятие.`,
             '!club join [название] — принять приглашение в клуб.',
             '!club leave — покинуть клуб.',
@@ -546,6 +587,7 @@ module.exports = function createClubCommands({
     const CLUB_SUBCOMMANDS = {
         show: clubInfoCommand,
         create: clubCreateCommand,
+        rename: clubRenameCommand,
         invite: clubInviteCommand,
         join: clubJoinCommand,
         leave: clubLeaveCommand,
@@ -574,6 +616,7 @@ module.exports = function createClubCommands({
         clubCommand,
         clubChatCommand,
         clubCreateCommand,
+        clubRenameCommand,
         clubInviteCommand,
         clubJoinCommand,
         clubLeaveCommand,

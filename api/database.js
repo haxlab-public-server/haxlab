@@ -196,6 +196,9 @@ function createDatabaseApi(options = {}) {
         setClubEmoji(clubId, emoji) {
             return sqlite.setClubEmoji(clubId, emoji);
         },
+        renameClub(auth, clubId, name, prefix, cost) {
+            return sqlite.renameClub(auth, clubId, name, prefix, cost);
+        },
         setClubAssistant(clubId, auth) {
             return sqlite.setClubAssistant(clubId, auth);
         },

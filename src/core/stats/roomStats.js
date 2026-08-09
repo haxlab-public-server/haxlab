@@ -45,7 +45,21 @@ module.exports = function createRoomStats({
     // would risk leaking into some other, unrelated test's randomness
     // mid-await.
     const VIP_LOTTERY_CHANCE = 0.005;
-    const VIP_LOTTERY_DAYS = 7;
+    const VIP_LOTTERY_DAYS = 3;
+
+    // Russian day-count pluralization (день/дня/дней) — was hardcoded
+    // "дней" before, which only ever happened to be correct because 7
+    // (the old VIP_LOTTERY_DAYS) needs "дней" too; 3 needs "дня" instead,
+    // so this stopped being a coincidence-proof shortcut the moment the
+    // duration changed. Same mod10/mod100 shape as utils.js's own
+    // formatCoins pluralization.
+    function pluralizeDays(n) {
+        const mod10 = n % 10;
+        const mod100 = n % 100;
+        if (mod10 === 1 && mod100 !== 11) return 'день';
+        if (mod10 >= 2 && mod10 <= 4 && !(mod100 >= 12 && mod100 <= 14)) return 'дня';
+        return 'дней';
+    }
 
     async function rollVipLottery(player) {
         if (random() >= VIP_LOTTERY_CHANCE) return;
@@ -54,7 +68,7 @@ module.exports = function createRoomStats({
         const expiresAt = new Date(Date.now() + VIP_LOTTERY_DAYS * 24 * 60 * 60000).toISOString();
         await applyVipGrant(auth, player.name, expiresAt);
         room.sendAnnouncement(
-            `🎰 ${player.name} выиграл(а) VIP на ${VIP_LOTTERY_DAYS} дней по счастливому билету за победу в матче 4х4 !`,
+            `🎰 ${player.name} выиграл(а) VIP на ${VIP_LOTTERY_DAYS} ${pluralizeDays(VIP_LOTTERY_DAYS)} по счастливому билету за победу в матче 4х4 !`,
             null,
             announcementColor,
             'bold',

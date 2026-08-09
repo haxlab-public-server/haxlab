@@ -488,7 +488,15 @@ const AFKCooldownSet = new Set();
 // get kicked back".
 const minAFKDuration = 1;
 const maxAFKDuration = 15;
+// A current VIP+ gets a longer max AFK duration before auto-return (see
+// commands/player.js's afkCommand) — re-checked live at the moment they go
+// AFK, same as every other per-action VIP perk in this codebase.
+const maxAFKDurationVip = 25;
 const AFKCooldown = 10;
+// Room-capacity cap, not an abuse timer — too many players sitting AFK at
+// once starves the room of people actually available to play. Applies to
+// everyone, admins included (see afkCommand's own reasoning).
+const maxAFKCount = 4;
 
 // !hide toggle (admins/master only) — suppresses the room admin badge and
 // the chat prefix without touching adminList/masterList, so the underlying
@@ -834,6 +842,12 @@ async function endGame(winner) {
         console.error('[endGame] awardMatchCoins failed:', err);
         discordBot.sendLog(`⚠️ Не удалось начислить монеты: ${err.message}`);
     }
+    try {
+        await resolveBets(winner);
+    } catch (err) {
+        console.error('[endGame] resolveBets failed:', err);
+        discordBot.sendLog(`⚠️ Не удалось рассчитать ставки: ${err.message}`);
+    }
 }
 
 /* CHOOSING FUNCTIONS */
@@ -864,6 +878,29 @@ const {
     getRandomInt,
 });
 
+/* BETTING */
+
+// Spectator betting on match outcome, open only during the pre-match
+// captain-swap window right below — see core/betting.js.
+const createBettingSystem = require('../core/betting');
+const {
+    betCommand,
+    announceOdds,
+    refundBetIfSubbedIn,
+    resolveBets,
+} = createBettingSystem({
+    room,
+    state,
+    authArray,
+    db,
+    Team,
+    announcementColor,
+    errorColor,
+    successColor,
+    HaxNotification,
+    formatCoins,
+});
+
 /* SWAP FUNCTIONS */
 
 const createSwapHelpers = require('../core/team/swap');
@@ -880,6 +917,7 @@ const {
     errorColor,
     infoColor,
     swapTime,
+    announceOdds,
 });
 
 /* PLAYER FUNCTIONS */
@@ -1193,6 +1231,7 @@ const {
     linkDiscordCommand,
     topsCommand,
     afkCommand,
+    jjCommand,
     afkListCommand,
     silenceCommand,
     reportCommand,
@@ -1211,6 +1250,8 @@ const {
     AFKCooldownSet,
     minAFKDuration,
     maxAFKDuration,
+    maxAFKDurationVip,
+    maxAFKCount,
     AFKCooldown,
     silencedAuths,
     announcementColor,
@@ -1304,6 +1345,26 @@ const { trophiesCommand } = createTrophyCommands({
 
 /* MINIGAMES */
 
+const createBlackjackCommands = require('../core/commands/blackjack');
+const {
+    startBlackjackBotGame,
+    runPvpBlackjack,
+    hitCommand,
+    standCommand,
+    splitCommand,
+    forfeitOnLeave: forfeitBlackjackOnLeave,
+} = createBlackjackCommands({
+    room,
+    state,
+    db,
+    announcementColor,
+    errorColor,
+    successColor,
+    HaxNotification,
+    formatCoins,
+    getRandomInt,
+});
+
 const createMinigameCommands = require('../core/commands/minigames');
 const { minigamesCommand, playCommand } = createMinigameCommands({
     room,
@@ -1317,6 +1378,8 @@ const { minigamesCommand, playCommand } = createMinigameCommands({
     HaxNotification,
     formatCoins,
     getRandomInt,
+    startBlackjackBotGame,
+    runPvpBlackjack,
 });
 
 /* COMMANDS */
@@ -1380,6 +1443,10 @@ const commands = createCommands({
     upCommand,
     minigamesCommand,
     playCommand,
+    hitCommand,
+    standCommand,
+    splitCommand,
+    betCommand,
 });
 
 stadiumCommand(emptyPlayer, "!training");
@@ -1428,6 +1495,8 @@ Object.assign(room, wrapEventHandlers(createMovementEvents({
     handlePlayersLeave,
     handlePlayersTeamChange,
     updateTeams,
+    refundBetIfSubbedIn,
+    forfeitBlackjackOnLeave,
 })));
 
 /* PLAYER ACTIVITY */
@@ -1451,6 +1520,7 @@ Object.assign(room, wrapEventHandlers(createActivityEvents({
     hiddenAdminsSet,
     masterChatColor,
     mentionWatchName,
+    MutePlayer,
     muteArray,
     silencedAuths,
     vipChatColor,
@@ -1466,6 +1536,7 @@ Object.assign(room, wrapEventHandlers(createActivityEvents({
     getRole,
     handleVoteMessage,
     handleVoteBanMessage,
+    jjCommand,
     playerChat,
     slowModeFunction,
     teamChat,

@@ -367,12 +367,12 @@ async function handleSlashCommand(interaction, { discordOwnerId, discordAdminRol
             if (!auth) return { content: 'Ваш аккаунт Discord не привязан. Используйте "!discord <ваш ID Discord>" в комнате, или укажите имя игрока.' };
             const stats = db.getPlayerStats(auth);
             if (!stats) return { content: 'Вы еще не играли в квалификационные игры.' };
-            return { content: getPrintPlayerStats()(stats) };
+            return { content: await getPrintPlayerStats()(stats) };
         }
 
         const stats = resolveStatsByName(name, { db, state, getAuthArray });
         if (!stats) return { content: `Статистика для "${name}" не найдена.` };
-        return { content: getPrintPlayerStats()(stats) };
+        return { content: await getPrintPlayerStats()(stats) };
     }
 
     return null;

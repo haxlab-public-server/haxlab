@@ -20,6 +20,7 @@ module.exports = function createSwapHelpers({
     errorColor,
     infoColor,
     swapTime,
+    announceOdds,
 }) {
     let completionCallback = null;
 
@@ -74,6 +75,23 @@ module.exports = function createSwapHelpers({
             advanceTurn(team);
             return;
         }
+        // Room-wide heads-up, separate from the captain's own private
+        // prompt below — everyone else just knows whose turn it is (and
+        // that the captain might not use it at all), not the full
+        // instructions/roster list, which stay private to the captain.
+        room.sendAnnouncement(
+            `🔄 Время капитана ${teamName(team)} сделать замену (или пропустить).`,
+            null,
+            infoColor,
+            'bold',
+            HaxNotification.CHAT
+        );
+        // Fire-and-forget: reflects whatever the roster looks like RIGHT
+        // NOW (including any swap the previous captain's turn just made),
+        // same non-blocking reasoning as economy.js's applyTeamForms calls
+        // elsewhere in this file family. Fires once per captain turn
+        // (blue, then red) — see core/betting.js for the actual odds math.
+        announceOdds().catch((err) => console.error('[betting] announceOdds failed:', err));
         room.sendAnnouncement(
             `🔄 Капитан ${teamName(team)} (${captain.name}), у вас есть ${swapTime}s, чтобы поменять одного игрока своей команды. Если хотите поменять игрока, напишите его номер:`,
             captain.id,

@@ -69,6 +69,7 @@ const BRIDGED_METHODS = [
     'setClubColor',
     'unlockClubColor',
     'setClubEmoji',
+    'renameClub',
     'setClubAssistant',
     'buyClubSlot',
     'addClubStats',

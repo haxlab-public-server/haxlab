@@ -31,6 +31,8 @@ module.exports = function createMinigameCommands({
     HaxNotification,
     formatCoins,
     getRandomInt,
+    startBlackjackBotGame,
+    runPvpBlackjack,
 }) {
     const INVITE_DURATION_MS = 30 * 1000;
     const CHAMBERS = 6;
@@ -101,7 +103,18 @@ module.exports = function createMinigameCommands({
     const GAMES = {
         coinflip: { label: 'Монетка', run: runCoinflip },
         russianroulette: { label: 'Русская рулетка', run: runRussianRoulette },
+        blackjack: { label: 'Блэкджек', run: runPvpBlackjack },
     };
+
+    // Short aliases for the GAMES keys above ("!mg cf"/"!mg rr"/"!mg bj"
+    // instead of the full name) — resolved to the canonical key
+    // immediately, in minigamesCommand, so pendingInvites/playCommand/GAMES
+    // itself only ever see the canonical key and never need to know an
+    // alias was typed at all.
+    const GAME_ALIASES = { cf: 'coinflip', rr: 'russianroulette', bj: 'blackjack' };
+    function resolveGameKey(input) {
+        return GAME_ALIASES[input] ?? input;
+    }
 
     // target player id -> { challengerId, challengerAuth, gameKey, stake, timeoutHandle }
     const pendingInvites = new Map();
@@ -116,10 +129,10 @@ module.exports = function createMinigameCommands({
 
     async function minigamesCommand(player, message) {
         const msgArray = message.split(/ +/).slice(1);
-        const gameKey = (msgArray[0] ?? '').toLowerCase();
+        const gameKey = resolveGameKey((msgArray[0] ?? '').toLowerCase());
         const game = GAMES[gameKey];
         if (!game) {
-            announceError(player, `Использование: !minigames <coinflip|russianroulette> #<id> <ставка>. Доступно только зрителям.`);
+            announceError(player, `Использование: !minigames <coinflip(cf)|russianroulette(rr)|blackjack(bj)> [#<id>] <ставка>. Доступно только зрителям.`);
             return;
         }
         if (player.team !== Team.SPECTATORS) {
@@ -127,8 +140,29 @@ module.exports = function createMinigameCommands({
             return;
         }
         const targetToken = msgArray[1];
+        const targetLooksLikeId = targetToken != null && targetToken[0] === '#';
+
+        // Blackjack alone supports a target-less form — play against the
+        // bot dealer instead of another spectator. Every other game still
+        // requires the usual #<id> challenge.
+        if (gameKey === 'blackjack' && !targetLooksLikeId) {
+            const stake = parseInt(targetToken);
+            if (!Number.isInteger(stake) || stake <= 0) {
+                announceError(player, `Использование: !minigames blackjack <ставка> — игра с ботом. Или !minigames blackjack #<id> <ставка> — игра с игроком. Пример: !minigames blackjack 100.`);
+                return;
+            }
+            const auth = getAuth(player);
+            const balance = await db.getBalance(auth);
+            if (balance < stake) {
+                announceError(player, `Недостаточно монет. У вас ${formatCoins(balance)}, нужно ${formatCoins(stake)}.`);
+                return;
+            }
+            await startBlackjackBotGame(player, auth, stake);
+            return;
+        }
+
         const stake = parseInt(msgArray[2]);
-        if (!targetToken || targetToken[0] !== '#' || !Number.isInteger(stake) || stake <= 0) {
+        if (!targetLooksLikeId || !Number.isInteger(stake) || stake <= 0) {
             announceError(player, `Использование: !minigames ${gameKey} #<id> <ставка>. Пример: !minigames ${gameKey} #3 100.`);
             return;
         }
@@ -222,6 +256,15 @@ module.exports = function createMinigameCommands({
         const game = GAMES[gameKey];
         sendToMatch(challenger, player, `${game.label}: ${challenger.name} vs ${player.name}, банк ${formatCoins(pot)} !`, announcementColor);
         const { winner, winnerAuth } = await game.run(challenger, player, challengerAuth, targetAuth);
+
+        // Only blackjack can ever produce this (both bust, or an equal
+        // total) — coinflip/russianroulette always name a winner.
+        if (winner == null) {
+            await db.addCoins(challengerAuth, challenger.name, stake);
+            await db.addCoins(targetAuth, player.name, stake);
+            sendToMatch(challenger, player, `🤝 Ничья ! Ставки возвращены.`, announcementColor);
+            return;
+        }
 
         await db.addCoins(winnerAuth, winner.name, pot);
         const newBalance = await db.getBalance(winnerAuth);

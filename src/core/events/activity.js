@@ -22,6 +22,7 @@ module.exports = function createActivityEvents({
     hiddenAdminsSet,
     masterChatColor,
     mentionWatchName,
+    MutePlayer,
     muteArray,
     silencedAuths,
     vipChatColor,
@@ -37,11 +38,56 @@ module.exports = function createActivityEvents({
     getRole,
     handleVoteMessage,
     handleVoteBanMessage,
+    jjCommand,
     playerChat,
     slowModeFunction,
     teamChat,
+    // Auto-mute a flooding player once they hit spamMessageThreshold
+    // messages inside any spamWindowMs window. Tracked per auth (not
+    // player id), so reconnecting mid-flood doesn't reset the count, and
+    // counts EVERY message attempt — commands included, not just plain
+    // chat — since either can be used to spam. Exempts admins (same as
+    // muteCommand's own !playerMute.admin check — nothing here should ever
+    // be able to silence room staff) and anyone already muted (nothing
+    // left to escalate). The resulting mute only ever suppresses their
+    // future plain chat, same as any other mute — this doesn't block
+    // commands, matching the existing muteArray check further down in
+    // onPlayerChat. Injected with defaults (not hardcoded module
+    // constants), same tunable-knob pattern as swapTime/chooseTime/
+    // muteDuration elsewhere in this codebase — lets tests that don't care
+    // about flood detection opt out with a permissive threshold instead of
+    // fighting the production default.
+    spamWindowMs = 4000,
+    spamMessageThreshold = 5,
+    spamMuteMinutes = 5,
 }) {
+    const recentMessageTimestamps = new Map(); // auth -> timestamps[]
+
+    function checkSpamFlood(player) {
+        if (player.admin) return;
+        const auth = authArray[player.id][0];
+        if (muteArray.getByAuth(auth) != null) return;
+        const now = Date.now();
+        const timestamps = (recentMessageTimestamps.get(auth) ?? []).filter((t) => now - t < spamWindowMs);
+        timestamps.push(now);
+        if (timestamps.length < spamMessageThreshold) {
+            recentMessageTimestamps.set(auth, timestamps);
+            return;
+        }
+        recentMessageTimestamps.delete(auth);
+        const muteObj = new MutePlayer(player.name, player.id, auth);
+        muteObj.setDuration(spamMuteMinutes);
+        room.sendAnnouncement(
+            `🔇 ${player.name} автоматически замучен(а) на ${spamMuteMinutes} минут за спам в чате.`,
+            null,
+            errorColor,
+            'bold',
+            HaxNotification.CHAT
+        );
+    }
+
     function onPlayerChat(player, message) {
+        checkSpamFlood(player);
         if (state.gameState !== State.STOP && player.team != Team.SPECTATORS) {
             let pComp = getPlayerComp(player);
             if (pComp != null) pComp.inactivityTicks = 0;
@@ -102,12 +148,24 @@ module.exports = function createActivityEvents({
         if (handleVoteBanMessage(player, message)) {
             return false;
         }
-        if (msgArray[0].toLowerCase() == 't') {
+        // 'т'/'ч' — same physical/muscle-memory slip as typing "t" for team
+        // chat with the client's own text input still set to a Cyrillic
+        // layout instead of Latin.
+        if (['t', 'т', 'ч'].includes(msgArray[0].toLowerCase())) {
             teamChat(player, message);
             return false;
         }
         if (msgArray[0].substring(0, 2) === '@@') {
             playerChat(player, message);
+            return false;
+        }
+        // "jj" — no ! prefix, same bare-word shape as "t"/"@@" above. A
+        // one-directional AFK shortcut: only ever EXITS AFK (see
+        // commands/player.js's exitAfk/jjCommand). jjCommand itself decides
+        // whether there was anything to do — a non-AFK player typing "jj"
+        // (a common gaming interjection on its own) falls through to
+        // ordinary chat instead of being silently swallowed.
+        if (msgArray[0].toLowerCase() == 'jj' && jjCommand(player, message)) {
             return false;
         }
         if (state.swapMode) {

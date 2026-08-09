@@ -18,6 +18,8 @@ module.exports = function createPlayerCommands({
     AFKCooldownSet,
     minAFKDuration,
     maxAFKDuration,
+    maxAFKDurationVip,
+    maxAFKCount,
     AFKCooldown,
     silencedAuths,
     announcementColor,
@@ -306,6 +308,50 @@ module.exports = function createPlayerCommands({
         await printRankings(key == 'pt' ? 'playtime' : key, player.id);
     }
 
+    // Shared by afkCommand's own toggle-off branch below and the bare "jj"
+    // chat shortcut (see jjCommand) — the exact same "leave AFK" logic
+    // either way, just reached from two different trigger points. Not
+    // gated behind afkCommand's own team/betweenRandomRounds check —
+    // leaving AFK should never be MORE restricted than entering it already
+    // was, and anyone actually in AFKSet only got there through that gate
+    // in the first place. Returns true if it actually did something (was
+    // AFK, whether they successfully left or are still locked by the
+    // min-duration timer) so jjCommand can tell whether to swallow the
+    // message or let it fall through as ordinary chat.
+    function exitAfk(player) {
+        if (!AFKSet.has(player.id)) return false;
+        if (AFKMinSet.has(player.id)) {
+            room.sendAnnouncement(
+                `Минимальное время AFK: ${minAFKDuration} минут. Не злоупотребляйте командой !`,
+                player.id,
+                errorColor,
+                'bold',
+                HaxNotification.CHAT
+            );
+            return true;
+        }
+        AFKSet.delete(player.id);
+        room.sendAnnouncement(
+            `🌅 ${player.name} больше не AFK !`,
+            null,
+            announcementColor,
+            'bold',
+            null
+        );
+        updateTeams();
+        handlePlayersJoin();
+        return true;
+    }
+
+    // "jj" (no ! prefix, checked in events/activity.js's onPlayerChat same
+    // as "t"/"@@") — a quick, one-directional shortcut: only ever EXITS
+    // AFK, never enters it (see exitAfk above). A player who isn't AFK
+    // typing "jj" — a common gaming interjection on its own — falls
+    // through to ordinary chat instead of being silently eaten.
+    function jjCommand(player, message) {
+        return exitAfk(player);
+    }
+
     function afkCommand(player, message) {
         // Also allowed for a player still nominally on RED/BLUE from the
         // just-finished match during the between-rounds pause (State.STOP)
@@ -317,26 +363,19 @@ module.exports = function createPlayerCommands({
         const betweenRandomRounds = state.gameState == State.STOP && !state.chooseMode;
         if (player.team == Team.SPECTATORS || state.players.length == 1 || betweenRandomRounds) {
             if (AFKSet.has(player.id)) {
-                if (AFKMinSet.has(player.id)) {
-                    room.sendAnnouncement(
-                        `Минимальное время AFK: ${minAFKDuration} минут. Не злоупотребляйте командой !`,
-                        player.id,
-                        errorColor,
-                        'bold',
-                        HaxNotification.CHAT
-                    );
-                } else {
-                    AFKSet.delete(player.id);
-                    room.sendAnnouncement(
-                        `🌅 ${player.name} больше не AFK !`,
-                        null,
-                        announcementColor,
-                        'bold',
-                        null
-                    );
-                    updateTeams();
-                    handlePlayersJoin();
-                }
+                exitAfk(player);
+            } else if (AFKSet.size >= maxAFKCount) {
+                // Room-capacity cap, not an abuse timer — applies uniformly,
+                // admins included, unlike min/max-duration/cooldown below:
+                // too many occupied-but-idle slots is the actual problem
+                // regardless of who's sitting in them.
+                room.sendAnnouncement(
+                    `Одновременно AFK может быть не больше ${maxAFKCount} игроков. Попробуйте позже.`,
+                    player.id,
+                    errorColor,
+                    'bold',
+                    HaxNotification.CHAT
+                );
             } else {
                 if (AFKCooldownSet.has(player.id)) {
                     room.sendAnnouncement(
@@ -362,6 +401,12 @@ module.exports = function createPlayerCommands({
                             minAFKDuration * 60 * 1000,
                             player.id
                         );
+                        // A current VIP+ gets the longer duration — re-read
+                        // live at the moment they go AFK (not re-checked
+                        // when this timer actually fires), same "captured
+                        // at the start, not re-evaluated mid-flight" shape
+                        // as this file's other per-action role checks.
+                        const effectiveMaxAFKDuration = getRole(player) >= Role.VIP ? maxAFKDurationVip : maxAFKDuration;
                         setTimeout(
                             (id) => {
                                 // Guards against double-handling: the player
@@ -391,7 +436,7 @@ module.exports = function createPlayerCommands({
                                 updateTeams();
                                 handlePlayersJoin();
                             },
-                            maxAFKDuration * 60 * 1000,
+                            effectiveMaxAFKDuration * 60 * 1000,
                             player.id
                         );
                         setTimeout(
@@ -648,6 +693,7 @@ module.exports = function createPlayerCommands({
         linkDiscordCommand,
         topsCommand,
         afkCommand,
+        jjCommand,
         afkListCommand,
         silenceCommand,
         reportCommand,

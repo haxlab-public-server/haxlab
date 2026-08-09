@@ -929,8 +929,8 @@ console.log('\n--- stats/roomStats.js: VIP lottery — 0.5% roll per WINNING-tea
     check('a non-VIP winning player wins the lottery when the roll succeeds', grantCalls.some((c) => c.auth === 'AUTH_WINNER1'), true);
     check('an ALREADY-VIP winning player does not win again (no double grant)', grantCalls.some((c) => c.auth === 'AUTH_ALREADY_VIP'), false);
     check('a LOSING-team player is never even rolled for', grantCalls.some((c) => c.auth === 'AUTH_LOSER1'), false);
-    check('the grant lasts 7 days', Math.round((new Date(grantCalls[0].expiresAt).getTime() - Date.now()) / 86400000), 7);
-    check('a room-wide announcement names the winner', sent.some((s) => s.id === null && /Winner1 выиграл\(а\) VIP на 7 дней/.test(s.msg)), true);
+    check('the grant lasts 3 days', Math.round((new Date(grantCalls[0].expiresAt).getTime() - Date.now()) / 86400000), 3);
+    check('a room-wide announcement names the winner, with correct Russian pluralization (3 дня, not 3 дней)', sent.some((s) => s.id === null && /Winner1 выиграл\(а\) VIP на 3 дня /.test(s.msg)), true);
 
     // Reset for the "always loses" pass.
     grantCalls.length = 0;
@@ -989,11 +989,16 @@ console.log('\n--- core/commands/club.js: create/invite/join/kick/leave/disband/
 
     sent.length = 0;
     await club.clubCreateCommand(alice, '!clubcreate Wolves W1F');
-    check('clubcreate rejects a prefix with a digit', /1-4 букв/.test(sent[0].msg), true);
+    check('clubcreate accepts a prefix with a digit', /Использование|1-4 букв/.test(sent[0]?.msg ?? ''), false);
+    check('...but does not actually create the club yet (still broke)', state.clubs.length, 0);
+
+    sent.length = 0;
+    await club.clubCreateCommand(alice, '!clubcreate Wolves W!F');
+    check('clubcreate still rejects a prefix with a symbol', /1-4 букв/.test(sent[0].msg), true);
 
     sent.length = 0;
     await club.clubCreateCommand(alice, '!clubcreate Wolves TOOLONG');
-    check('clubcreate rejects a prefix longer than 4 letters', /1-4 букв/.test(sent[0].msg), true);
+    check('clubcreate rejects a prefix longer than 4 characters', /1-4 букв/.test(sent[0].msg), true);
 
     db.addCoins('AUTH_OWNER', 'Alice', 1000);
     sent.length = 0;
@@ -1183,6 +1188,39 @@ console.log('\n--- core/commands/club.js: create/invite/join/kick/leave/disband/
     await club.clubSlotsCommand(alice, '!clubslots buy');
     check('the second slot costs 100 more than the first (600)', db.getBalance('AUTH_OWNER'), 0);
     check('slots went from 6 to 7', state.clubs[0].slots, 7);
+
+    sent.length = 0;
+    await club.clubRenameCommand(bob, '!clubrename Ravens RVN');
+    check('a non-member cannot rename', /не состоите/.test(sent[0].msg), true);
+
+    sent.length = 0;
+    await club.clubRenameCommand(carol, '!clubrename Ravens RVN');
+    check('a regular member (not the owner) cannot rename', /Только владелец/.test(sent[0].msg), true);
+
+    sent.length = 0;
+    await club.clubRenameCommand(alice, '!clubrename Ravens');
+    check('clubrename without both args shows usage', /Использование/.test(sent[0].msg), true);
+
+    sent.length = 0;
+    await club.clubRenameCommand(alice, '!clubrename Ravens R!N');
+    check('clubrename still rejects a prefix with a symbol', /1-4 букв/.test(sent[0].msg), true);
+
+    sent.length = 0;
+    await club.clubRenameCommand(alice, '!clubrename Ravens RV2');
+    check('clubrename accepts a prefix with a digit', /1-4 букв|Использование/.test(sent[0].msg), false);
+    check('clubrename fails without enough coins (balance is 0 after the slot buys)', /Недостаточно монет/.test(sent[0].msg), true);
+    check('the cost mentioned is 100', /100/.test(sent[0].msg), true);
+    check('an unsuccessful rename does not touch state', { name: state.clubs[0].name, prefix: state.clubs[0].prefix }, { name: 'Falcons', prefix: 'FLC' });
+
+    db.addCoins('AUTH_OWNER', 'Alice', 100);
+    sent.length = 0;
+    await club.clubRenameCommand(alice, '!clubrename Ravens RVN');
+    check('clubrename succeeds once affordable', /переименован/.test(sent[0].msg), true);
+    check('the announcement is broadcast to the whole room, not just the owner', sent[0].id, null);
+    check('the announcement mentions both the old and new name', /"Falcons" переименован в "Ravens"/.test(sent[0].msg), true);
+    check('the name/prefix are updated in state', { name: state.clubs[0].name, prefix: state.clubs[0].prefix }, { name: 'Ravens', prefix: 'RVN' });
+    check('the name/prefix are persisted to the db', { name: db.getClub(clubId).name, prefix: db.getClub(clubId).prefix }, { name: 'Ravens', prefix: 'RVN' });
+    check('the 100 cost was deducted', db.getBalance('AUTH_OWNER'), 0);
 
     sent.length = 0;
     await club.clubDisbandCommand(bob, '!clubdisband');
@@ -1938,7 +1976,14 @@ console.log('\n--- discord.js: message/interaction-handling logic (no live Disco
         db,
         state: discordState,
         getAuthArray: () => discordAuthArray,
-        getPrintPlayerStats: () => (stats) => `${stats.playerName}: ${stats.goals}G`,
+        // async, matching the real stats/print.js's printPlayerStats (it
+        // awaits db.getStatRank internally) — a synchronous mock here would
+        // hide a missing `await` at any call site, since `await` on a plain
+        // value just resolves to it immediately either way. This is exactly
+        // how the real bug (the /stats slash command never awaiting this,
+        // so `content` ended up a Promise instead of a string — Discord
+        // then just shows "приложение не отвечает") went uncaught before.
+        getPrintPlayerStats: () => async (stats) => `${stats.playerName}: ${stats.goals}G`,
         relayToRoom: (username, content) => relayed.push({ username, content }),
         getTimeStats: (s) => `${s}s`,
     };
@@ -2234,11 +2279,21 @@ console.log('\n--- events/activity.js: every chat message goes through room.send
         // exercises silencing itself.
         silencedAuths: new Map(),
         muteArray: { getByAuth: () => null },
+        // This block reuses the same player id (4) across 6+ separate
+        // onPlayerChat calls to walk one player's trophy state over time —
+        // real spam detection has no bearing on what's under test here, so
+        // opt out with an unreachably high threshold rather than letting
+        // checkSpamFlood's own room.sendAnnouncement fire mid-sequence and
+        // shift sent[0] out from under those assertions. MutePlayer still
+        // needs a real constructor even though it should never run.
+        spamMessageThreshold: Infinity,
+        MutePlayer: class { constructor() {} setDuration() {} },
         checkGoalKickTouch: () => null, chooseModeFunction: () => false, formatTrophyLabel, resolveTrophyRank,
         getCommand: () => false, getDate: () => 'DATE', getGoalGame: () => null,
         getPlayerComp: () => null, getRole: (p) => roles[p.id],
         handleVoteMessage: () => false,
         handleVoteBanMessage: () => false,
+        jjCommand: () => false,
         playerChat: () => {}, slowModeFunction: () => false, teamChat: () => {},
     });
 
@@ -2433,12 +2488,20 @@ console.log('\n--- events/activity.js: choose-mode picking beats a stale vote fo
     const HaxNotificationMock = { CHAT: 1, MENTION: 2 };
     const stateLocal = { chooseMode: true, teamRed: [{ id: 1 }], teamBlue: [{ id: 2 }, { id: 3 }] };
     const voteCalls = [];
+    // checkSpamFlood (activity.js) reads authArray[player.id][0] for every
+    // message unconditionally — needs a real entry for every id this test
+    // sends through onPlayerChat (1 and 4), not just the ones vote/pick
+    // logic itself cares about.
+    const authArrayLocal = [];
+    authArrayLocal[1] = ['AUTH_1'];
+    authArrayLocal[4] = ['AUTH_4'];
     const activity = require(path.join(CORE, 'events', 'activity'))({
-        room: roomLocal, state: stateLocal, authArray: [], BallTouch: class {}, HaxNotification: HaxNotificationMock,
+        room: roomLocal, state: stateLocal, authArray: authArrayLocal, BallTouch: class {}, HaxNotification: HaxNotificationMock,
         Role: {}, Situation: {}, State: {}, Team, Trophies: {},
         adminChatColor: '', masterChatColor: '', vipChatColor: '',
         commands: {}, discordBot: { sendLog: () => {} }, errorColor: 2,
         hiddenAdminsSet: new Set(), silencedAuths: new Map(), muteArray: { getByAuth: () => null },
+        MutePlayer: class { constructor() {} setDuration() {} },
         checkGoalKickTouch: () => null,
         // Only red (id 1) is entitled to pick right now (teamRed no longer
         // than teamBlue), matching choosing.js's own turn condition — this
@@ -2455,6 +2518,7 @@ console.log('\n--- events/activity.js: choose-mode picking beats a stale vote fo
         // voteban the same way when a message isn't a pause vote.
         handleVoteMessage: (player, message) => { voteCalls.push(['pause', player.id, message]); return false; },
         handleVoteBanMessage: (player, message) => { voteCalls.push(['ban', player.id, message]); return true; },
+        jjCommand: () => false,
         playerChat: () => {}, slowModeFunction: () => false, teamChat: () => {},
     });
 
@@ -2473,6 +2537,192 @@ console.log('\n--- events/activity.js: choose-mode picking beats a stale vote fo
     stateLocal.teamBlue = [{ id: 2 }];
     activity.onPlayerChat({ id: 1, name: 'RedCap', team: Team.RED, admin: false }, '1');
     check('outside their own turn, the same captain\'s "1" falls through to the vote handlers normally', voteCalls, [['pause', 1, '1'], ['ban', 1, '1']]);
+}
+
+console.log('\n--- events/activity.js: checkSpamFlood auto-mutes a player who floods the chat ---');
+// spamWindowMs/spamMessageThreshold overridden to small, fast values here
+// (see activity.js's own defaults, 5-in-4000ms in production) purely so
+// this test doesn't need to wait out several real seconds — the mechanism
+// under test (a sliding per-auth window) doesn't care about the actual
+// magnitudes.
+(async () => {
+    function sleep(ms) {
+        return new Promise((resolve) => setTimeout(resolve, ms));
+    }
+    const Team = { SPECTATORS: 0 };
+    const HaxNotificationMock = { CHAT: 1 };
+    const sentLocal = [];
+    const roomLocal = { sendAnnouncement: (msg, id, color, style) => sentLocal.push({ msg, id, style }) };
+    const authArrayLocal = [];
+    authArrayLocal[1] = ['AUTH_SPAMMER'];
+    authArrayLocal[2] = ['AUTH_ADMIN'];
+    authArrayLocal[3] = ['AUTH_SPREAD_OUT'];
+    const mutesCreated = [];
+    const muteArrayLocal = { getByAuth: () => null }; // never actually muted here — isolates checkSpamFlood's OWN threshold logic from muteArray's real bookkeeping (covered by models.js/admin.js's own mute tests)
+    // The rest of onPlayerChat (chat-prefix rendering etc., unrelated to
+    // spam detection) still runs after checkSpamFlood, same as production
+    // — needs the same minimal-but-complete state shape the other
+    // activity.js test blocks use.
+    const stateLocal = {
+        gameState: 'STOP', players: [], chooseMode: false, swapMode: false, slowMode: 0,
+        clubMembers: [], clubs: [], equippedTrophies: {}, playersAll: [], hiddenCustomColorsSet: new Set(),
+    };
+    const activity = require(path.join(CORE, 'events', 'activity'))({
+        room: roomLocal, state: stateLocal, authArray: authArrayLocal, BallTouch: class {}, HaxNotification: HaxNotificationMock,
+        Role: {}, Situation: {}, State: {}, Team, Trophies: {},
+        adminChatColor: '', masterChatColor: '', vipChatColor: '',
+        commands: {}, discordBot: { sendLog: () => {} }, errorColor: 2,
+        hiddenAdminsSet: new Set(), silencedAuths: new Map(), muteArray: muteArrayLocal,
+        MutePlayer: class {
+            constructor(name, id, auth) { mutesCreated.push({ name, id, auth }); }
+            setDuration(minutes) { mutesCreated[mutesCreated.length - 1].minutes = minutes; }
+        },
+        checkGoalKickTouch: () => null, chooseModeFunction: () => false, formatTrophyLabel: () => '', resolveTrophyRank: () => null,
+        getCommand: () => false, getDate: () => 'DATE', getGoalGame: () => null,
+        getPlayerComp: () => null, getRole: () => 0,
+        handleVoteMessage: () => false, handleVoteBanMessage: () => false,
+        jjCommand: () => false,
+        playerChat: () => {}, slowModeFunction: () => false, teamChat: () => {},
+        spamWindowMs: 80, spamMessageThreshold: 3, spamMuteMinutes: 5,
+    });
+
+    const spammer = { id: 1, name: 'Spammer', team: Team.SPECTATORS, admin: false };
+    activity.onPlayerChat(spammer, 'msg1');
+    activity.onPlayerChat(spammer, 'msg2');
+    check('under the threshold (2 of 3), nothing happens yet', mutesCreated, []);
+    activity.onPlayerChat(spammer, 'msg3');
+    check('hitting the threshold (3 messages inside the window) auto-mutes them', mutesCreated, [{ name: 'Spammer', id: 1, auth: 'AUTH_SPAMMER', minutes: 5 }]);
+    check('the room is told, publicly (id: null)', sentLocal.some((s) => s.id === null && /Spammer автоматически замучен/.test(s.msg)), true);
+
+    mutesCreated.length = 0;
+    sentLocal.length = 0;
+    const admin = { id: 2, name: 'Boss', team: Team.SPECTATORS, admin: true };
+    activity.onPlayerChat(admin, 'a');
+    activity.onPlayerChat(admin, 'b');
+    activity.onPlayerChat(admin, 'c');
+    activity.onPlayerChat(admin, 'd');
+    check('an admin can never be auto-muted, no matter how fast they type', mutesCreated, []);
+
+    mutesCreated.length = 0;
+    const spreadOut = { id: 3, name: 'NormalChatter', team: Team.SPECTATORS, admin: false };
+    activity.onPlayerChat(spreadOut, 'hey');
+    await sleep(120); // well past spamWindowMs (80ms) — the first message ages out
+    activity.onPlayerChat(spreadOut, 'anyone around?');
+    await sleep(120);
+    activity.onPlayerChat(spreadOut, 'guess not');
+    check('messages spread out past the window never accumulate toward the threshold', mutesCreated, []);
+})();
+
+console.log('\n--- events/activity.js: bare "т"/"ч" also trigger team chat, same as "t" ---');
+{
+    const Team = { SPECTATORS: 0 };
+    const HaxNotificationMock = { CHAT: 1 };
+    const teamChatCalls = [];
+    const authArrayLocal = []; authArrayLocal[1] = ['AUTH_X'];
+    const stateLocal = {
+        gameState: 0, players: [], chooseMode: false, swapMode: false, slowMode: 0,
+        clubMembers: [], clubs: [], equippedTrophies: {}, playersAll: [], hiddenCustomColorsSet: new Set(),
+    };
+    const activity = require(path.join(CORE, 'events', 'activity'))({
+        room: { sendAnnouncement: () => {} }, state: stateLocal, authArray: authArrayLocal, BallTouch: class {}, HaxNotification: HaxNotificationMock,
+        Role: {}, Situation: {}, State: {}, Team, Trophies: {},
+        adminChatColor: '', masterChatColor: '', vipChatColor: '',
+        commands: {}, discordBot: { sendLog: () => {} }, errorColor: 2,
+        hiddenAdminsSet: new Set(), silencedAuths: new Map(), muteArray: { getByAuth: () => null },
+        MutePlayer: class { constructor() {} setDuration() {} },
+        checkGoalKickTouch: () => null, chooseModeFunction: () => false, formatTrophyLabel: () => '', resolveTrophyRank: () => null,
+        getCommand: () => false, getDate: () => 'DATE', getGoalGame: () => null,
+        getPlayerComp: () => null, getRole: () => 0,
+        handleVoteMessage: () => false, handleVoteBanMessage: () => false, jjCommand: () => false,
+        playerChat: () => {}, slowModeFunction: () => false,
+        teamChat: (player, message) => teamChatCalls.push({ id: player.id, message }),
+    });
+    const speaker = { id: 1, name: 'X', team: Team.SPECTATORS, admin: false };
+
+    teamChatCalls.length = 0;
+    activity.onPlayerChat(speaker, 'т привет команде');
+    check('bare "т" triggers team chat, same as "t"', teamChatCalls, [{ id: 1, message: 'т привет команде' }]);
+
+    teamChatCalls.length = 0;
+    activity.onPlayerChat(speaker, 'ч еще одно сообщение');
+    check('bare "ч" triggers team chat too', teamChatCalls, [{ id: 1, message: 'ч еще одно сообщение' }]);
+
+    teamChatCalls.length = 0;
+    activity.onPlayerChat(speaker, 'Т верхний регистр тоже работает');
+    check('matching is case-insensitive, same as the original "t"', teamChatCalls.length, 1);
+
+    teamChatCalls.length = 0;
+    activity.onPlayerChat(speaker, 'чат обычное слово, не команда');
+    check('a word merely STARTING with "ч" (not the bare letter alone) is ordinary chat', teamChatCalls, []);
+}
+
+console.log('\n--- events/activity.js + commands/player.js: bare "jj" exits AFK one-directionally, never enters it ---');
+{
+    const Team = { RED: 1, BLUE: 2, SPECTATORS: 0 };
+    const State = { PLAY: 0, PAUSE: 1, STOP: 2 };
+    const HaxNotificationMock = { CHAT: 1 };
+    const sentLocal = [];
+    const roomMock = { sendAnnouncement: (msg, id, color, style) => sentLocal.push({ msg, id, style }) };
+    const AFKSetLocal = new Map();
+    const AFKMinSetLocal = new Set();
+    const AFKCooldownSetLocal = new Set();
+    const playerCommands = require(path.join(CORE, 'commands', 'player'))({
+        room: roomMock, state: { players: [], gameState: State.PLAY }, Team, State, AFKSet: AFKSetLocal,
+        AFKMinSet: AFKMinSetLocal, AFKCooldownSet: AFKCooldownSetLocal, minAFKDuration: 5, maxAFKDuration: 30, maxAFKDurationVip: 60, maxAFKCount: 10, AFKCooldown: 2,
+        Role: { PLAYER: 0, VIP: 1 }, getRole: () => 0,
+        announcementColor: 1, errorColor: 2, HaxNotification: HaxNotificationMock,
+        handlePlayersJoin: () => {}, handlePlayersLeave: () => {}, updateTeams: () => {},
+    });
+    const stateLocal = {
+        gameState: State.PLAY, players: [], chooseMode: false, swapMode: false, slowMode: 0,
+        clubMembers: [], clubs: [], equippedTrophies: {}, playersAll: [], hiddenCustomColorsSet: new Set(),
+    };
+    const authArrayLocal = []; authArrayLocal[1] = ['AUTH_JJ'];
+    const activity = require(path.join(CORE, 'events', 'activity'))({
+        room: roomMock, state: stateLocal, authArray: authArrayLocal, BallTouch: class {}, HaxNotification: HaxNotificationMock,
+        Role: {}, Situation: {}, State, Team, Trophies: {},
+        adminChatColor: '', masterChatColor: '', vipChatColor: '',
+        commands: {}, discordBot: { sendLog: () => {} }, errorColor: 2,
+        hiddenAdminsSet: new Set(), silencedAuths: new Map(), muteArray: { getByAuth: () => null },
+        MutePlayer: class { constructor() {} setDuration() {} },
+        checkGoalKickTouch: () => null, chooseModeFunction: () => false, formatTrophyLabel: () => '', resolveTrophyRank: () => null,
+        getCommand: () => false, getDate: () => 'DATE', getGoalGame: () => null,
+        getPlayerComp: () => null, getRole: () => 0,
+        handleVoteMessage: () => false, handleVoteBanMessage: () => false,
+        jjCommand: playerCommands.jjCommand,
+        playerChat: () => {}, slowModeFunction: () => false, teamChat: () => {},
+    });
+
+    const p = { id: 1, name: 'Willow', team: Team.SPECTATORS, admin: false };
+
+    // Not AFK yet — "jj" is just a word, falls through to ordinary chat
+    // rather than being silently swallowed as a no-op trigger.
+    sentLocal.length = 0;
+    activity.onPlayerChat(p, 'jj');
+    check('"jj" from someone who is NOT AFK is rendered as ordinary chat, not swallowed', sentLocal.some((s) => /jj/.test(s.msg)), true);
+    check('...and it never puts them INTO AFK — jj is one-directional', AFKSetLocal.has(1), false);
+
+    // Actually AFK now (via the real !afk path) — bare "jj" should exit it,
+    // identically to !afk's own toggle-off branch.
+    playerCommands.afkCommand(p, '!afk');
+    check('setup: the player is now genuinely AFK', AFKSetLocal.has(1), true);
+    AFKMinSetLocal.delete(1); // bypass the min-duration lock — that path is covered separately below
+
+    sentLocal.length = 0;
+    const afkResult = activity.onPlayerChat(p, 'JJ'); // case-insensitive, same as "t"
+    check('"jj" (any case) while genuinely AFK exits it, same as !afk\'s own toggle-off', AFKSetLocal.has(1), false);
+    check('...and it is swallowed (not rendered as ordinary chat)', afkResult, false);
+    check('...announced the same way !afk\'s own toggle-off would be', sentLocal.some((s) => s.id === null && /больше не AFK/.test(s.msg)), true);
+
+    // Still locked by the min-duration timer — "jj" respects that the same
+    // way !afk's own toggle-off does, rather than bypassing it.
+    AFKCooldownSetLocal.delete(1); // bypass the (irrelevant here) cooldown from the previous round
+    playerCommands.afkCommand(p, '!afk');
+    AFKMinSetLocal.add(1); // simulate still being inside the min-AFK window
+    sentLocal.length = 0;
+    activity.onPlayerChat(p, 'jj');
+    check('"jj" respects the min-AFK-duration lock, same as !afk itself', AFKSetLocal.has(1), true);
+    check('...and explains why, privately', sentLocal.some((s) => s.id === 1 && /Минимальное время AFK/.test(s.msg)), true);
 }
 
 console.log('\n--- events/movement.js: auth-bans block a join regardless of connection, small-font auth broadcast on join/leave ---');
@@ -2497,12 +2747,14 @@ console.log('\n--- events/movement.js: auth-bans block a join regardless of conn
     const discordLogs = [];
     const discordBot = { sendLog: (msg) => discordLogs.push(msg), updateRoomStatus: () => {} };
     const noop = () => {};
+    const ghostKicks = [];
 
     const movement = require(path.join(CORE, 'events', 'movement'))({
         room, state, authArray, db, AFKSet: new Set(), HaxNotification, Role: { MASTER: 3 }, State: {}, Team,
         announcementColor: 1, debugMode: false, disableBans: false, discordBot,
         errorColor: 2, infoColor: 5, masterList: [], maxPlayers: 8, welcomeColor: 6,
-        getDate: () => 'DATE', checkCaptainLeave: noop, checkOverflowPassword: noop, getRole: () => 0, ghostKickHandle: noop,
+        getDate: () => 'DATE', checkCaptainLeave: noop, checkOverflowPassword: noop, getRole: () => 0,
+        ghostKickHandle: (oldPlayer, newPlayer) => ghostKicks.push({ oldId: oldPlayer.id, newId: newPlayer.id }),
         // Daily login bonus (economy.js's claimDailyBonus) — irrelevant to
         // this test's join/leave/ban assertions, just needs to exist and
         // return a resolved promise since onPlayerJoin awaits nothing but
@@ -2511,6 +2763,8 @@ console.log('\n--- events/movement.js: auth-bans block a join regardless of conn
         handleActivityPlayerTeamChange: noop, handleLineupChangeLeave: noop, handleLineupChangeTeamChange: noop,
         handlePlayersJoin: noop, handlePlayersLeave: noop, handlePlayersTeamChange: noop,
         updateTeams: noop,
+        refundBetIfSubbedIn: async () => {},
+        forfeitBlackjackOnLeave: noop,
     });
 
     roomCalls.length = 0;
@@ -2525,6 +2779,28 @@ console.log('\n--- events/movement.js: auth-bans block a join regardless of conn
     await movement.onPlayerJoin({ id: 8, name: 'Newbie', auth: 'AUTH_NEW', conn: 'CONN2' });
     check('a clean auth is not kicked on join', roomCalls.some((c) => c.startsWith('kickPlayer')), false);
     check('join broadcasts the player\'s auth in small font', sent[0], { msg: 'Newbie [AUTH_NEW]', id: null, style: 'small' });
+
+    // Duplicate detection — matched on EITHER auth or conn (see
+    // movement.js's onPlayerJoin): auth alone can be reset/regenerated,
+    // conn (the actual network connection's own fingerprint) is much
+    // harder to spoof, so multi-accounting that only changes auth no
+    // longer slips past.
+    authArray[9] = ['AUTH_EXISTING', 'CONN_EXISTING'];
+
+    state.playersAll = [{ id: 9, name: 'Existing' }];
+    ghostKicks.length = 0;
+    await movement.onPlayerJoin({ id: 10, name: 'SameAuth', auth: 'AUTH_EXISTING', conn: 'CONN_DIFFERENT' });
+    check('same auth, different conn is still caught as a duplicate (existing behavior)', ghostKicks, [{ oldId: 9, newId: 10 }]);
+
+    state.playersAll = [{ id: 9, name: 'Existing' }];
+    ghostKicks.length = 0;
+    await movement.onPlayerJoin({ id: 11, name: 'SameConn', auth: 'AUTH_DIFFERENT', conn: 'CONN_EXISTING' });
+    check('different auth but the SAME conn is now also caught as a duplicate', ghostKicks, [{ oldId: 9, newId: 11 }]);
+
+    state.playersAll = [{ id: 9, name: 'Existing' }];
+    ghostKicks.length = 0;
+    await movement.onPlayerJoin({ id: 12, name: 'Genuine', auth: 'AUTH_DIFFERENT2', conn: 'CONN_DIFFERENT2' });
+    check('different auth AND different conn is not treated as a duplicate', ghostKicks, []);
 
     discordLogs.length = 0;
     sent.length = 0;
@@ -4840,6 +5116,39 @@ console.log('\n--- team/balance.js: a leave that shifts whose turn it is always 
     check('a fresh timer was actually armed for them', state.timeOutCap !== timerBeforeLeave && state.timeOutCap != null, true);
 }
 
+console.log('\n--- team/swap.js: startSwapPhase broadcasts whose turn it is, alongside the captain\'s own private prompt ---');
+{
+    const TeamLocal = { RED: 1, BLUE: 2, SPECTATORS: 0 };
+    const HaxNotificationMock = { CHAT: 1, MENTION: 2 };
+    const sentLocal = [];
+    const roomLocal = { sendAnnouncement: (msg, id, color, style) => sentLocal.push({ msg, id, style }) };
+    const state = {
+        teamRed: [{ id: 1, name: 'RedCap' }],
+        teamBlue: [{ id: 2, name: 'BlueCap' }],
+        teamSpec: [{ id: 3, name: 'Spec1' }],
+    };
+    const swap = require(path.join(CORE, 'team', 'swap'))({
+        room: roomLocal, state, Team: TeamLocal, HaxNotification: HaxNotificationMock,
+        announcementColor: 1, errorColor: 2, infoColor: 5, swapTime: 15,
+        announceOdds: async () => {},
+    });
+
+    sentLocal.length = 0;
+    swap.startSwapPhase(() => {});
+    check('everyone in the room sees whose turn it is (broadcast, id: null)', sentLocal.some((s) => s.id === null && /Время капитана синих сделать замену/.test(s.msg)), true);
+    check('the broadcast alone doesn\'t leak the private instructions/roster', sentLocal.find((s) => s.id === null).msg.includes('Игроки'), false);
+    check('the captain STILL also gets their own private, detailed prompt (unchanged)', sentLocal.some((s) => s.id === 2 && /у вас есть 15s, чтобы поменять/.test(s.msg)), true);
+    check('nobody else gets the private prompt', sentLocal.some((s) => s.id === 1 && /у вас есть 15s/.test(s.msg)), false);
+
+    // Skip case: nothing to swap in (teamSpec empty) — advances straight
+    // through without prompting anyone, captain or room, since there's
+    // genuinely no possible answer to give.
+    sentLocal.length = 0;
+    state.teamSpec = [];
+    swap.startSwapPhase(() => {});
+    check('an empty teamSpec skips the turn silently — no room-wide broadcast either', sentLocal, []);
+}
+
 console.log('\n--- commands/player.js: !afk never fires a no-op room.setPlayerTeam when already a spectator ---');
 {
     // Bug: room.setPlayerTeam(id, SPECTATORS) used to fire unconditionally
@@ -4863,7 +5172,8 @@ console.log('\n--- commands/player.js: !afk never fires a no-op room.setPlayerTe
     const AFKSetLocal = new Map();
     const player = require(path.join(CORE, 'commands', 'player'))({
         room: roomMock, state: { players: [{ id: 1 }, { id: 2 }], gameState: State.PLAY }, Team, State, AFKSet: AFKSetLocal,
-        AFKMinSet: new Set(), AFKCooldownSet: new Set(), minAFKDuration: 5, maxAFKDuration: 30, AFKCooldown: 2,
+        AFKMinSet: new Set(), AFKCooldownSet: new Set(), minAFKDuration: 5, maxAFKDuration: 30, maxAFKDurationVip: 60, maxAFKCount: 10, AFKCooldown: 2,
+        Role: { PLAYER: 0, VIP: 1 }, getRole: () => 0,
         announcementColor: 1, errorColor: 2, HaxNotification: HaxNotificationMock,
         handlePlayersJoin: () => {}, handlePlayersLeave: () => {}, updateTeams: () => {},
     });
@@ -4879,7 +5189,8 @@ console.log('\n--- commands/player.js: !afk never fires a no-op room.setPlayerTe
     const soloAFKSet = new Map();
     const soloPlayer = require(path.join(CORE, 'commands', 'player'))({
         room: roomMock, state: soloState, Team, State, AFKSet: soloAFKSet,
-        AFKMinSet: new Set(), AFKCooldownSet: new Set(), minAFKDuration: 5, maxAFKDuration: 30, AFKCooldown: 2,
+        AFKMinSet: new Set(), AFKCooldownSet: new Set(), minAFKDuration: 5, maxAFKDuration: 30, maxAFKDurationVip: 60, maxAFKCount: 10, AFKCooldown: 2,
+        Role: { PLAYER: 0, VIP: 1 }, getRole: () => 0,
         announcementColor: 1, errorColor: 2, HaxNotification: HaxNotificationMock,
         handlePlayersJoin: () => {}, handlePlayersLeave: () => {}, updateTeams: () => {},
     });
@@ -4887,6 +5198,77 @@ console.log('\n--- commands/player.js: !afk never fires a no-op room.setPlayerTe
     soloPlayer.afkCommand({ id: 3, name: 'Solo', team: Team.RED }, '!afk');
     check('!afk from the lone remaining player, still on a team, does move them to spectators', roomCallsLocal, [`setPlayerTeam:3:${Team.SPECTATORS}`]);
 }
+
+console.log('\n--- commands/player.js: !afk enforces a room-wide concurrent cap ---');
+{
+    // Too many players sitting AFK at once starves the room of people
+    // actually available to play — a room-capacity cap, not an abuse timer
+    // (min duration/cooldown above), so it applies uniformly, admins
+    // included.
+    const Team = { RED: 1, BLUE: 2, SPECTATORS: 0 };
+    const State = { PLAY: 0, PAUSE: 1, STOP: 2 };
+    const HaxNotificationMock = { CHAT: 1 };
+    const sentLocal = [];
+    const roomMock = { setPlayerTeam: () => {}, sendAnnouncement: (msg, id, color, style) => sentLocal.push({ msg, id, style }) };
+    const AFKSetLocal = new Map([[10, Date.now()], [11, Date.now()], [12, Date.now()], [13, Date.now()]]);
+    const player = require(path.join(CORE, 'commands', 'player'))({
+        room: roomMock, state: { players: [], gameState: State.PLAY }, Team, State, AFKSet: AFKSetLocal,
+        AFKMinSet: new Set(), AFKCooldownSet: new Set(), minAFKDuration: 5, maxAFKDuration: 30, maxAFKDurationVip: 60, maxAFKCount: 4, AFKCooldown: 2,
+        Role: { PLAYER: 0, VIP: 1 }, getRole: () => 0,
+        announcementColor: 1, errorColor: 2, HaxNotification: HaxNotificationMock,
+        handlePlayersJoin: () => {}, handlePlayersLeave: () => {}, updateTeams: () => {},
+    });
+
+    sentLocal.length = 0;
+    player.afkCommand({ id: 14, name: 'FifthOne', team: Team.SPECTATORS, admin: false }, '!afk');
+    check('a 5th concurrent AFK is rejected once the cap (4) is already reached', AFKSetLocal.has(14), false);
+    check('...with a clear reason why', /не больше 4/.test(sentLocal[0].msg), true);
+
+    sentLocal.length = 0;
+    player.afkCommand({ id: 14, name: 'FifthOne', team: Team.SPECTATORS, admin: true }, '!afk');
+    check('the cap applies to admins too, not just ordinary players', AFKSetLocal.has(14), false);
+
+    // Someone returns, freeing a slot — the next attempt succeeds normally.
+    AFKSetLocal.delete(10);
+    sentLocal.length = 0;
+    player.afkCommand({ id: 14, name: 'FifthOne', team: Team.SPECTATORS, admin: false }, '!afk');
+    check('once a slot frees up, the next !afk goes through normally', AFKSetLocal.has(14), true);
+}
+
+console.log('\n--- commands/player.js: a current VIP gets a longer max AFK duration before auto-return ---');
+(async () => {
+    const Team = { RED: 1, BLUE: 2, SPECTATORS: 0 };
+    const State = { PLAY: 0, PAUSE: 1, STOP: 2 };
+    const HaxNotificationMock = { CHAT: 1 };
+    const sentLocal = [];
+    const roomMock = {
+        setPlayerTeam: () => {},
+        sendAnnouncement: (msg, id) => sentLocal.push({ msg, id }),
+        getPlayer: (id) => (id === 1 ? { id: 1, name: 'PlainJoe' } : { id: 2, name: 'VipDonor' }),
+    };
+    const AFKSetLocal = new Map();
+    const rolesLocal = { 1: 0, 2: 1 }; // PLAYER, VIP
+    const player = require(path.join(CORE, 'commands', 'player'))({
+        room: roomMock, state: { players: [], gameState: State.PLAY }, Team, State, AFKSet: AFKSetLocal,
+        AFKMinSet: new Set(), AFKCooldownSet: new Set(), minAFKDuration: 0,
+        maxAFKDuration: 0.005, // 300ms
+        maxAFKDurationVip: 0.015, // 900ms — 3x longer
+        maxAFKCount: 10, AFKCooldown: 0,
+        Role: { PLAYER: 0, VIP: 1 }, getRole: (p) => rolesLocal[p.id],
+        announcementColor: 1, errorColor: 2, HaxNotification: HaxNotificationMock,
+        handlePlayersJoin: () => {}, handlePlayersLeave: () => {}, updateTeams: () => {},
+    });
+
+    player.afkCommand({ id: 1, name: 'PlainJoe', team: Team.SPECTATORS, admin: false }, '!afk');
+    player.afkCommand({ id: 2, name: 'VipDonor', team: Team.SPECTATORS, admin: false }, '!afk');
+
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    check('a plain player auto-returns at the ordinary duration (300ms elapsed)', AFKSetLocal.has(1), false);
+    check('a current VIP is STILL AFK at that same point (their own limit is 900ms)', AFKSetLocal.has(2), true);
+
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    check('...and eventually auto-returns too, once their own (longer) limit passes', AFKSetLocal.has(2), false);
+})();
 
 console.log('\n--- commands/player.js: !afks shows minutes-in-AFK, and the maxAFKDuration auto-expire announces publicly + privately ---');
 (async () => {
@@ -4905,6 +5287,8 @@ console.log('\n--- commands/player.js: !afks shows minutes-in-AFK, and the maxAF
         room: roomMock, state: { players: [1, 2] }, Team, State, AFKSet: AFKSetLocal,
         AFKMinSet: new Set(), AFKCooldownSet: new Set(), minAFKDuration: 0,
         maxAFKDuration: 0.01, // 600ms — fast enough to actually wait out in a test
+        maxAFKDurationVip: 0.01, maxAFKCount: 10,
+        Role: { PLAYER: 0, VIP: 1 }, getRole: () => 0,
         AFKCooldown: 0,
         announcementColor: 1, errorColor: 2, HaxNotification: HaxNotificationMock,
         handlePlayersJoin: () => handlePlayersJoinCalls.push('join'), handlePlayersLeave: () => {}, updateTeams: () => {},
@@ -6760,10 +7144,11 @@ console.log('\n--- events/activity.js: onPlayerChat relays "@<MENTION_WATCH_NAME
             Role: { PLAYER: 0, VIP: 1, ADMIN_TEMP: 2, ADMIN_PERM: 3, MASTER: 4 }, State: StateLocal, Team: TeamLocal,
             adminChatColor: 1, commands: {}, discordBot: discordBotMock, errorColor: 2,
             hiddenAdminsSet: new Set(), masterChatColor: 3, mentionWatchName, muteArray: { getByAuth: () => null },
+            MutePlayer: class { constructor() {} setDuration() {} },
             silencedAuths: new Map(), vipChatColor: 4,
             chooseModeFunction: () => false, swapModeFunction: () => false, slowModeFunction: () => false,
             getCommand: () => false, getDate: () => 'DATE', getPlayerComp: () => null, getRole: () => 0,
-            handleVoteMessage: () => false, handleVoteBanMessage: () => false, playerChat: () => {}, teamChat: () => {},
+            handleVoteMessage: () => false, handleVoteBanMessage: () => false, jjCommand: () => false, playerChat: () => {}, teamChat: () => {},
         });
     }
 
@@ -6839,6 +7224,395 @@ console.log('\n--- commands/minigames.js: only the challenge and the final winne
     check('the coinflip suspense line ("Монетка подброшена") is also private to just the two players', sentLocal.filter((s) => /Монетка подброшена/.test(s.msg)).map((s) => s.id).sort(), [1, 2]);
     check('none of the in-match messages (everything but the final result) broadcast to the whole room', inMatchMessages.some((s) => s.id === null), false);
     check('the final winner announcement IS broadcast to the whole room (id: null)', sentLocal.some((s) => s.id === null && /побеждает/.test(s.msg)), true);
+
+    // Short aliases ("cf"/"rr") resolve to the same canonical game as the
+    // full name — checked via the challenge broadcast's own label text,
+    // and via a real !play round-trip to confirm the alias survives all
+    // the way through pendingInvites into GAMES itself, not just the
+    // initial lookup.
+    sentLocal.length = 0;
+    await minigames.minigamesCommand(challenger, '!minigames cf #2 50');
+    check('"cf" resolves to the real coinflip game (label in the broadcast challenge)', sentLocal.some((s) => s.id === null && /"Монетка"/.test(s.msg)), true);
+    await minigames.playCommand(target, '!play');
+    check('...and actually plays through to a real result, not just a label match', sentLocal.some((s) => /побеждает/.test(s.msg)), true);
+
+    sentLocal.length = 0;
+    await minigames.minigamesCommand(challenger, '!minigames rr #2 50');
+    check('"rr" resolves to the real russianroulette game (label in the broadcast challenge)', sentLocal.some((s) => s.id === null && /"Русская рулетка"/.test(s.msg)), true);
+})();
+
+console.log('\n--- core/betting.js: spectator betting on match outcome, open only during state.swapMode ---');
+(async () => {
+    const TeamLocal = { RED: 1, BLUE: 2, SPECTATORS: 0 };
+    const HaxNotificationMock = { CHAT: 1 };
+    const sentLocal = [];
+    const roomMock = { sendAnnouncement: (msg, id, color, style) => sentLocal.push({ msg, id, color, style }) };
+    const { createSqliteDatabase } = require(path.join(__dirname, '..', 'db', 'sqlite'));
+    const { formatCoins } = require(path.join(CORE, 'utils'));
+    const db = createSqliteDatabase(':memory:');
+    db.init();
+
+    // RED is the clear favorite (75% winrate), BLUE the underdog (25%) —
+    // computeOdds should give RED the LOWER coefficient.
+    for (let i = 1; i <= 4; i++) {
+        await db.savePlayerStats(`AUTH_RED${i}`, { playerName: `Red${i}`, games: 20, wins: 15, goals: 0, assists: 0, ownGoals: 0, CS: 0, playtime: 0 });
+        await db.savePlayerStats(`AUTH_BLUE${i}`, { playerName: `Blue${i}`, games: 20, wins: 5, goals: 0, assists: 0, ownGoals: 0, CS: 0, playtime: 0 });
+    }
+    const redRoster = [1, 2, 3, 4].map((i) => ({ id: i, name: `Red${i}` }));
+    const blueRoster = [5, 6, 7, 8].map((i) => ({ id: i, name: `Blue${i}` }));
+    const authArray = {};
+    [1, 2, 3, 4].forEach((i) => { authArray[i] = [`AUTH_RED${i}`]; });
+    [5, 6, 7, 8].forEach((i, idx) => { authArray[i] = [`AUTH_BLUE${idx + 1}`]; });
+    authArray[100] = ['AUTH_BETTOR'];
+    authArray[101] = ['AUTH_BETTOR2'];
+
+    const state = {
+        swapMode: true,
+        teamRed: redRoster,
+        teamBlue: blueRoster,
+        playersAll: [...redRoster, ...blueRoster, { id: 100, name: 'Bettor', team: TeamLocal.SPECTATORS }, { id: 101, name: 'Bettor2', team: TeamLocal.SPECTATORS }],
+    };
+
+    const betting = require(path.join(CORE, 'betting'))({
+        room: roomMock, state, authArray, db, Team: TeamLocal,
+        announcementColor: 1, errorColor: 2, successColor: 3, HaxNotification: HaxNotificationMock,
+        formatCoins,
+    });
+
+    await db.addCoins('AUTH_BETTOR', 'Bettor', 1000);
+    await db.addCoins('AUTH_BETTOR2', 'Bettor2', 1000);
+    const bettor = { id: 100, name: 'Bettor', team: TeamLocal.SPECTATORS };
+    const bettor2 = { id: 101, name: 'Bettor2', team: TeamLocal.SPECTATORS };
+
+    sentLocal.length = 0;
+    await betting.announceOdds();
+    const oddsMsg = sentLocal[0].msg;
+    check('announceOdds broadcasts to the whole room (id: null)', sentLocal[0].id, null);
+    const redOddsMatch = /Красные x(\d+\.\d+)/.exec(oddsMsg);
+    const blueOddsMatch = /Синие x(\d+\.\d+)/.exec(oddsMsg);
+    check('the favored team (RED, 75% winrate) gets a LOWER coefficient than the underdog (BLUE, 25%)', Number(redOddsMatch[1]) < Number(blueOddsMatch[1]), true);
+
+    sentLocal.length = 0;
+    await betting.betCommand(bettor, '!bet nonsense 100');
+    check('an invalid team token shows usage', /Использование/.test(sentLocal[0].msg), true);
+
+    sentLocal.length = 0;
+    await betting.betCommand(bettor, '!bet red abc');
+    check('a non-numeric amount shows usage', /Использование/.test(sentLocal[0].msg), true);
+
+    state.swapMode = false;
+    sentLocal.length = 0;
+    await betting.betCommand(bettor, '!bet red 100');
+    check('betting is rejected outside the swap window', /только во время замен капитанов/.test(sentLocal[0].msg), true);
+    state.swapMode = true;
+
+    sentLocal.length = 0;
+    await betting.betCommand(redRoster[0], '!bet red 100');
+    check('a player currently in the match cannot bet', /может делать только зритель/.test(sentLocal[0].msg), true);
+
+    sentLocal.length = 0;
+    await betting.betCommand(bettor, '!bet red 5');
+    check('a bet below the 10-coin minimum is rejected', /Минимальная ставка/.test(sentLocal[0].msg), true);
+
+    sentLocal.length = 0;
+    await betting.betCommand(bettor, '!bet red 999999');
+    check('a bet the bettor cannot afford is rejected', /Недостаточно монет/.test(sentLocal[0].msg), true);
+    check('a rejected bet does not touch the balance', await db.getBalance('AUTH_BETTOR'), 1000);
+
+    sentLocal.length = 0;
+    await betting.betCommand(bettor, '!bet r 200');
+    check('"r" is accepted as an alias for "red"', /ставит.*красных/.test(sentLocal[0].msg), true);
+    check('the stake was actually deducted', await db.getBalance('AUTH_BETTOR'), 800);
+    check('the bet confirmation is broadcast to the whole room', sentLocal[0].id, null);
+
+    sentLocal.length = 0;
+    await betting.betCommand(bettor, '!bet blue 100');
+    check('a second bet from the same bettor in the same window is rejected', /уже есть активная ставка/.test(sentLocal[0].msg), true);
+    check('the rejected second bet did not charge anything further', await db.getBalance('AUTH_BETTOR'), 800);
+
+    // refundIfSubbedIn — a captain swaps the bettor onto BLUE mid-window.
+    sentLocal.length = 0;
+    bettor.team = TeamLocal.BLUE;
+    await betting.refundIfSubbedIn(bettor);
+    check('being subbed into the match refunds the full stake', await db.getBalance('AUTH_BETTOR'), 1000);
+    check('the refund is broadcast', sentLocal.some((s) => s.id === null && /ставка 200 монеток возвращена/.test(s.msg)), true);
+
+    sentLocal.length = 0;
+    await betting.refundIfSubbedIn(bettor);
+    check('refundIfSubbedIn is a no-op the second time (no bet left to refund)', sentLocal, []);
+
+    // A spectator with no bet at all — never touched.
+    sentLocal.length = 0;
+    const neverBet = { id: 102, name: 'Idle', team: TeamLocal.RED };
+    authArray[102] = ['AUTH_IDLE'];
+    await betting.refundIfSubbedIn(neverBet);
+    check('refundIfSubbedIn is a no-op for a player who never had a bet', sentLocal, []);
+
+    // resolveBets — win/loss/draw.
+    sentLocal.length = 0;
+    await betting.betCommand(bettor2, '!bet blue 100');
+    const oddsUsed = Number(/x(\d+\.\d+)/.exec(sentLocal[0].msg)[1]);
+
+    sentLocal.length = 0;
+    await betting.resolveBets(TeamLocal.BLUE);
+    const expectedPayout = Math.round(100 * oddsUsed);
+    check('a winning bet pays stake * odds, credited to the winner', await db.getBalance('AUTH_BETTOR2'), 900 + expectedPayout);
+    check('the win is announced privately to the winner, not broadcast', sentLocal.some((s) => s.id === 101 && /сыграла/.test(s.msg)), true);
+
+    sentLocal.length = 0;
+    await betting.resolveBets(TeamLocal.BLUE);
+    check('resolveBets is a no-op once bets are already cleared (no double payout)', sentLocal, []);
+
+    // Losing bet: nothing paid back.
+    state.swapMode = true;
+    sentLocal.length = 0;
+    await betting.betCommand(bettor2, '!bet blue 100');
+    const balanceAfterBet = await db.getBalance('AUTH_BETTOR2');
+    sentLocal.length = 0;
+    await betting.resolveBets(TeamLocal.RED);
+    check('a losing bet keeps the balance exactly where it was after staking (no refund)', await db.getBalance('AUTH_BETTOR2'), balanceAfterBet);
+    check('the loss is announced privately, not broadcast', sentLocal.some((s) => s.id === 101 && /не сыграла/.test(s.msg)), true);
+
+    // Draw: full refund, no confiscation.
+    sentLocal.length = 0;
+    await betting.betCommand(bettor2, '!bet red 150');
+    const balanceAfterDrawBet = await db.getBalance('AUTH_BETTOR2');
+    sentLocal.length = 0;
+    await betting.resolveBets(TeamLocal.SPECTATORS); // draw sentinel, same convention as roomStats.js's state.lastWinner
+    check('a draw refunds the full stake', await db.getBalance('AUTH_BETTOR2'), balanceAfterDrawBet + 150);
+    check('the draw refund is announced privately', sentLocal.some((s) => s.id === 101 && /вничью/.test(s.msg)), true);
+
+    db.close();
+})();
+
+console.log('\n--- core/commands/blackjack.js: bot-mode dealer play (canonical rules) ---');
+(async () => {
+    const HaxNotificationMock = { CHAT: 1 };
+    const { createSqliteDatabase } = require(path.join(__dirname, '..', 'db', 'sqlite'));
+    const { formatCoins } = require(path.join(CORE, 'utils'));
+    const db = createSqliteDatabase(':memory:');
+    db.init();
+    await db.addCoins('AUTH_BJ', 'BJ', 5000);
+
+    // getRandomInt: (max) => max - 1 makes every Fisher-Yates swap a no-op
+    // (j always equals i) — the "shuffled" deck is just buildDeck() in its
+    // original order, so deck.pop() draws in a fully known, fixed sequence:
+    // ...clubs A,K,Q,J,10... (reverse build order). Two pops for the
+    // player then two for the dealer deals player=[A♣,K♣]=21 (a natural
+    // blackjack) and dealer=[Q♣,J♣]=20 (not a blackjack).
+    const sentIdentity = [];
+    const roomIdentity = { sendAnnouncement: (msg, id, color, style) => sentIdentity.push({ msg, id, color, style }) };
+    const bjIdentity = require(path.join(CORE, 'commands', 'blackjack'))({
+        room: roomIdentity, state: { playersAll: [] }, db,
+        announcementColor: 1, errorColor: 2, successColor: 3, HaxNotification: HaxNotificationMock,
+        formatCoins, getRandomInt: (max) => max - 1,
+    });
+    const bjPlayer = { id: 1, name: 'BJ' };
+
+    sentIdentity.length = 0;
+    const balanceBeforeNatural = await db.getBalance('AUTH_BJ');
+    await bjIdentity.startBlackjackBotGame(bjPlayer, 'AUTH_BJ', 100);
+    check('a natural 21 (player) vs a non-blackjack dealer pays out immediately, no hit/stand needed', sentIdentity.some((s) => /Блэкджек/.test(s.msg)), true);
+    check('...at the 2.5x payout multiplier', await db.getBalance('AUTH_BJ'), balanceBeforeNatural - 100 + 250);
+
+    sentIdentity.length = 0;
+    await bjIdentity.hitCommand(bjPlayer, '!hit');
+    check('the natural-blackjack game is already over — no active session left to hit on', sentIdentity.some((s) => /нет активной игры/.test(s.msg)), true);
+
+    // getRandomInt: () => 0 (ignoring `max`) produces a left-rotate-by-1 of
+    // buildDeck() — worked out by hand the same way as above. It deals
+    // player=[2♠,A♣]=13 (soft 13, not a pair, not a blackjack) and
+    // dealer=[K♣,Q♣]=20.
+    const sentRot = [];
+    const roomRot = { sendAnnouncement: (msg, id, color, style) => sentRot.push({ msg, id, color, style }) };
+    const bjRot = require(path.join(CORE, 'commands', 'blackjack'))({
+        room: roomRot, state: { playersAll: [] }, db,
+        announcementColor: 1, errorColor: 2, successColor: 3, HaxNotification: HaxNotificationMock,
+        formatCoins, getRandomInt: () => 0,
+    });
+
+    sentRot.length = 0;
+    await bjRot.startBlackjackBotGame(bjPlayer, 'AUTH_BJ', 100);
+    check('a non-blackjack deal shows the dealer\'s hidden card as a back, not the real card', sentRot.some((s) => s.msg.includes('🎴')), true);
+
+    sentRot.length = 0;
+    await bjRot.splitCommand(bjPlayer, '!split');
+    check('splitting a non-pair (2,A) is rejected', sentRot.some((s) => /Разделить можно только пару/.test(s.msg)), true);
+
+    sentRot.length = 0;
+    await bjRot.hitCommand(bjPlayer, '!hit');
+    check('hitting on a soft 13 draws a card and keeps the hand open (still under 21)', sentRot.some((s) => /Ваша рука/.test(s.msg)), true);
+
+    sentRot.length = 0;
+    const balanceBeforeBust = await db.getBalance('AUTH_BJ');
+    await bjRot.hitCommand(bjPlayer, '!hit');
+    check('a third hit that pushes the (now hard) total past 21 busts immediately', sentRot.some((s) => /Перебор/.test(s.msg)), true);
+    check('...and settles the game right there — the dealer is revealed but never has to draw further', sentRot.some((s) => /Дилер открывает/.test(s.msg)), true);
+    check('a bust loses the stake, no payout', await db.getBalance('AUTH_BJ'), balanceBeforeBust);
+
+    // A fresh deal replays the identical deterministic scenario (player
+    // 13, dealer 20) — this time standing immediately instead of hitting.
+    sentRot.length = 0;
+    const balanceBeforeStandLoss = await db.getBalance('AUTH_BJ');
+    await bjRot.startBlackjackBotGame(bjPlayer, 'AUTH_BJ', 100);
+    await bjRot.standCommand(bjPlayer, '!stand');
+    check('standing on 13 against a dealer already at 20 loses (13 < 20)', sentRot.some((s) => /проигрыш/.test(s.msg)), true);
+    check('no payout on that loss either', await db.getBalance('AUTH_BJ'), balanceBeforeStandLoss - 100);
+
+    sentRot.length = 0;
+    await bjRot.startBlackjackBotGame(bjPlayer, 'AUTH_BJ', 100);
+    sentRot.length = 0;
+    await bjRot.startBlackjackBotGame(bjPlayer, 'AUTH_BJ', 100);
+    check('starting a second game while one is still active is rejected', sentRot.some((s) => /уже есть активная игра/.test(s.msg)), true);
+    await bjRot.standCommand(bjPlayer, '!stand'); // clean up the still-open session
+
+    sentRot.length = 0;
+    await bjRot.startBlackjackBotGame(bjPlayer, 'AUTH_BJ', 999999);
+    check('a stake the player cannot afford is rejected up front', sentRot.some((s) => /Недостаточно монет/.test(s.msg)), true);
+
+    // Split — needs an actual pair, which the deterministic decks above
+    // don't happen to deal. Rather than a real-random retry loop (which
+    // ran hundreds of real db round-trips synchronously and starved this
+    // process's other real-timer-based tests of event-loop time), replay a
+    // FIXED sequence of Fisher-Yates j-values, precomputed offline, that's
+    // already known to deal a pair (6♦, 6♥) as the first two cards — same
+    // shuffle algorithm, just a hardcoded "random" outcome instead of a
+    // live one.
+    const PAIR_DEAL_J_SEQUENCE = [30, 17, 14, 34, 32, 11, 30, 4, 32, 13, 24, 20, 24, 24, 14, 6, 32, 8, 10, 31, 0, 0, 12, 17, 16, 26, 18, 18, 0, 3, 20, 10, 16, 5, 16, 16, 0, 7, 8, 3, 4, 5, 2, 0, 0, 4, 2, 4, 0, 2, 0];
+    let jIndex = 0;
+    const sentSplit = [];
+    const roomSplit = { sendAnnouncement: (msg, id, color, style) => sentSplit.push({ msg, id, color, style }) };
+    const bjSplit = require(path.join(CORE, 'commands', 'blackjack'))({
+        room: roomSplit, state: { playersAll: [] }, db,
+        announcementColor: 1, errorColor: 2, successColor: 3, HaxNotification: HaxNotificationMock,
+        formatCoins, getRandomInt: () => PAIR_DEAL_J_SEQUENCE[jIndex++],
+    });
+    const splitPlayer = { id: 2, name: 'Splitter' };
+    await db.addCoins('AUTH_SPLIT', 'Splitter', 500);
+    sentSplit.length = 0;
+    await bjSplit.startBlackjackBotGame(splitPlayer, 'AUTH_SPLIT', 50);
+    check('the precomputed shuffle deals a splittable pair (6♦, 6♥) as expected', sentSplit.some((s) => s.id === 2 && /!split/.test(s.msg)), true);
+
+    const balanceBeforeSplit = await db.getBalance('AUTH_SPLIT');
+    sentSplit.length = 0;
+    await bjSplit.splitCommand(splitPlayer, '!split');
+    check('splitting charges an equal second stake', await db.getBalance('AUTH_SPLIT'), balanceBeforeSplit - 50);
+    check('splitting announces two independent hands', sentSplit.some((s) => /\(1\/2\)/.test(s.msg)), true);
+
+    sentSplit.length = 0;
+    await bjSplit.splitCommand(splitPlayer, '!split');
+    check('splitting a second time is rejected — only one split allowed', sentSplit.some((s) => /только один раз/.test(s.msg)), true);
+
+    await bjSplit.standCommand(splitPlayer, '!stand'); // resolve hand 1/2
+    await bjSplit.standCommand(splitPlayer, '!stand'); // resolve hand 2/2, finishes the game
+
+    sentSplit.length = 0;
+    await bjSplit.hitCommand(splitPlayer, '!hit');
+    check('after both split hands resolve, the game is over — nothing left to act on', sentSplit.some((s) => /нет активной игры/.test(s.msg)), true);
+
+    db.close();
+})();
+
+console.log('\n--- core/commands/blackjack.js + minigames.js: pvp mode (no split, closest to 21 wins) via the shared challenge/!play flow ---');
+(async () => {
+    const TeamLocal = { RED: 1, BLUE: 2, SPECTATORS: 0 };
+    const HaxNotificationMock = { CHAT: 1 };
+    const sentLocal = [];
+    const roomMock = { sendAnnouncement: (msg, id, color, style) => sentLocal.push({ msg, id, color, style }) };
+    const { createSqliteDatabase } = require(path.join(__dirname, '..', 'db', 'sqlite'));
+    const { formatCoins } = require(path.join(CORE, 'utils'));
+    const db = createSqliteDatabase(':memory:');
+    db.init();
+
+    const authArray = { 1: ['AUTH_CHALLENGER'], 2: ['AUTH_TARGET'] };
+    const state = {
+        playersAll: [
+            { id: 1, name: 'Challenger', team: TeamLocal.SPECTATORS },
+            { id: 2, name: 'Target', team: TeamLocal.SPECTATORS },
+        ],
+    };
+    await db.addCoins('AUTH_CHALLENGER', 'Challenger', 500);
+    await db.addCoins('AUTH_TARGET', 'Target', 500);
+
+    // Identity shuffle again (see the bot-mode block above): challenger
+    // gets [A♣,K♣]=21, target gets [Q♣,J♣]=20 — both just need to stand.
+    const bjPvp = require(path.join(CORE, 'commands', 'blackjack'))({
+        room: roomMock, state, db,
+        announcementColor: 1, errorColor: 2, successColor: 3, HaxNotification: HaxNotificationMock,
+        formatCoins, getRandomInt: (max) => max - 1,
+    });
+    const minigames = require(path.join(CORE, 'commands', 'minigames'))({
+        room: roomMock, state, authArray, db, Team: TeamLocal,
+        announcementColor: 1, errorColor: 2, successColor: 3, HaxNotification: HaxNotificationMock,
+        formatCoins, getRandomInt: (max) => max - 1,
+        startBlackjackBotGame: bjPvp.startBlackjackBotGame,
+        runPvpBlackjack: bjPvp.runPvpBlackjack,
+    });
+
+    const challenger = { id: 1, name: 'Challenger', team: TeamLocal.SPECTATORS };
+    const target = { id: 2, name: 'Target', team: TeamLocal.SPECTATORS };
+
+    sentLocal.length = 0;
+    await minigames.minigamesCommand(challenger, '!minigames blackjack 100');
+    check('blackjack alone (no #<id>) plays against the bot, bypassing the challenge/!play flow entirely', sentLocal.some((s) => /Блэкджек/.test(s.msg)), true);
+    check('...and never created a pending invite for anyone to !play', await db.getBalance('AUTH_TARGET'), 500);
+
+    sentLocal.length = 0;
+    await minigames.minigamesCommand(challenger, '!minigames bj #2 100');
+    check('"bj" resolves to blackjack, and #<id> routes through the normal challenge flow', sentLocal.some((s) => s.id === null && /"Блэкджек"/.test(s.msg)), true);
+
+    sentLocal.length = 0;
+    await bjPvp.hitCommand(target, '!hit');
+    check('the target cannot act before accepting — no session exists for them yet', sentLocal.some((s) => /нет активной игры/.test(s.msg)), true);
+
+    sentLocal.length = 0;
+    const challengerBalanceBeforeMatch = await db.getBalance('AUTH_CHALLENGER');
+    const targetBalanceBeforeMatch = await db.getBalance('AUTH_TARGET');
+    await minigames.playCommand(target, '!play');
+    check('accepting deals both hands and prompts the challenger first (challenger goes first)', sentLocal.some((s) => s.id === 1 && /Ваш ход/.test(s.msg)), true);
+    check('the target sees a waiting message instead, not their own hand yet', sentLocal.some((s) => s.id === 2 && /Ход Challenger/.test(s.msg)), true);
+
+    sentLocal.length = 0;
+    await bjPvp.hitCommand(target, '!hit');
+    check('acting out of turn is rejected', sentLocal.some((s) => /не ваш ход/.test(s.msg)), true);
+
+    sentLocal.length = 0;
+    await bjPvp.standCommand(challenger, '!stand');
+    check('the challenger standing on 21 passes the turn to the target', sentLocal.some((s) => s.id === 2 && /Ваш ход/.test(s.msg)), true);
+
+    sentLocal.length = 0;
+    await bjPvp.standCommand(target, '!stand');
+    check('once both stand, the match resolves and both hands are revealed', sentLocal.some((s) => /Challenger:.*\(21\)/.test(s.msg)) && sentLocal.some((s) => /Target:.*\(20\)/.test(s.msg)), true);
+    // Net effect for the winner is stake-out then pot-in (-100 + 200 = +100
+    // relative to their PRE-STAKE balance captured above), not the full pot.
+    check('21 beats 20 — the challenger takes the whole pot (2x stake), no split-the-pot logic in pvp', await db.getBalance('AUTH_CHALLENGER'), challengerBalanceBeforeMatch + 100);
+    check('the loser gets nothing back beyond what they already staked', await db.getBalance('AUTH_TARGET'), targetBalanceBeforeMatch - 100);
+
+    // forfeitOnLeave — the challenger disconnects mid-hand; minigames.js's
+    // playCommand should see this as a push (both stakes refunded) via the
+    // exact same winner:null handling blackjack's own draws use. Balances
+    // are captured BEFORE the challenge/accept even runs (not mid-flight —
+    // playCommand is fired without an immediate await, so its own
+    // spendCoins/spendCoins/game.run() chain is still mid-microtask-queue
+    // at that point) and asserted unchanged at the very end, which sidesteps
+    // needing to catch it at the exact "charged but not yet resolved"
+    // instant.
+    const challengerBalanceBeforeForfeit = await db.getBalance('AUTH_CHALLENGER');
+    const targetBalanceBeforeForfeit = await db.getBalance('AUTH_TARGET');
+    sentLocal.length = 0;
+    await minigames.minigamesCommand(challenger, '!minigames bj #2 50');
+    const runPromise = minigames.playCommand(target, '!play');
+    // Let playCommand's own await chain (spendCoins x2, then game.run()
+    // registering the pvp session) fully settle before forfeiting — a
+    // macrotask boundary drains every pending microtask ahead of it, so
+    // this is safe regardless of how many awaits playCommand has.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    bjPvp.forfeitOnLeave(challenger);
+    await runPromise;
+    check('a mid-game forfeit refunds the challenger\'s stake — net balance unchanged', await db.getBalance('AUTH_CHALLENGER'), challengerBalanceBeforeForfeit);
+    check('...and the target\'s stake too, same push handling as an actual on-the-table draw', await db.getBalance('AUTH_TARGET'), targetBalanceBeforeForfeit);
+
+    db.close();
 })();
 
 // The movement.js leave broadcast fires from inside a 10ms setTimeout, the
