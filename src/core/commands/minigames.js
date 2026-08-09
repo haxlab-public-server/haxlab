@@ -262,7 +262,10 @@ module.exports = function createMinigameCommands({
         if (winner == null) {
             await db.addCoins(challengerAuth, challenger.name, stake);
             await db.addCoins(targetAuth, player.name, stake);
-            sendToMatch(challenger, player, `🤝 Ничья ! Ставки возвращены.`, announcementColor);
+            // Broadcast (id: null), same visibility as the win announcement
+            // below — a private sendToMatch here left the whole room with
+            // no idea the match even finished, unlike every win.
+            room.sendAnnouncement(`🤝 ${challenger.name} и ${player.name} сыграли вничью ! Ставки возвращены.`, null, announcementColor, 'bold', HaxNotification.CHAT);
             return;
         }
 

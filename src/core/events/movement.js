@@ -10,6 +10,8 @@ module.exports = function createMovementEvents({
     authArray,
     db,
     AFKSet,
+    AFKMinSet,
+    AFKCooldownSet,
     HaxNotification,
     Role,
     State,
@@ -162,6 +164,18 @@ module.exports = function createMovementEvents({
         handleLineupChangeLeave(player);
         checkCaptainLeave(player);
         forfeitBlackjackOnLeave(player);
+        // Bug (reported live): AFKSet/AFKMinSet/AFKCooldownSet were only
+        // ever cleared by !afk's own toggle-off or the max-duration
+        // auto-return timeout — a player who goes AFK and then simply
+        // disconnects (closes the tab, gets kicked, etc.) left a permanent
+        // phantom entry in AFKSet until that timeout eventually fired (up
+        // to maxAFKDurationVip minutes later). Reported as "if 1 person is
+        // AFK, nobody else can become AFK" — AFKSet.size >= maxAFKCount
+        // was already true from stale entries stacked up during testing,
+        // long before a 5th GENUINELY-AFK player ever showed up.
+        AFKSet.delete(player.id);
+        AFKMinSet.delete(player.id);
+        AFKCooldownSet.delete(player.id);
         updateTeams();
         discordBot.updateRoomStatus();
         checkOverflowPassword();

@@ -255,6 +255,7 @@ const {
     inventoryCommand,
     equipCommand,
     addCoinsCommand,
+    giftCoinsCommand,
     balanceCommand,
 } = createEconomy({
     room,
@@ -886,7 +887,7 @@ const createBettingSystem = require('../core/betting');
 const {
     betCommand,
     announceOdds,
-    refundBetIfSubbedIn,
+    refundIfSubbedIn: refundBetIfSubbedIn,
     resolveBets,
 } = createBettingSystem({
     room,
@@ -1433,6 +1434,7 @@ const commands = createCommands({
     inventoryCommand,
     equipCommand,
     addCoinsCommand,
+    giftCoinsCommand,
     balanceCommand,
     clubCommand,
     clubChatCommand,
@@ -1468,6 +1470,8 @@ Object.assign(room, wrapEventHandlers(createMovementEvents({
     authArray,
     db,
     AFKSet,
+    AFKMinSet,
+    AFKCooldownSet,
     HaxNotification,
     Role,
     State,

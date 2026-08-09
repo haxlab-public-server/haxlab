@@ -809,6 +809,63 @@ module.exports = function createEconomy({
         );
     }
 
+    // Player-facing (unlike !addcoins, which mints out of nowhere and stays
+    // a MASTER-only testing tool) — any admin can give another player
+    // coins, but out of their OWN balance: db.spendCoins on the admin
+    // first, db.addCoins on the target only once that actually succeeds.
+    // Amount must be positive — allowing negative would let spendCoins's
+    // "balance < amount" check flip into effectively PAYING the admin from
+    // the target instead of gifting them, since a negative amount is
+    // always "less" than any real balance.
+    async function giftCoinsCommand(player, message) {
+        const msgArray = message.split(/ +/).slice(1);
+        const target = msgArray[0];
+        const amount = parseInt(msgArray[1]);
+        if (!target || !Number.isInteger(amount) || amount <= 0) {
+            room.sendAnnouncement(`Использование: !gift <#id|auth> <количество>. Количество монет — положительное число, спишется с вашего баланса.`, player.id, errorColor, 'bold', HaxNotification.CHAT);
+            return;
+        }
+
+        let auth, targetName;
+        if (target[0] === '#') {
+            const id = parseInt(target.substring(1));
+            const targetPlayer = state.playersAll.find((p) => p.id === id);
+            if (!targetPlayer) {
+                room.sendAnnouncement(`Игрока с таким ID нет в комнате.`, player.id, errorColor, 'bold', HaxNotification.CHAT);
+                return;
+            }
+            auth = getAuth(targetPlayer);
+            targetName = targetPlayer.name;
+        } else {
+            auth = target;
+            const targetPlayer = state.playersAll.find((p) => getAuth(p) === auth);
+            targetName = targetPlayer ? targetPlayer.name : auth;
+        }
+
+        const adminAuth = getAuth(player);
+        if (auth === adminAuth) {
+            room.sendAnnouncement(`Нельзя подарить монеты самому себе.`, player.id, errorColor, 'bold', HaxNotification.CHAT);
+            return;
+        }
+
+        const charged = await db.spendCoins(adminAuth, player.name, amount);
+        if (!charged) {
+            const balance = await db.getBalance(adminAuth);
+            room.sendAnnouncement(`Недостаточно монет. У вас ${formatCoins(balance)}, нужно ${formatCoins(amount)}.`, player.id, errorColor, 'bold', HaxNotification.CHAT);
+            return;
+        }
+        await db.addCoins(auth, targetName, amount);
+        const newAdminBalance = await db.getBalance(adminAuth);
+        room.sendAnnouncement(
+            `🎁 ${player.name} подарил ${targetName} ${formatCoins(amount)} !`,
+            null,
+            announcementColor,
+            'bold',
+            HaxNotification.CHAT
+        );
+        room.sendAnnouncement(`Ваш баланс: ${formatCoins(newAdminBalance)}`, player.id, announcementColor, 'bold', HaxNotification.CHAT);
+    }
+
     return {
         awardMatchCoins,
         tickPlaytime,
@@ -821,6 +878,7 @@ module.exports = function createEconomy({
         inventoryCommand,
         equipCommand,
         addCoinsCommand,
+        giftCoinsCommand,
         balanceCommand,
     };
 };

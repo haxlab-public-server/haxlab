@@ -15,6 +15,12 @@
 const path = require('path');
 
 const calls = [];
+// Shared with the synthetic onPlayerJoin/onPlayerTeamChange/onPlayerLeave
+// round-trip below — getPlayerList() needs to actually reflect whatever
+// that round-trip does (join, then a team move) for updateTeams() to see a
+// consistent state.playersAll/teamRed/teamSpec, the same way a real
+// room.setPlayerTeam() call would update what a real HaxBall room reports.
+const stubPlayers = [];
 function makeRoom() {
     return new Proxy(
         {},
@@ -24,7 +30,7 @@ function makeRoom() {
                 return (...args) => {
                     calls.push(String(prop));
                     if (prop === 'getScores') return { red: 0, blue: 0, time: 0, timeLimit: 0 };
-                    if (prop === 'getPlayerList') return [];
+                    if (prop === 'getPlayerList') return stubPlayers;
                     if (prop === 'getDiscProperties' || prop === 'getPlayerDiscProperties')
                         return { radius: 10, x: 0, y: 0, xspeed: 0, yspeed: 0 };
                     return undefined;
@@ -44,7 +50,11 @@ function makeRoom() {
 // api/database.js nor node:child_process are touched here at all anymore —
 // those live entirely in src/index.js (the orchestrator) now, not in the
 // bundle this check exercises.
-global.HBInit = () => makeRoom();
+let capturedRoom = null;
+global.HBInit = () => {
+    capturedRoom = makeRoom();
+    return capturedRoom;
+};
 const dbCalls = [];
 global.window = {
     __secrets: { token: '', roomPassword: '' },
@@ -55,6 +65,12 @@ global.window = {
         // method only ever runs later, from an actual command/event.
         if (method === 'getAdmins' || method === 'getVips') return Promise.resolve([]);
         if (method === 'getMasters') return Promise.resolve([]);
+        // getEquipped is chained straight into `.form`/`.avatar` reads
+        // (economy.js's determineSideForm, applyTeamForms) — only reached
+        // once the synthetic onPlayerTeamChange round-trip below actually
+        // runs, but null would throw there the same way getAll*/
+        // getTopPlayers would during init.
+        if (method === 'getEquipped') return Promise.resolve({});
         // Every other getAll*/getTopPlayers call is immediately chained
         // (.reduce/.map/new Set()) during init — null would throw before
         // this check ever gets a chance to catch a real wiring fault.
@@ -104,5 +120,59 @@ ready.then((errorOrResult) => {
         process.exit(1);
     }
     console.log(`all ${Object.keys(commands).length} registered commands have a real .function`);
-    process.exit(0);
+
+    // Structural check the smoke tests ALSO can't do: they exercise
+    // events/movement.js, events/activity.js etc. in isolation with
+    // hand-written mocks for every dependency the factory declares — which
+    // proves the module works IF wired correctly, but says nothing about
+    // whether entry.js's own destructuring actually lines up with what the
+    // dependency (e.g. core/betting.js) really exports. A plain name
+    // mismatch there (destructuring a property that doesn't exist) yields
+    // `undefined`, not a crash, at wiring time — the resulting "X is not a
+    // function" only ever throws later, inside a real event, where
+    // safeEventHandlers.js's try/catch silently swallows it into a
+    // console.error and the rest of that handler's body (here,
+    // handlePlayersTeamChange — which is what actually stops captain
+    // picking at teamSize and starts the pre-match swap phase) never runs.
+    // Reported live exactly this way: "8+ players forces everyone into
+    // picking, matches start 5v5/7v7, captains can't substitute" — traced
+    // to entry.js destructuring core/betting.js's `refundIfSubbedIn` as
+    // `refundBetIfSubbedIn` with no rename, silently wiring `undefined`
+    // into every single onPlayerTeamChange call. Firing a real join / team
+    // change / leave round-trip here, through the REAL entry.js wiring
+    // (not a mock), is the only way to catch that class of bug before it
+    // reaches production.
+    const { Team } = require(path.join(__dirname, '..', 'src', 'core', 'constants'));
+    const wiringErrors = [];
+    const originalConsoleError = console.error;
+    console.error = (...args) => {
+        wiringErrors.push(args.map(String).join(' '));
+        originalConsoleError(...args);
+    };
+    const fakePlayer = { id: 999001, name: 'LoadCheckProbe', auth: 'LOAD_CHECK_PROBE_AUTH', conn: 'LOAD_CHECK_PROBE_CONN', team: Team.SPECTATORS, admin: false };
+    stubPlayers.push(fakePlayer);
+    (async () => {
+        await capturedRoom.onPlayerJoin(fakePlayer);
+        fakePlayer.team = Team.RED;
+        capturedRoom.onPlayerTeamChange(fakePlayer, null);
+        fakePlayer.team = Team.SPECTATORS;
+        capturedRoom.onPlayerTeamChange(fakePlayer, null);
+        capturedRoom.onPlayerLeave(fakePlayer);
+        // Every step above is synchronous or fire-and-forget (no handler
+        // here awaits anything the caller can observe) — one microtask
+        // tick is enough for every .catch()-chained async call any of them
+        // kicked off (refundBetIfSubbedIn, applyTeamForms, etc.) to have
+        // actually run and reported any wiring error.
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        console.error = originalConsoleError;
+
+        const brokenWiring = wiringErrors.filter((msg) => /is not a function/i.test(msg));
+        if (brokenWiring.length > 0) {
+            console.log('INITIALISATION FAILED: a real join/team-change/leave round-trip hit an undefined dependency:');
+            console.log('  ' + brokenWiring.join('\n  '));
+            process.exit(1);
+        }
+        console.log('a real join/team-change/leave round-trip produced no "is not a function" wiring errors');
+        process.exit(0);
+    })();
 });

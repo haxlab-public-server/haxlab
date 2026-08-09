@@ -247,6 +247,6 @@ module.exports = [
     { id: 'smoke-purple', type: 'goalAnimation', name: 'Дым (фиолетовый)', price: 50000, smokeColor: 'purple', hidden: true },
     { id: 'smoke-white', type: 'goalAnimation', name: 'Дым (белый)', price: 50000, smokeColor: 'white', hidden: true },
 
-    { id: 'fireworks', type: 'goalAnimation', name: 'Фейерверк', price: 50000, fireworks: true },
-    { id: 'blackhole', type: 'goalAnimation', name: 'Черная дыра', price: 50000, blackhole: true },
+    { id: 'fireworks', type: 'goalAnimation', name: 'Фейерверк', price: 40000, fireworks: true },
+    { id: 'blackhole', type: 'goalAnimation', name: 'Черная дыра', price: 75000, blackhole: true },
 ];

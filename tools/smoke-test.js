@@ -2749,8 +2749,11 @@ console.log('\n--- events/movement.js: auth-bans block a join regardless of conn
     const noop = () => {};
     const ghostKicks = [];
 
+    const AFKSetLocal = new Set();
+    const AFKMinSetLocal = new Set();
+    const AFKCooldownSetLocal = new Set();
     const movement = require(path.join(CORE, 'events', 'movement'))({
-        room, state, authArray, db, AFKSet: new Set(), HaxNotification, Role: { MASTER: 3 }, State: {}, Team,
+        room, state, authArray, db, AFKSet: AFKSetLocal, AFKMinSet: AFKMinSetLocal, AFKCooldownSet: AFKCooldownSetLocal, HaxNotification, Role: { MASTER: 3 }, State: {}, Team,
         announcementColor: 1, debugMode: false, disableBans: false, discordBot,
         errorColor: 2, infoColor: 5, masterList: [], maxPlayers: 8, welcomeColor: 6,
         getDate: () => 'DATE', checkCaptainLeave: noop, checkOverflowPassword: noop, getRole: () => 0,
@@ -2802,9 +2805,23 @@ console.log('\n--- events/movement.js: auth-bans block a join regardless of conn
     await movement.onPlayerJoin({ id: 12, name: 'Genuine', auth: 'AUTH_DIFFERENT2', conn: 'CONN_DIFFERENT2' });
     check('different auth AND different conn is not treated as a duplicate', ghostKicks, []);
 
+    // Bug (reported live): a player who goes AFK and then simply
+    // disconnects left a permanent phantom entry in AFKSet — nothing ever
+    // cleared it, since !afk's own toggle-off and the max-duration
+    // auto-return timeout are the only other places that do. Stale entries
+    // stack up across repeated test cycles and permanently count toward
+    // AFKSet.size >= maxAFKCount, eventually blocking anyone new from
+    // going AFK even though nobody currently online actually is.
+    AFKSetLocal.add(8);
+    AFKMinSetLocal.add(8);
+    AFKCooldownSetLocal.add(8);
+
     discordLogs.length = 0;
     sent.length = 0;
     movement.onPlayerLeave({ id: 8, name: 'Newbie' });
+    check('leaving clears the departed player from AFKSet', AFKSetLocal.has(8), false);
+    check('...AFKMinSet too', AFKMinSetLocal.has(8), false);
+    check('...and AFKCooldownSet', AFKCooldownSetLocal.has(8), false);
     setTimeout(() => {
         check('leave broadcasts the player\'s auth in small font', sent[0], { msg: 'Newbie [AUTH_NEW]', id: null, style: 'small' });
         check('leave also logs to discord', discordLogs.length, 1);
@@ -6635,6 +6652,56 @@ console.log('\n--- core/economy.js: coin awards, playtime ticker, shop/inventory
 
     await economy.addCoinsCommand(master, '!addcoins #1 -100');
     check('!addcoins accepts a negative amount to deduct', await db.getBalance('AUTH_RED1'), balanceBeforeAddCoins + 400);
+
+    // giftCoinsCommand: player-facing, ADMIN_TEMP+ (gated at the dispatch
+    // layer, same as every other command) — unlike !addcoins, it moves
+    // real coins OUT of the admin's own balance rather than minting.
+    authArray[25] = ['AUTH_GIFT_ADMIN'];
+    const giftAdmin = { id: 25, name: 'GiftAdmin' };
+    state.playersAll.push(giftAdmin);
+
+    sentLocal.length = 0;
+    await economy.giftCoinsCommand(giftAdmin, '!gift');
+    check('!gift with no args shows usage', /Использование/.test(sentLocal[0].msg), true);
+
+    sentLocal.length = 0;
+    await economy.giftCoinsCommand(giftAdmin, '!gift #1 notanumber');
+    check('!gift with a non-numeric amount shows usage', /Использование/.test(sentLocal[0].msg), true);
+
+    sentLocal.length = 0;
+    await economy.giftCoinsCommand(giftAdmin, '!gift #1 -100');
+    check('!gift rejects a negative amount (unlike !addcoins) — it would flip spendCoins into paying the ADMIN instead', /Использование/.test(sentLocal[0].msg), true);
+
+    sentLocal.length = 0;
+    await economy.giftCoinsCommand(giftAdmin, '!gift #1 0');
+    check('!gift rejects a zero amount too', /Использование/.test(sentLocal[0].msg), true);
+
+    sentLocal.length = 0;
+    await economy.giftCoinsCommand(giftAdmin, '!gift #999 100');
+    check('!gift #<id> not in the room reports so', /нет в комнате/.test(sentLocal[0].msg), true);
+
+    sentLocal.length = 0;
+    await economy.giftCoinsCommand(giftAdmin, '!gift #25 100');
+    check('gifting yourself is rejected', /самому себе/.test(sentLocal[0].msg), true);
+
+    sentLocal.length = 0;
+    await economy.giftCoinsCommand(giftAdmin, '!gift #1 100');
+    check('an admin with no balance of their own cannot gift', /Недостаточно монет/.test(sentLocal[0].msg), true);
+    check('a rejected gift does not touch the target\'s balance', await db.getBalance('AUTH_RED1'), balanceBeforeAddCoins + 400);
+
+    await db.addCoins('AUTH_GIFT_ADMIN', 'GiftAdmin', 1000);
+    const targetBalanceBeforeGift = await db.getBalance('AUTH_RED1');
+    sentLocal.length = 0;
+    await economy.giftCoinsCommand(giftAdmin, '!gift #1 300');
+    check('the gift is deducted from the ADMIN\'s own balance, not minted', await db.getBalance('AUTH_GIFT_ADMIN'), 700);
+    check('...and credited to the target', await db.getBalance('AUTH_RED1'), targetBalanceBeforeGift + 300);
+    check('the gift is broadcast to the whole room (id: null)', sentLocal.some((s) => s.id === null && /GiftAdmin подарил Red1/.test(s.msg) && /300/.test(s.msg)), true);
+    check('the admin also gets a private balance confirmation', sentLocal.some((s) => s.id === 25 && /700/.test(s.msg)), true);
+
+    sentLocal.length = 0;
+    await economy.giftCoinsCommand(giftAdmin, '!gift AUTH_OFFLINE_GIFT 200');
+    check('!gift <raw auth> works for someone not in the room', await db.getBalance('AUTH_OFFLINE_GIFT'), 200);
+    check('the admin was charged for the offline gift too', await db.getBalance('AUTH_GIFT_ADMIN'), 500);
 })();
 
 console.log('\n--- core/shopItems.js: the real small/big catalog entries match the requested 10-level/±1/1000-per-level scale ---');
@@ -7611,6 +7678,7 @@ console.log('\n--- core/commands/blackjack.js + minigames.js: pvp mode (no split
     await runPromise;
     check('a mid-game forfeit refunds the challenger\'s stake — net balance unchanged', await db.getBalance('AUTH_CHALLENGER'), challengerBalanceBeforeForfeit);
     check('...and the target\'s stake too, same push handling as an actual on-the-table draw', await db.getBalance('AUTH_TARGET'), targetBalanceBeforeForfeit);
+    check('a push (draw) is broadcast to the whole room (id: null), same visibility as a win — not left private to just the two players', sentLocal.some((s) => s.id === null && /вничью/.test(s.msg)), true);
 
     db.close();
 })();

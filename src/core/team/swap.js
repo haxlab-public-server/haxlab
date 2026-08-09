@@ -86,12 +86,15 @@ module.exports = function createSwapHelpers({
             'bold',
             HaxNotification.CHAT
         );
+        // Temporarily disabled along with !bet itself (see commands.js) —
+        // no point announcing odds nobody can act on. announceOdds is
+        // still passed in and still safe to call; just not called for now.
         // Fire-and-forget: reflects whatever the roster looks like RIGHT
         // NOW (including any swap the previous captain's turn just made),
         // same non-blocking reasoning as economy.js's applyTeamForms calls
         // elsewhere in this file family. Fires once per captain turn
         // (blue, then red) — see core/betting.js for the actual odds math.
-        announceOdds().catch((err) => console.error('[betting] announceOdds failed:', err));
+        // announceOdds().catch((err) => console.error('[betting] announceOdds failed:', err));
         room.sendAnnouncement(
             `🔄 Капитан ${teamName(team)} (${captain.name}), у вас есть ${swapTime}s, чтобы поменять одного игрока своей команды. Если хотите поменять игрока, напишите его номер:`,
             captain.id,

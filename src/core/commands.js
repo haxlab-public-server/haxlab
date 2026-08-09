@@ -43,6 +43,7 @@ module.exports = function createCommands({
     inventoryCommand,
     equipCommand,
     addCoinsCommand,
+    giftCoinsCommand,
     balanceCommand,
     clubCommand,
     clubChatCommand,
@@ -505,6 +506,17 @@ module.exports = function createCommands({
     Пример: !addcoins #3 500 начислит 500 монет игроку с id 3.`,
         function: addCoinsCommand,
     },
+    gift: {
+        aliases: ['подарить'],
+        roles: Role.ADMIN_TEMP,
+        desc: `
+        Эта команда дарит игроку монеты — они списываются с ВАШЕГО баланса, а не создаются из ниоткуда (в отличие от !addcoins).
+    Она принимает 2 аргумента:
+    Аргумент 1: #<id> игрока, который сейчас в комнате, ИЛИ его <auth> напрямую.
+    Аргумент 2: <количество> сколько монет подарить — только положительное число.
+    Пример: !gift #3 500 подарит 500 монет игроку с id 3 из вашего баланса.`,
+        function: giftCoinsCommand,
+    },
     club: {
         aliases: [],
         roles: Role.PLAYER,
@@ -602,19 +614,25 @@ module.exports = function createCommands({
         В активной игре блэкджек против бота (!minigames blackjack/bj) разделяет пару одинаковых карт на две руки (требует вторую такую же ставку).`,
         function: splitCommand,
     },
-    bet: {
-        aliases: [],
-        roles: Role.PLAYER,
-        desc: `
-        Эта команда позволяет зрителям поставить монеты на исход следующего матча. Доступна только во время замен капитанов перед началом матча (~10 секунд).
-    Она принимает 2 аргумента:
-    Аргумент 1: <команда> где <команда> одна из: red/r (красные), blue/b (синие).
-    Аргумент 2: <ставка> сколько монет поставить, минимум 10, верхнего лимита нет.
-    Коэффициент считается по среднему винрейту команды — чем он выше, тем ниже коэффициент.
-    Если поставивший зритель будет выставлен капитаном на матч, ставка автоматически вернется.
-    Пример: !bet red 100 поставит 100 монет на красную команду.`,
-        function: betCommand,
-    },
+    // Temporarily disabled (betting feature turned off for now) — not
+    // registered, so "!bet" is simply an unknown command. betCommand
+    // itself, and the rest of core/betting.js's wiring in entry.js
+    // (announceOdds/refundIfSubbedIn/resolveBets), are left intact and
+    // working underneath — this is the only line that actually exposes
+    // the feature to players. Uncomment to re-enable.
+    // bet: {
+    //     aliases: [],
+    //     roles: Role.PLAYER,
+    //     desc: `
+    //     Эта команда позволяет зрителям поставить монеты на исход следующего матча. Доступна только во время замен капитанов перед началом матча (~10 секунд).
+    // Она принимает 2 аргумента:
+    // Аргумент 1: <команда> где <команда> одна из: red/r (красные), blue/b (синие).
+    // Аргумент 2: <ставка> сколько монет поставить, минимум 10, верхнего лимита нет.
+    // Коэффициент считается по среднему винрейту команды — чем он выше, тем ниже коэффициент.
+    // Если поставивший зритель будет выставлен капитаном на матч, ставка автоматически вернется.
+    // Пример: !bet red 100 поставит 100 монет на красную команду.`,
+    //     function: betCommand,
+    // },
 
     };
 };
