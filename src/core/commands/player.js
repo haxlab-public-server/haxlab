@@ -392,10 +392,34 @@ module.exports = function createPlayerCommands({
                     // admin AFK is meant to be indefinite, not just exempt
                     // from the min/cooldown abuse limits.
                     if (!player.admin) {
+                        // Captured once, right when THIS session starts —
+                        // AFKSet's own value already IS this session's start
+                        // timestamp, so it doubles as a session token for
+                        // the three timers below with nothing extra to
+                        // track.
+                        //
+                        // Bug (reported live): exiting AFK and going AFK
+                        // again within the same minAFKDuration/AFKCooldown/
+                        // max-duration window left all three of session #1's
+                        // timers still pending — their handles were never
+                        // stored anywhere, so nothing ever cancelled them.
+                        // One firing mid-way through session #2 (a
+                        // DIFFERENT AFKSet timestamp by then) would act on
+                        // session #2 using session #1's now-irrelevant
+                        // schedule — reported as "kicked out of AFK after
+                        // only 3 minutes" despite the max duration being 15.
+                        // Each callback below now skips itself whenever a
+                        // DIFFERENT session is the one currently active; if
+                        // there's no active session at all (a normal exit
+                        // already happened), the min/cooldown cleanups still
+                        // run as before — only the max-duration kick is ALSO
+                        // guarded by "is there an active session at all".
+                        const afkSessionStartedAt = AFKSet.get(player.id);
                         AFKMinSet.add(player.id);
                         AFKCooldownSet.add(player.id);
                         setTimeout(
                             (id) => {
+                                if (AFKSet.has(id) && AFKSet.get(id) !== afkSessionStartedAt) return;
                                 AFKMinSet.delete(id);
                             },
                             minAFKDuration * 60 * 1000,
@@ -413,8 +437,9 @@ module.exports = function createPlayerCommands({
                                 // may have already toggled AFK off themselves
                                 // (!afk) before this fires — that path has
                                 // already announced/rebalanced, nothing to
-                                // redo here.
-                                if (!AFKSet.has(id)) return;
+                                // redo here. Also skips if a NEWER session is
+                                // the one currently active (see above).
+                                if (!AFKSet.has(id) || AFKSet.get(id) !== afkSessionStartedAt) return;
                                 AFKSet.delete(id);
                                 const p = room.getPlayer(id);
                                 if (p != null) {
@@ -441,6 +466,7 @@ module.exports = function createPlayerCommands({
                         );
                         setTimeout(
                             (id) => {
+                                if (AFKSet.has(id) && AFKSet.get(id) !== afkSessionStartedAt) return;
                                 AFKCooldownSet.delete(id);
                             },
                             AFKCooldown * 60 * 1000,

@@ -2656,6 +2656,80 @@ console.log('\n--- events/activity.js: bare "т"/"ч" also trigger team chat, sa
     check('a word merely STARTING with "ч" (not the bare letter alone) is ordinary chat', teamChatCalls, []);
 }
 
+console.log('\n--- events/activity.js: a muted player can\'t route around it through team chat or "@@<name>" private chat ---');
+{
+    // Bug (reported live): "t"/"т"/"ч" and "@@<name>" both dispatched to
+    // teamChat/playerChat (chat.js) BEFORE the mute check further down ever
+    // ran — and neither of those two functions checks mute themselves — so
+    // a muted player could still be heard by anyone on their team, or by
+    // name-targeting a specific player directly.
+    const Team = { RED: 1, BLUE: 2, SPECTATORS: 0 };
+    const HaxNotificationMock = { CHAT: 1 };
+    const sentLocal = [];
+    const teamChatCalls = [];
+    const playerChatCalls = [];
+    const jjCalls = [];
+    const authArrayLocal = []; authArrayLocal[1] = ['AUTH_MUTED']; authArrayLocal[2] = ['AUTH_CLEAN']; authArrayLocal[3] = ['AUTH_MUTED_ADMIN'];
+    const stateLocal = {
+        gameState: 0, players: [], chooseMode: false, swapMode: false, slowMode: 0,
+        clubMembers: [], clubs: [], equippedTrophies: {}, playersAll: [], hiddenCustomColorsSet: new Set(),
+    };
+    const activity = require(path.join(CORE, 'events', 'activity'))({
+        room: { sendAnnouncement: (msg, id, color, style) => sentLocal.push({ msg, id, style }) }, state: stateLocal, authArray: authArrayLocal, BallTouch: class {}, HaxNotification: HaxNotificationMock,
+        Role: {}, Situation: {}, State: {}, Team, Trophies: {},
+        adminChatColor: '', masterChatColor: '', vipChatColor: '',
+        commands: {}, discordBot: { sendLog: () => {} }, errorColor: 2,
+        hiddenAdminsSet: new Set(), silencedAuths: new Map(),
+        // Only AUTH_MUTED (and AUTH_MUTED_ADMIN, to prove the admin
+        // exemption still applies even to a muteArray entry) are muted.
+        muteArray: { getByAuth: (auth) => (auth === 'AUTH_MUTED' || auth === 'AUTH_MUTED_ADMIN' ? { auth } : null) },
+        MutePlayer: class { constructor() {} setDuration() {} },
+        checkGoalKickTouch: () => null, chooseModeFunction: () => false, formatTrophyLabel: () => '', resolveTrophyRank: () => null,
+        getCommand: () => false, getDate: () => 'DATE', getGoalGame: () => null,
+        getPlayerComp: () => null, getRole: () => 0,
+        handleVoteMessage: () => false, handleVoteBanMessage: () => false,
+        jjCommand: (player, message) => { jjCalls.push(player.id); return true; },
+        playerChat: (player, message) => playerChatCalls.push({ id: player.id, message }),
+        slowModeFunction: () => false,
+        teamChat: (player, message) => teamChatCalls.push({ id: player.id, message }),
+    });
+    const muted = { id: 1, name: 'Muted', team: Team.SPECTATORS, admin: false };
+    const clean = { id: 2, name: 'Clean', team: Team.SPECTATORS, admin: false };
+    const mutedAdmin = { id: 3, name: 'MutedAdmin', team: Team.SPECTATORS, admin: true };
+
+    sentLocal.length = 0; teamChatCalls.length = 0;
+    activity.onPlayerChat(muted, 't привет команде');
+    check('a muted player\'s "t" team-chat never reaches teamChat', teamChatCalls, []);
+    check('...they get told they\'re muted instead', sentLocal.some((s) => s.id === 1 && /замучены/.test(s.msg)), true);
+
+    sentLocal.length = 0; teamChatCalls.length = 0;
+    activity.onPlayerChat(clean, 't привет команде');
+    check('an un-muted player\'s "t" team-chat still works normally', teamChatCalls, [{ id: 2, message: 't привет команде' }]);
+
+    sentLocal.length = 0; playerChatCalls.length = 0;
+    activity.onPlayerChat(muted, '@@Someone привет лично');
+    check('a muted player\'s "@@<name>" private chat never reaches playerChat either', playerChatCalls, []);
+    check('...they get told they\'re muted instead, same as team chat', sentLocal.some((s) => s.id === 1 && /замучены/.test(s.msg)), true);
+
+    sentLocal.length = 0; playerChatCalls.length = 0;
+    activity.onPlayerChat(clean, '@@Someone привет лично');
+    check('an un-muted player\'s "@@<name>" private chat still works normally', playerChatCalls, [{ id: 2, message: '@@Someone привет лично' }]);
+
+    // Admin exemption (matches checkSpamFlood's own admin exemption, and
+    // muteCommand's own "admins can't be muted" policy) — proven even
+    // against a muteArray entry that WOULD otherwise match, same as the
+    // original bottom-of-function mute check always did.
+    sentLocal.length = 0; teamChatCalls.length = 0;
+    activity.onPlayerChat(mutedAdmin, 't админ всё равно пишет');
+    check('an admin is exempt from the mute check even if muteArray somehow has an entry for them', teamChatCalls, [{ id: 3, message: 't админ всё равно пишет' }]);
+
+    // Mute is about SPEECH, not game-mechanic responses — jj (AFK exit)
+    // must still work for a muted player, unaffected by any of the above.
+    sentLocal.length = 0; jjCalls.length = 0;
+    activity.onPlayerChat(muted, 'jj');
+    check('a muted player can still use "jj" to exit AFK — mute never reaches that far', jjCalls, [1]);
+}
+
 console.log('\n--- events/activity.js + commands/player.js: bare "jj" exits AFK one-directionally, never enters it ---');
 {
     const Team = { RED: 1, BLUE: 2, SPECTATORS: 0 };
@@ -2783,22 +2857,24 @@ console.log('\n--- events/movement.js: auth-bans block a join regardless of conn
     check('a clean auth is not kicked on join', roomCalls.some((c) => c.startsWith('kickPlayer')), false);
     check('join broadcasts the player\'s auth in small font', sent[0], { msg: 'Newbie [AUTH_NEW]', id: null, style: 'small' });
 
-    // Duplicate detection — matched on EITHER auth or conn (see
-    // movement.js's onPlayerJoin): auth alone can be reset/regenerated,
-    // conn (the actual network connection's own fingerprint) is much
-    // harder to spoof, so multi-accounting that only changes auth no
-    // longer slips past.
+    // Duplicate detection — auth-only. Briefly matched on EITHER auth or
+    // conn (conn being a fingerprint of the actual network connection, much
+    // harder to spoof than auth) — reverted: reported live as a false-
+    // positive machine gun for node.haxball (a VPN-bypass proxy) users,
+    // where genuinely different players/locations can end up sharing the
+    // same conn through that shared infrastructure and getting ghost-
+    // kicked for each other. See movement.js's onPlayerJoin.
     authArray[9] = ['AUTH_EXISTING', 'CONN_EXISTING'];
 
     state.playersAll = [{ id: 9, name: 'Existing' }];
     ghostKicks.length = 0;
     await movement.onPlayerJoin({ id: 10, name: 'SameAuth', auth: 'AUTH_EXISTING', conn: 'CONN_DIFFERENT' });
-    check('same auth, different conn is still caught as a duplicate (existing behavior)', ghostKicks, [{ oldId: 9, newId: 10 }]);
+    check('same auth, different conn is still caught as a duplicate', ghostKicks, [{ oldId: 9, newId: 10 }]);
 
     state.playersAll = [{ id: 9, name: 'Existing' }];
     ghostKicks.length = 0;
     await movement.onPlayerJoin({ id: 11, name: 'SameConn', auth: 'AUTH_DIFFERENT', conn: 'CONN_EXISTING' });
-    check('different auth but the SAME conn is now also caught as a duplicate', ghostKicks, [{ oldId: 9, newId: 11 }]);
+    check('different auth but the SAME conn is no longer treated as a duplicate (reverted)', ghostKicks, []);
 
     state.playersAll = [{ id: 9, name: 'Existing' }];
     ghostKicks.length = 0;
@@ -5347,6 +5423,69 @@ console.log('\n--- commands/player.js: !afks shows minutes-in-AFK, and the maxAF
     check('no bogus auto-expire message fires for a player who already left AFK manually', sentLocal.some((s) => /вышел из AFK|слишком долго/.test(s.msg)), false);
 })();
 
+console.log('\n--- commands/player.js: a stale timer from an EARLIER AFK session must not cut a later one short ---');
+// Bug (reported live): "иногда людей из афк выкидывает через 3 минуты, хотя
+// раньше они сидели полноценные 15 минут" — exiting AFK and going AFK again
+// left session #1's own min/cooldown/max-duration timers still pending
+// (their handles were never stored anywhere to cancel them), armed for
+// session #1's start time. One of them firing mid-way through session #2
+// acted on #2 using #1's now-irrelevant schedule — most visibly, the
+// max-duration timer kicking someone out well before THEIR current
+// session's own duration had actually elapsed. Real, deliberately tiny
+// durations below (this is exactly the kind of interaction a fully mocked
+// timer can't prove) — needs ~2.9s of real waiting in total, the longest
+// single chain in this file, hence the tally window at the very bottom
+// being sized to fit it.
+(async () => {
+    const Team = { RED: 1, BLUE: 2, SPECTATORS: 0 };
+    const State = { PLAY: 0, PAUSE: 1, STOP: 2 };
+    const HaxNotificationMock = { CHAT: 1 };
+    const sentLocal = [];
+    const roomMock = {
+        setPlayerTeam: () => {},
+        sendAnnouncement: (msg, id) => sentLocal.push({ msg, id }),
+        getPlayer: (id) => ({ id, name: 'Restless' }),
+    };
+    const AFKSetLocal = new Map();
+    const AFKMinSetLocal = new Set();
+    const AFKCooldownSetLocal = new Set();
+    const player = require(path.join(CORE, 'commands', 'player'))({
+        room: roomMock, state: { players: [], gameState: State.PLAY }, Team, State, AFKSet: AFKSetLocal,
+        AFKMinSet: AFKMinSetLocal, AFKCooldownSet: AFKCooldownSetLocal,
+        minAFKDuration: 0.01, // 600ms
+        AFKCooldown: 0.02, // 1200ms
+        maxAFKDuration: 0.04, // 2400ms — session #1's OWN deadline, the stale one
+        maxAFKDurationVip: 0.04, maxAFKCount: 10,
+        Role: { PLAYER: 0, VIP: 1 }, getRole: () => 0,
+        announcementColor: 1, errorColor: 2, HaxNotification: HaxNotificationMock,
+        handlePlayersJoin: () => {}, handlePlayersLeave: () => {}, updateTeams: () => {},
+    });
+    const restless = { id: 7, name: 'Restless', team: Team.SPECTATORS, admin: false };
+
+    player.afkCommand(restless, '!afk'); // session #1 starts at T=0
+
+    await new Promise((resolve) => setTimeout(resolve, 700)); // past the 600ms min-lock
+    player.afkCommand(restless, '!afk'); // manual exit, ~T=700ms
+    check('session #1 exited manually, well before its own 2400ms max duration', AFKSetLocal.has(7), false);
+
+    await new Promise((resolve) => setTimeout(resolve, 600)); // ~T=1300ms, past the 1200ms cooldown
+    sentLocal.length = 0;
+    player.afkCommand(restless, '!afk'); // session #2 starts at ~T=1300ms
+    check('session #2 was allowed to start (cooldown had cleared)', AFKSetLocal.has(7), true);
+
+    // ~T=2400ms is session #1's OWN stale max-duration deadline — session #2
+    // has only been running ~1100ms of its own 2400ms budget at that point.
+    await new Promise((resolve) => setTimeout(resolve, 1200)); // ~T=2500ms
+    check('session #1\'s stale timer did NOT cut session #2 short — still AFK well past session #1\'s own deadline', AFKSetLocal.has(7), true);
+    check('...and no bogus "вышел из AFK"/expiry message fired for it either', sentLocal.some((s) => /вышел из AFK|слишком долго/.test(s.msg)), false);
+
+    // Session #2's OWN deadline is ~T=1300+2400=3700ms — confirms the
+    // mechanism still works normally for the CURRENT session, this isn't
+    // just permanently broken in the other direction.
+    await new Promise((resolve) => setTimeout(resolve, 1300)); // ~T=3800ms
+    check('session #2 eventually DOES auto-return, at its own correct (later) deadline', AFKSetLocal.has(7), false);
+})();
+
 console.log('\n--- events/misc.js: nobody keeps an admin badge unless they are MASTER/ADMIN_PERM ---');
 {
     const Role = { PLAYER: 0, VIP: 1, ADMIN_TEMP: 2, ADMIN_PERM: 3, MASTER: 4 };
@@ -7690,14 +7829,18 @@ console.log('\n--- core/commands/blackjack.js + minigames.js: pvp mode (no split
 // ticks, the handlePlayersStop regression runs four 350ms waits back to
 // back (~1400ms), and the two 50-trial randomButton() regressions each
 // chain up to 50 * 50ms = 2500ms worst case (though they run concurrently
-// with each other, not stacked) — the current worst case. The dedicated
-// core/fireworksAnimation.js block fully awaits one real ~1800ms cascade
-// (FRAME_COUNT x FRAME_DELAY_MS) of its own, comfortably under that same
-// worst case. core/economy.js's own smoke/fireworks tests no longer await
-// the animations to completion (fireworks' own is real-time now, too long
-// to stack 3 of them in one block) — only their first frame, which lands
-// synchronously. Give all of them time to run before tallying and exiting.
+// with each other, not stacked). The dedicated core/fireworksAnimation.js
+// block fully awaits one real ~1800ms cascade (FRAME_COUNT x
+// FRAME_DELAY_MS) of its own. core/economy.js's own smoke/fireworks tests
+// no longer await the animations to completion (fireworks' own is
+// real-time now, too long to stack 3 of them in one block) — only their
+// first frame, which lands synchronously. The current longest single
+// chain is the stale-AFK-session-timer regression (commands/player.js):
+// 700 + 600 + 1200 + 1300 = 3800ms of real, sequential waiting (it has to
+// actually straddle two AFK sessions' worth of real timers to prove one
+// doesn't cut the other short) — sized with a bit of headroom over that.
+// Give all of them time to run before tallying and exiting.
 setTimeout(() => {
     console.log(`\n${pass} passed, ${fail} failed`);
     process.exit(fail ? 1 : 0);
-}, 3600);
+}, 4200);

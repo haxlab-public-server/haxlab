@@ -86,6 +86,13 @@ module.exports = function createActivityEvents({
         );
     }
 
+    function isMuted(player) {
+        return !player.admin && muteArray.getByAuth(authArray[player.id][0]) != null;
+    }
+    function announceMuted(player) {
+        room.sendAnnouncement(`Вы замучены !`, player.id, errorColor, 'bold', HaxNotification.CHAT);
+    }
+
     function onPlayerChat(player, message) {
         checkSpamFlood(player);
         if (state.gameState !== State.STOP && player.team != Team.SPECTATORS) {
@@ -151,11 +158,28 @@ module.exports = function createActivityEvents({
         // 'т'/'ч' — same physical/muscle-memory slip as typing "t" for team
         // chat with the client's own text input still set to a Cyrillic
         // layout instead of Latin.
+        //
+        // Bug (reported live): a muted player could still be heard by
+        // routing through team chat (or the "@@<name>" private-chat
+        // trigger right below) — both dispatch here, before the mute check
+        // further down ever runs, and neither teamChat nor playerChat
+        // (chat.js) checks mute themselves. Each is now gated individually
+        // rather than moving the mute check earlier wholesale — jj/
+        // swapMode/slowMode below still fall outside it on purpose (mute is
+        // about SPEECH, not game-mechanic responses like a swap pick).
         if (['t', 'т', 'ч'].includes(msgArray[0].toLowerCase())) {
+            if (isMuted(player)) {
+                announceMuted(player);
+                return false;
+            }
             teamChat(player, message);
             return false;
         }
         if (msgArray[0].substring(0, 2) === '@@') {
+            if (isMuted(player)) {
+                announceMuted(player);
+                return false;
+            }
             playerChat(player, message);
             return false;
         }
@@ -176,14 +200,8 @@ module.exports = function createActivityEvents({
             const filter = slowModeFunction(player, message);
             if (filter) return false;
         }
-        if (!player.admin && muteArray.getByAuth(authArray[player.id][0]) != null) {
-            room.sendAnnouncement(
-                `Вы замучены !`,
-                player.id,
-                errorColor,
-                'bold',
-                HaxNotification.CHAT
-            );
+        if (isMuted(player)) {
+            announceMuted(player);
             return false;
         }
 
