@@ -41,6 +41,7 @@ module.exports = function createMovementEvents({
     updateTeams,
     refundBetIfSubbedIn,
     forfeitBlackjackOnLeave,
+    forfeitPokerOnLeave,
 }) {
     async function onPlayerJoin(player) {
         authArray[player.id] = [player.auth, player.conn];
@@ -165,6 +166,7 @@ module.exports = function createMovementEvents({
         handleLineupChangeLeave(player);
         checkCaptainLeave(player);
         forfeitBlackjackOnLeave(player);
+        forfeitPokerOnLeave(player);
         // Bug (reported live): AFKSet/AFKMinSet/AFKCooldownSet were only
         // ever cleared by !afk's own toggle-off or the max-duration
         // auto-return timeout — a player who goes AFK and then simply

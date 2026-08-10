@@ -1348,13 +1348,37 @@ const { trophiesCommand } = createTrophyCommands({
 
 const createBlackjackCommands = require('../core/commands/blackjack');
 const {
-    startBlackjackBotGame,
     runPvpBlackjack,
     hitCommand,
     standCommand,
-    splitCommand,
     forfeitOnLeave: forfeitBlackjackOnLeave,
 } = createBlackjackCommands({
+    room,
+    state,
+    db,
+    announcementColor,
+    errorColor,
+    successColor,
+    HaxNotification,
+    formatCoins,
+    getRandomInt,
+});
+
+const createPokerCommands = require('../core/commands/poker');
+const {
+    runPokerPvp,
+    // Renamed on the way out — core/betting.js's own (currently disabled,
+    // see commands.js) spectator match-betting feature already claimed the
+    // plain `betCommand` name earlier in this file. Only ONE of the two
+    // can ever actually be registered as "!bet" at a time (see
+    // commands.js's own commented-out `bet:` entry) — poker's is the live
+    // one below.
+    betCommand: pokerBetCommand,
+    callCommand,
+    checkCommand,
+    passCommand,
+    forfeitOnLeave: forfeitPokerOnLeave,
+} = createPokerCommands({
     room,
     state,
     db,
@@ -1379,8 +1403,8 @@ const { minigamesCommand, playCommand } = createMinigameCommands({
     HaxNotification,
     formatCoins,
     getRandomInt,
-    startBlackjackBotGame,
     runPvpBlackjack,
+    runPokerPvp,
 });
 
 /* COMMANDS */
@@ -1447,8 +1471,12 @@ const commands = createCommands({
     playCommand,
     hitCommand,
     standCommand,
-    splitCommand,
-    betCommand,
+    // The live "!bet" — poker's, not core/betting.js's own disabled one
+    // (see the rename comment above pokerBetCommand's own destructure).
+    betCommand: pokerBetCommand,
+    callCommand,
+    checkCommand,
+    passCommand,
 });
 
 stadiumCommand(emptyPlayer, "!training");
@@ -1501,6 +1529,7 @@ Object.assign(room, wrapEventHandlers(createMovementEvents({
     updateTeams,
     refundBetIfSubbedIn,
     forfeitBlackjackOnLeave,
+    forfeitPokerOnLeave,
 })));
 
 /* PLAYER ACTIVITY */

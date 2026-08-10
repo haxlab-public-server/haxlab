@@ -31,8 +31,8 @@ module.exports = function createMinigameCommands({
     HaxNotification,
     formatCoins,
     getRandomInt,
-    startBlackjackBotGame,
     runPvpBlackjack,
+    runPokerPvp,
 }) {
     const INVITE_DURATION_MS = 30 * 1000;
     const CHAMBERS = 6;
@@ -104,6 +104,12 @@ module.exports = function createMinigameCommands({
         coinflip: { label: 'Монетка', run: runCoinflip },
         russianroulette: { label: 'Русская рулетка', run: runRussianRoulette },
         blackjack: { label: 'Блэкджек', run: runPvpBlackjack },
+        // Fixed asymmetric blinds, not a shared stake — customEconomy tells
+        // minigamesCommand/playCommand below to skip their own stake-
+        // parsing/charging/pot-award logic entirely and hand off 100% of
+        // the money movement to poker.js's own runPokerPvp instead (see
+        // its own file-level comment for why).
+        poker: { label: 'Покер', run: runPokerPvp, customEconomy: true },
     };
 
     // Short aliases for the GAMES keys above ("!mg cf"/"!mg rr"/"!mg bj"
@@ -111,7 +117,7 @@ module.exports = function createMinigameCommands({
     // immediately, in minigamesCommand, so pendingInvites/playCommand/GAMES
     // itself only ever see the canonical key and never need to know an
     // alias was typed at all.
-    const GAME_ALIASES = { cf: 'coinflip', rr: 'russianroulette', bj: 'blackjack' };
+    const GAME_ALIASES = { cf: 'coinflip', rr: 'russianroulette', bj: 'blackjack', покер: 'poker' };
     function resolveGameKey(input) {
         return GAME_ALIASES[input] ?? input;
     }
@@ -132,7 +138,7 @@ module.exports = function createMinigameCommands({
         const gameKey = resolveGameKey((msgArray[0] ?? '').toLowerCase());
         const game = GAMES[gameKey];
         if (!game) {
-            announceError(player, `Использование: !minigames <coinflip(cf)|russianroulette(rr)|blackjack(bj)> [#<id>] <ставка>. Доступно только зрителям.`);
+            announceError(player, `Использование: !minigames <coinflip(cf)|russianroulette(rr)|blackjack(bj)|poker(покер)> [#<id>] [ставка]. Доступно только зрителям.`);
             return;
         }
         if (player.team !== Team.SPECTATORS) {
@@ -142,22 +148,59 @@ module.exports = function createMinigameCommands({
         const targetToken = msgArray[1];
         const targetLooksLikeId = targetToken != null && targetToken[0] === '#';
 
-        // Blackjack alone supports a target-less form — play against the
-        // bot dealer instead of another spectator. Every other game still
-        // requires the usual #<id> challenge.
-        if (gameKey === 'blackjack' && !targetLooksLikeId) {
-            const stake = parseInt(targetToken);
-            if (!Number.isInteger(stake) || stake <= 0) {
-                announceError(player, `Использование: !minigames blackjack <ставка> — игра с ботом. Или !minigames blackjack #<id> <ставка> — игра с игроком. Пример: !minigames blackjack 100.`);
+        // Fixed asymmetric blinds (see poker.js) — no <ставка> argument at
+        // all, just a target. Balance is checked properly (both sides,
+        // against their own actual blind) once the invite is accepted, in
+        // poker.js's own setupHand — this is just enough of a check to
+        // fail fast on an obviously-broke challenger.
+        if (game.customEconomy) {
+            if (!targetLooksLikeId) {
+                announceError(player, `Использование: !minigames ${gameKey} #<id>. Пример: !minigames ${gameKey} #3.`);
+                return;
+            }
+            const targetId = parseInt(targetToken.substring(1));
+            const target = state.playersAll.find((p) => p.id === targetId);
+            if (!target) {
+                announceError(player, `Такого игрока нет в комнате.`);
+                return;
+            }
+            if (target.id === player.id) {
+                announceError(player, `Нельзя пригласить самого себя !`);
+                return;
+            }
+            if (target.team !== Team.SPECTATORS) {
+                announceError(player, `${target.name} сейчас не зритель.`);
                 return;
             }
             const auth = getAuth(player);
-            const balance = await db.getBalance(auth);
-            if (balance < stake) {
-                announceError(player, `Недостаточно монет. У вас ${formatCoins(balance)}, нужно ${formatCoins(stake)}.`);
+            if (pendingInvites.has(target.id)) {
+                announceError(player, `У ${target.name} уже есть активное приглашение — подождите.`);
                 return;
             }
-            await startBlackjackBotGame(player, auth, stake);
+            const timeoutHandle = setTimeout(() => {
+                pendingInvites.delete(target.id);
+                if (isOnline(target.id)) {
+                    room.sendAnnouncement(`⌛ Приглашение от ${player.name} истекло.`, target.id, errorColor, 'bold', HaxNotification.CHAT);
+                }
+                if (isOnline(player.id)) {
+                    room.sendAnnouncement(`⌛ ${target.name} не принял(а) приглашение вовремя.`, player.id, errorColor, 'bold', HaxNotification.CHAT);
+                }
+            }, INVITE_DURATION_MS);
+            pendingInvites.set(target.id, { challengerId: player.id, challengerAuth: auth, gameKey, stake: null, timeoutHandle });
+            room.sendAnnouncement(
+                `🎲 ${player.name} вызывает ${target.name} на "${game.label}" !`,
+                null,
+                announcementColor,
+                'bold',
+                HaxNotification.CHAT
+            );
+            room.sendAnnouncement(
+                `Вы приглашены в "${game.label}" от ${player.name}. Введите "!play" в течение ${INVITE_DURATION_MS / 1000} секунд, чтобы принять.`,
+                target.id,
+                announcementColor,
+                'bold',
+                HaxNotification.CHAT
+            );
             return;
         }
 
@@ -239,6 +282,15 @@ module.exports = function createMinigameCommands({
 
         const { stake, gameKey, challengerAuth } = invite;
         const targetAuth = getAuth(player);
+        const game = GAMES[gameKey];
+
+        // Poker (and any future asymmetric-stakes game): no shared stake to
+        // charge here, no pot to award afterward — game.run() manages
+        // 100% of its own money movement internally (see poker.js).
+        if (game.customEconomy) {
+            await game.run(challenger, player, challengerAuth, targetAuth);
+            return;
+        }
 
         const challengerCharged = await db.spendCoins(challengerAuth, challenger.name, stake);
         if (!challengerCharged) {
@@ -253,7 +305,6 @@ module.exports = function createMinigameCommands({
         }
 
         const pot = stake * 2;
-        const game = GAMES[gameKey];
         sendToMatch(challenger, player, `${game.label}: ${challenger.name} vs ${player.name}, банк ${formatCoins(pot)} !`, announcementColor);
         const { winner, winnerAuth } = await game.run(challenger, player, challengerAuth, targetAuth);
 

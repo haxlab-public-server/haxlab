@@ -56,8 +56,10 @@ module.exports = function createCommands({
     playCommand,
     hitCommand,
     standCommand,
-    splitCommand,
     betCommand,
+    callCommand,
+    checkCommand,
+    passCommand,
 }) {
     return {
 
@@ -577,12 +579,13 @@ module.exports = function createCommands({
         roles: Role.PLAYER,
         desc: `
         Эта команда вызывает другого зрителя на мини-игру на ставку монет. Доступно только зрителям (не участвующим в матче).
-    Она принимает 3 аргумента:
-    Аргумент 1: <игра> где <игра> одна из: coinflip/cf (монетка), russianroulette/rr (русская рулетка), blackjack/bj (блэкджек).
-    Аргумент 2: #<id> где <id> это id зрителя, которого вы вызываете. Для blackjack можно не указывать — тогда игра будет против бота-дилера.
-    Аргумент 3: <ставка> сколько монет поставить на кон.
+    Она принимает до 3 аргументов:
+    Аргумент 1: <игра> где <игра> одна из: coinflip/cf (монетка), russianroulette/rr (русская рулетка), blackjack/bj (блэкджек), poker/покер (покер, ставки фиксированные: 25/50 монет).
+    Аргумент 2: #<id> где <id> это id зрителя, которого вы вызываете. Обязателен для всех игр (против бота играть нельзя).
+    Аргумент 3: <ставка> сколько монет поставить на кон (не нужен для poker — там фиксированные блайнды).
     Пример: !minigames coinflip #3 100 вызовет игрока с id 3 на монетку на 100 монет.
-    Пример: !minigames blackjack 100 начнет игру в блэкджек против бота на 100 монет.
+    Пример: !minigames blackjack #3 100 вызовет игрока с id 3 на блэкджек на 100 монет.
+    Пример: !minigames poker #3 вызовет игрока с id 3 на покер (вы — small blind 25, он — big blind 50).
     Приглашенный игрок должен ввести "!play", чтобы принять вызов.`,
         function: minigamesCommand,
     },
@@ -607,32 +610,40 @@ module.exports = function createCommands({
         В активной игре блэкджек (!minigames blackjack/bj) останавливается с текущей рукой.`,
         function: standCommand,
     },
-    split: {
+    // The old spectator match-betting feature (odds on red/blue before a
+    // match) is disabled and not registered here — see core/betting.js.
+    // "!bet" below is unrelated: it's poker's betting action.
+    bet: {
         aliases: [],
         roles: Role.PLAYER,
         desc: `
-        В активной игре блэкджек против бота (!minigames blackjack/bj) разделяет пару одинаковых карт на две руки (требует вторую такую же ставку).`,
-        function: splitCommand,
+        В активной игре покер (!minigames poker/покер) ставит монеты в этом раунде торгов.
+    Она принимает 1 аргумент:
+    Аргумент 1: <ставка> сколько монет поставить (не больше того, что может позволить себе соперник).
+    Пример: !bet 50 поставит 50 монет.`,
+        function: betCommand,
     },
-    // Temporarily disabled (betting feature turned off for now) — not
-    // registered, so "!bet" is simply an unknown command. betCommand
-    // itself, and the rest of core/betting.js's wiring in entry.js
-    // (announceOdds/refundIfSubbedIn/resolveBets), are left intact and
-    // working underneath — this is the only line that actually exposes
-    // the feature to players. Uncomment to re-enable.
-    // bet: {
-    //     aliases: [],
-    //     roles: Role.PLAYER,
-    //     desc: `
-    //     Эта команда позволяет зрителям поставить монеты на исход следующего матча. Доступна только во время замен капитанов перед началом матча (~10 секунд).
-    // Она принимает 2 аргумента:
-    // Аргумент 1: <команда> где <команда> одна из: red/r (красные), blue/b (синие).
-    // Аргумент 2: <ставка> сколько монет поставить, минимум 10, верхнего лимита нет.
-    // Коэффициент считается по среднему винрейту команды — чем он выше, тем ниже коэффициент.
-    // Если поставивший зритель будет выставлен капитаном на матч, ставка автоматически вернется.
-    // Пример: !bet red 100 поставит 100 монет на красную команду.`,
-    //     function: betCommand,
-    // },
+    call: {
+        aliases: ['колл'],
+        roles: Role.PLAYER,
+        desc: `
+        В активной игре покер (!minigames poker/покер) уравнивает ставку соперника.`,
+        function: callCommand,
+    },
+    check: {
+        aliases: ['чек'],
+        roles: Role.PLAYER,
+        desc: `
+        В активной игре покер (!minigames poker/покер) пропускает ход без ставки (доступно только если соперник тоже не ставил в этом раунде).`,
+        function: checkCommand,
+    },
+    pass: {
+        aliases: ['фолд', 'fold'],
+        roles: Role.PLAYER,
+        desc: `
+        В активной игре покер (!minigames poker/покер) сбрасывает карты и уступает банк сопернику.`,
+        function: passCommand,
+    },
 
     };
 };

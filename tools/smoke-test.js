@@ -2842,6 +2842,7 @@ console.log('\n--- events/movement.js: auth-bans block a join regardless of conn
         updateTeams: noop,
         refundBetIfSubbedIn: async () => {},
         forfeitBlackjackOnLeave: noop,
+        forfeitPokerOnLeave: noop,
     });
 
     roomCalls.length = 0;
@@ -7591,135 +7592,7 @@ console.log('\n--- core/betting.js: spectator betting on match outcome, open onl
     db.close();
 })();
 
-console.log('\n--- core/commands/blackjack.js: bot-mode dealer play (canonical rules) ---');
-(async () => {
-    const HaxNotificationMock = { CHAT: 1 };
-    const { createSqliteDatabase } = require(path.join(__dirname, '..', 'db', 'sqlite'));
-    const { formatCoins } = require(path.join(CORE, 'utils'));
-    const db = createSqliteDatabase(':memory:');
-    db.init();
-    await db.addCoins('AUTH_BJ', 'BJ', 5000);
-
-    // getRandomInt: (max) => max - 1 makes every Fisher-Yates swap a no-op
-    // (j always equals i) — the "shuffled" deck is just buildDeck() in its
-    // original order, so deck.pop() draws in a fully known, fixed sequence:
-    // ...clubs A,K,Q,J,10... (reverse build order). Two pops for the
-    // player then two for the dealer deals player=[A♣,K♣]=21 (a natural
-    // blackjack) and dealer=[Q♣,J♣]=20 (not a blackjack).
-    const sentIdentity = [];
-    const roomIdentity = { sendAnnouncement: (msg, id, color, style) => sentIdentity.push({ msg, id, color, style }) };
-    const bjIdentity = require(path.join(CORE, 'commands', 'blackjack'))({
-        room: roomIdentity, state: { playersAll: [] }, db,
-        announcementColor: 1, errorColor: 2, successColor: 3, HaxNotification: HaxNotificationMock,
-        formatCoins, getRandomInt: (max) => max - 1,
-    });
-    const bjPlayer = { id: 1, name: 'BJ' };
-
-    sentIdentity.length = 0;
-    const balanceBeforeNatural = await db.getBalance('AUTH_BJ');
-    await bjIdentity.startBlackjackBotGame(bjPlayer, 'AUTH_BJ', 100);
-    check('a natural 21 (player) vs a non-blackjack dealer pays out immediately, no hit/stand needed', sentIdentity.some((s) => /Блэкджек/.test(s.msg)), true);
-    check('...at the 2.5x payout multiplier', await db.getBalance('AUTH_BJ'), balanceBeforeNatural - 100 + 250);
-
-    sentIdentity.length = 0;
-    await bjIdentity.hitCommand(bjPlayer, '!hit');
-    check('the natural-blackjack game is already over — no active session left to hit on', sentIdentity.some((s) => /нет активной игры/.test(s.msg)), true);
-
-    // getRandomInt: () => 0 (ignoring `max`) produces a left-rotate-by-1 of
-    // buildDeck() — worked out by hand the same way as above. It deals
-    // player=[2♠,A♣]=13 (soft 13, not a pair, not a blackjack) and
-    // dealer=[K♣,Q♣]=20.
-    const sentRot = [];
-    const roomRot = { sendAnnouncement: (msg, id, color, style) => sentRot.push({ msg, id, color, style }) };
-    const bjRot = require(path.join(CORE, 'commands', 'blackjack'))({
-        room: roomRot, state: { playersAll: [] }, db,
-        announcementColor: 1, errorColor: 2, successColor: 3, HaxNotification: HaxNotificationMock,
-        formatCoins, getRandomInt: () => 0,
-    });
-
-    sentRot.length = 0;
-    await bjRot.startBlackjackBotGame(bjPlayer, 'AUTH_BJ', 100);
-    check('a non-blackjack deal shows the dealer\'s hidden card as a back, not the real card', sentRot.some((s) => s.msg.includes('🎴')), true);
-
-    sentRot.length = 0;
-    await bjRot.splitCommand(bjPlayer, '!split');
-    check('splitting a non-pair (2,A) is rejected', sentRot.some((s) => /Разделить можно только пару/.test(s.msg)), true);
-
-    sentRot.length = 0;
-    await bjRot.hitCommand(bjPlayer, '!hit');
-    check('hitting on a soft 13 draws a card and keeps the hand open (still under 21)', sentRot.some((s) => /Ваша рука/.test(s.msg)), true);
-
-    sentRot.length = 0;
-    const balanceBeforeBust = await db.getBalance('AUTH_BJ');
-    await bjRot.hitCommand(bjPlayer, '!hit');
-    check('a third hit that pushes the (now hard) total past 21 busts immediately', sentRot.some((s) => /Перебор/.test(s.msg)), true);
-    check('...and settles the game right there — the dealer is revealed but never has to draw further', sentRot.some((s) => /Дилер открывает/.test(s.msg)), true);
-    check('a bust loses the stake, no payout', await db.getBalance('AUTH_BJ'), balanceBeforeBust);
-
-    // A fresh deal replays the identical deterministic scenario (player
-    // 13, dealer 20) — this time standing immediately instead of hitting.
-    sentRot.length = 0;
-    const balanceBeforeStandLoss = await db.getBalance('AUTH_BJ');
-    await bjRot.startBlackjackBotGame(bjPlayer, 'AUTH_BJ', 100);
-    await bjRot.standCommand(bjPlayer, '!stand');
-    check('standing on 13 against a dealer already at 20 loses (13 < 20)', sentRot.some((s) => /проигрыш/.test(s.msg)), true);
-    check('no payout on that loss either', await db.getBalance('AUTH_BJ'), balanceBeforeStandLoss - 100);
-
-    sentRot.length = 0;
-    await bjRot.startBlackjackBotGame(bjPlayer, 'AUTH_BJ', 100);
-    sentRot.length = 0;
-    await bjRot.startBlackjackBotGame(bjPlayer, 'AUTH_BJ', 100);
-    check('starting a second game while one is still active is rejected', sentRot.some((s) => /уже есть активная игра/.test(s.msg)), true);
-    await bjRot.standCommand(bjPlayer, '!stand'); // clean up the still-open session
-
-    sentRot.length = 0;
-    await bjRot.startBlackjackBotGame(bjPlayer, 'AUTH_BJ', 999999);
-    check('a stake the player cannot afford is rejected up front', sentRot.some((s) => /Недостаточно монет/.test(s.msg)), true);
-
-    // Split — needs an actual pair, which the deterministic decks above
-    // don't happen to deal. Rather than a real-random retry loop (which
-    // ran hundreds of real db round-trips synchronously and starved this
-    // process's other real-timer-based tests of event-loop time), replay a
-    // FIXED sequence of Fisher-Yates j-values, precomputed offline, that's
-    // already known to deal a pair (6♦, 6♥) as the first two cards — same
-    // shuffle algorithm, just a hardcoded "random" outcome instead of a
-    // live one.
-    const PAIR_DEAL_J_SEQUENCE = [30, 17, 14, 34, 32, 11, 30, 4, 32, 13, 24, 20, 24, 24, 14, 6, 32, 8, 10, 31, 0, 0, 12, 17, 16, 26, 18, 18, 0, 3, 20, 10, 16, 5, 16, 16, 0, 7, 8, 3, 4, 5, 2, 0, 0, 4, 2, 4, 0, 2, 0];
-    let jIndex = 0;
-    const sentSplit = [];
-    const roomSplit = { sendAnnouncement: (msg, id, color, style) => sentSplit.push({ msg, id, color, style }) };
-    const bjSplit = require(path.join(CORE, 'commands', 'blackjack'))({
-        room: roomSplit, state: { playersAll: [] }, db,
-        announcementColor: 1, errorColor: 2, successColor: 3, HaxNotification: HaxNotificationMock,
-        formatCoins, getRandomInt: () => PAIR_DEAL_J_SEQUENCE[jIndex++],
-    });
-    const splitPlayer = { id: 2, name: 'Splitter' };
-    await db.addCoins('AUTH_SPLIT', 'Splitter', 500);
-    sentSplit.length = 0;
-    await bjSplit.startBlackjackBotGame(splitPlayer, 'AUTH_SPLIT', 50);
-    check('the precomputed shuffle deals a splittable pair (6♦, 6♥) as expected', sentSplit.some((s) => s.id === 2 && /!split/.test(s.msg)), true);
-
-    const balanceBeforeSplit = await db.getBalance('AUTH_SPLIT');
-    sentSplit.length = 0;
-    await bjSplit.splitCommand(splitPlayer, '!split');
-    check('splitting charges an equal second stake', await db.getBalance('AUTH_SPLIT'), balanceBeforeSplit - 50);
-    check('splitting announces two independent hands', sentSplit.some((s) => /\(1\/2\)/.test(s.msg)), true);
-
-    sentSplit.length = 0;
-    await bjSplit.splitCommand(splitPlayer, '!split');
-    check('splitting a second time is rejected — only one split allowed', sentSplit.some((s) => /только один раз/.test(s.msg)), true);
-
-    await bjSplit.standCommand(splitPlayer, '!stand'); // resolve hand 1/2
-    await bjSplit.standCommand(splitPlayer, '!stand'); // resolve hand 2/2, finishes the game
-
-    sentSplit.length = 0;
-    await bjSplit.hitCommand(splitPlayer, '!hit');
-    check('after both split hands resolve, the game is over — nothing left to act on', sentSplit.some((s) => /нет активной игры/.test(s.msg)), true);
-
-    db.close();
-})();
-
-console.log('\n--- core/commands/blackjack.js + minigames.js: pvp mode (no split, closest to 21 wins) via the shared challenge/!play flow ---');
+console.log('\n--- core/commands/blackjack.js + minigames.js: pvp mode (closest to 21 wins) via the shared challenge/!play flow — bot-dealer mode was removed 2026-08-10 (players were grinding it for a steady edge) ---');
 (async () => {
     const TeamLocal = { RED: 1, BLUE: 2, SPECTATORS: 0 };
     const HaxNotificationMock = { CHAT: 1 };
@@ -7740,8 +7613,8 @@ console.log('\n--- core/commands/blackjack.js + minigames.js: pvp mode (no split
     await db.addCoins('AUTH_CHALLENGER', 'Challenger', 500);
     await db.addCoins('AUTH_TARGET', 'Target', 500);
 
-    // Identity shuffle again (see the bot-mode block above): challenger
-    // gets [A♣,K♣]=21, target gets [Q♣,J♣]=20 — both just need to stand.
+    // Identity shuffle: challenger gets [A♣,K♣]=21, target gets [Q♣,J♣]=20
+    // — both just need to stand.
     const bjPvp = require(path.join(CORE, 'commands', 'blackjack'))({
         room: roomMock, state, db,
         announcementColor: 1, errorColor: 2, successColor: 3, HaxNotification: HaxNotificationMock,
@@ -7751,7 +7624,6 @@ console.log('\n--- core/commands/blackjack.js + minigames.js: pvp mode (no split
         room: roomMock, state, authArray, db, Team: TeamLocal,
         announcementColor: 1, errorColor: 2, successColor: 3, HaxNotification: HaxNotificationMock,
         formatCoins, getRandomInt: (max) => max - 1,
-        startBlackjackBotGame: bjPvp.startBlackjackBotGame,
         runPvpBlackjack: bjPvp.runPvpBlackjack,
     });
 
@@ -7760,7 +7632,7 @@ console.log('\n--- core/commands/blackjack.js + minigames.js: pvp mode (no split
 
     sentLocal.length = 0;
     await minigames.minigamesCommand(challenger, '!minigames blackjack 100');
-    check('blackjack alone (no #<id>) plays against the bot, bypassing the challenge/!play flow entirely', sentLocal.some((s) => /Блэкджек/.test(s.msg)), true);
+    check('blackjack with no #<id> is rejected — the bot-dealer mode was removed, a real opponent is required', sentLocal.some((s) => /Использование/.test(s.msg)), true);
     check('...and never created a pending invite for anyone to !play', await db.getBalance('AUTH_TARGET'), 500);
 
     sentLocal.length = 0;
@@ -7818,6 +7690,316 @@ console.log('\n--- core/commands/blackjack.js + minigames.js: pvp mode (no split
     check('a mid-game forfeit refunds the challenger\'s stake — net balance unchanged', await db.getBalance('AUTH_CHALLENGER'), challengerBalanceBeforeForfeit);
     check('...and the target\'s stake too, same push handling as an actual on-the-table draw', await db.getBalance('AUTH_TARGET'), targetBalanceBeforeForfeit);
     check('a push (draw) is broadcast to the whole room (id: null), same visibility as a win — not left private to just the two players', sentLocal.some((s) => s.id === null && /вничью/.test(s.msg)), true);
+
+    db.close();
+})();
+
+console.log('\n--- core/pokerHandRank.js: pure hand evaluation — every category, the wheel, kicker tie-breaks, and best-5-of-7 ---');
+(() => {
+    const { CATEGORY, evaluateFiveCardHand, toScore, compareScores, bestHandFromCards } = require(path.join(CORE, 'pokerHandRank'));
+    const c = (label) => ({ rank: label.slice(0, -1), suit: label.slice(-1) });
+    const hand = (...labels) => labels.map(c);
+
+    check('high card', evaluateFiveCardHand(hand('2♠', '5♥', '9♦', 'J♣', 'K♠')).category, CATEGORY.HIGH_CARD);
+    check('...tiebreakers are every rank, sorted descending', evaluateFiveCardHand(hand('2♠', '5♥', '9♦', 'J♣', 'K♠')).tiebreakers, [13, 11, 9, 5, 2]);
+    check('pair', evaluateFiveCardHand(hand('2♠', '2♥', '9♦', 'J♣', 'K♠')).category, CATEGORY.PAIR);
+    check('two pair', evaluateFiveCardHand(hand('2♠', '2♥', '9♦', '9♣', 'K♠')).category, CATEGORY.TWO_PAIR);
+    check('...the higher pair sorts first regardless of card order', evaluateFiveCardHand(hand('2♠', '2♥', '9♦', '9♣', 'K♠')).tiebreakers, [9, 2, 13]);
+    check('three of a kind', evaluateFiveCardHand(hand('2♠', '2♥', '2♦', '9♣', 'K♠')).category, CATEGORY.THREE_OF_A_KIND);
+    check('straight', evaluateFiveCardHand(hand('5♠', '6♥', '7♦', '8♣', '9♠')).category, CATEGORY.STRAIGHT);
+    check('...tiebreaker is just the high card', evaluateFiveCardHand(hand('5♠', '6♥', '7♦', '8♣', '9♠')).tiebreakers, [9]);
+    check('the wheel (A-2-3-4-5) is a straight, ace plays low', evaluateFiveCardHand(hand('A♠', '2♥', '3♦', '4♣', '5♠')).category, CATEGORY.STRAIGHT);
+    check('...and is the worst possible straight (5-high, not ace-high)', evaluateFiveCardHand(hand('A♠', '2♥', '3♦', '4♣', '5♠')).tiebreakers, [5]);
+    check('flush (same suit, not a straight)', evaluateFiveCardHand(hand('2♠', '5♠', '9♠', 'J♠', 'K♠')).category, CATEGORY.FLUSH);
+    check('full house', evaluateFiveCardHand(hand('2♠', '2♥', '2♦', '9♣', '9♠')).category, CATEGORY.FULL_HOUSE);
+    check('...tiebreakers are [trips rank, pair rank]', evaluateFiveCardHand(hand('2♠', '2♥', '2♦', '9♣', '9♠')).tiebreakers, [2, 9]);
+    check('four of a kind', evaluateFiveCardHand(hand('2♠', '2♥', '2♦', '2♣', '9♠')).category, CATEGORY.FOUR_OF_A_KIND);
+    check('straight flush', evaluateFiveCardHand(hand('5♠', '6♠', '7♠', '8♠', '9♠')).category, CATEGORY.STRAIGHT_FLUSH);
+
+    check('category always outranks tiebreakers — a pair beats a flush\'s own tiebreakers when compared via toScore/compareScores', compareScores(toScore(evaluateFiveCardHand(hand('2♠', '5♠', '9♠', 'J♠', 'K♠'))), toScore(evaluateFiveCardHand(hand('2♠', '2♥', '9♦', 'J♣', 'K♠')))) > 0, true);
+    check('...specifically: flush beats pair, so the flush score compares GREATER, not the other way round', compareScores(toScore(evaluateFiveCardHand(hand('2♠', '5♠', '9♠', 'J♠', 'K♠'))), toScore(evaluateFiveCardHand(hand('2♠', '2♥', '9♦', 'J♣', 'K♠')))) > 0, true);
+    check('same category, kicker breaks the tie: pair of 2s with a King kicker beats pair of 2s with a Queen kicker', compareScores(toScore(evaluateFiveCardHand(hand('2♠', '2♥', '9♦', '5♣', 'K♠'))), toScore(evaluateFiveCardHand(hand('2♦', '2♣', '9♥', '5♠', 'Q♠')))) > 0, true);
+    check('identical hands (different suits, same ranks/category) tie exactly', compareScores(toScore(evaluateFiveCardHand(hand('2♠', '2♥', '9♦', '5♣', 'K♣'))), toScore(evaluateFiveCardHand(hand('2♦', '2♣', '9♥', '5♠', 'K♠')))), 0);
+
+    // 7-card best-5-of-7 — a real subtlety this whole feature depends on:
+    // the board ALONE (10♣9♣8♣7♣6♣) is already a straight flush, but a
+    // player holding Q♣J♣ can find a BETTER 5-card window (Q♣J♣10♣9♣8♣,
+    // queen-high) inside the same 7 cards — bestHandFromCards must find
+    // that, not just default to "the board as dealt".
+    const boardOnly = bestHandFromCards(hand('10♣', '9♣', '8♣', '7♣', '6♣'));
+    check('the board by itself is a 10-high straight flush', boardOnly.category, CATEGORY.STRAIGHT_FLUSH);
+    check('...tiebreaker confirms 10-high specifically', boardOnly.score[1], 10);
+    const withQJ = bestHandFromCards(hand('Q♣', 'J♣', '10♣', '9♣', '8♣', '7♣', '6♣'));
+    check('holding Q♣J♣ on that same board finds the BETTER queen-high straight flush window, not just the board as dealt', withQJ.category, CATEGORY.STRAIGHT_FLUSH);
+    check('...tiebreaker confirms queen-high (12), beating the board-only 10-high', withQJ.score[1], 12);
+    check('a queen-high straight flush actually outranks a ten-high one via compareScores', compareScores(withQJ.score, boardOnly.score) > 0, true);
+
+    // Same 7 cards, a hand where the best 5-of-7 is NOT simply "the 5
+    // highest-ranked cards" — a pair must be preserved over raw high cards.
+    const pairPreserved = bestHandFromCards(hand('3♥', '8♦', '2♠', '6♦', '10♠', '4♦', '3♣'));
+    check('best-5-of-7 keeps the pair (3♥3♣) rather than discarding one 3 for a higher single kicker', pairPreserved.category, CATEGORY.PAIR);
+    check('...kickers are the top 3 remaining ranks (10,8,6), not just the first 3 cards in hand order', pairPreserved.score.slice(1), [3, 10, 8, 6, 0]);
+})();
+
+console.log('\n--- core/commands/poker.js: heads-up Texas Hold\'em — blinds, betting validation, streets, showdown settlement ---');
+(async () => {
+    const TeamLocal = { RED: 1, BLUE: 2, SPECTATORS: 0 };
+    const HaxNotificationMock = { CHAT: 1 };
+    const sentLocal = [];
+    const roomMock = { sendAnnouncement: (msg, id, color, style) => sentLocal.push({ msg, id, color, style }) };
+    const { createSqliteDatabase } = require(path.join(__dirname, '..', 'db', 'sqlite'));
+    const { formatCoins } = require(path.join(CORE, 'utils'));
+
+    function makeLcg(seed) {
+        let s = seed;
+        return (max) => {
+            s = (s * 1103515245 + 12345) & 0x7fffffff;
+            return s % max;
+        };
+    }
+
+    // --- insufficient balance cancels the hand before anything is dealt ---
+    {
+        const db = createSqliteDatabase(':memory:');
+        db.init();
+        const state = { playersAll: [{ id: 1, name: 'Poor', team: TeamLocal.SPECTATORS }, { id: 2, name: 'Rich', team: TeamLocal.SPECTATORS }] };
+        await db.addCoins('AUTH_POOR', 'Poor', 10); // below the 25 small blind
+        await db.addCoins('AUTH_RICH', 'Rich', 500);
+        const poker = require(path.join(CORE, 'commands', 'poker'))({
+            room: roomMock, state, db, announcementColor: 1, errorColor: 2, successColor: 3,
+            HaxNotification: HaxNotificationMock, formatCoins, getRandomInt: makeLcg(1),
+        });
+        sentLocal.length = 0;
+        const result = await poker.runPokerPvp({ id: 1, name: 'Poor' }, { id: 2, name: 'Rich' }, 'AUTH_POOR', 'AUTH_RICH');
+        check('a challenger who can\'t cover the small blind cancels the hand', result.cancelled, true);
+        check('...and nobody was charged', await db.getBalance('AUTH_POOR'), 10);
+        check('...the cancellation is announced to both', sentLocal.some((s) => /недостаточно монет/.test(s.msg)), true);
+        db.close();
+    }
+
+    // --- main happy path: full preflop->flop->turn->river->showdown, plus
+    // betting-validation error paths interleaved along the way ---
+    {
+        const db = createSqliteDatabase(':memory:');
+        db.init();
+        const challenger = { id: 1, name: 'Challenger' };
+        const target = { id: 2, name: 'Target' };
+        const state = { playersAll: [{ ...challenger, team: TeamLocal.SPECTATORS }, { ...target, team: TeamLocal.SPECTATORS }] };
+        await db.addCoins('AUTH_CHALLENGER', 'Challenger', 500);
+        await db.addCoins('AUTH_TARGET', 'Target', 500);
+        const poker = require(path.join(CORE, 'commands', 'poker'))({
+            room: roomMock, state, db, announcementColor: 1, errorColor: 2, successColor: 3,
+            HaxNotification: HaxNotificationMock, formatCoins, getRandomInt: makeLcg(12345),
+        });
+
+        sentLocal.length = 0;
+        const handPromise = poker.runPokerPvp(challenger, target, 'AUTH_CHALLENGER', 'AUTH_TARGET');
+        // setupHand awaits db.getBalance() twice before dealing anything —
+        // give that a tick to actually flush before inspecting sentLocal.
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        check('both hole cards are dealt privately (2 cards each, never broadcast)', sentLocal.filter((s) => /Ваши карты/.test(s.msg)).length, 2);
+        check('the small/big blind posting is announced to the room', sentLocal.some((s) => s.id === null && /small blind.*big blind/.test(s.msg)), true);
+
+        sentLocal.length = 0;
+        await poker.checkCommand(target, '!check');
+        check('acting out of turn (target, before challenger/small-blind acts preflop) is rejected', sentLocal.some((s) => /не ваш ход/.test(s.msg)), true);
+
+        sentLocal.length = 0;
+        await poker.callCommand(challenger, '!call');
+        check('the challenger calling the big blind is announced', sentLocal.some((s) => /уравнивает/.test(s.msg)), true);
+
+        sentLocal.length = 0;
+        await poker.callCommand(target, '!call');
+        check('calling with nothing to call is rejected — use "!check" instead', sentLocal.some((s) => /Уравнивать нечего/.test(s.msg)), true);
+
+        // Flop — big blind (target) acts first postflop.
+        sentLocal.length = 0;
+        await poker.betCommand(target, '!bet 10'); // below MIN_BET (50) and not a capped all-in
+        check('a bet below the minimum is rejected', sentLocal.some((s) => /Минимальная ставка/.test(s.msg)), true);
+        await poker.betCommand(target, '!bet 100000'); // bigger than target's own remaining stack (450)
+        check('a bet bigger than your own stack is rejected', sentLocal.some((s) => /Недостаточно монет/.test(s.msg)), true);
+        await poker.checkCommand(target, '!check'); // there's nothing to call yet, so a check is legal too
+        check('a legal check on the flop passes the turn to the other player without ending the street yet', sentLocal.some((s) => s.id === 1 && /Ваш ход/.test(s.msg)), true);
+        await poker.checkCommand(challenger, '!check'); // wrong turn now (it's the challenger's turn — this one's legal, ends the street)
+
+        sentLocal.length = 0;
+        // Turn — big blind acts first again.
+        await poker.betCommand(challenger, '!bet 50'); // not target's turn
+        check('betting out of turn on the turn street is rejected', sentLocal.some((s) => /не ваш ход/.test(s.msg)), true);
+        await poker.checkCommand(target, '!check');
+        await poker.checkCommand(challenger, '!check');
+
+        // River — check through to showdown.
+        sentLocal.length = 0;
+        const challengerBalanceBefore = await db.getBalance('AUTH_CHALLENGER');
+        const targetBalanceBefore = await db.getBalance('AUTH_TARGET');
+        await poker.checkCommand(target, '!check');
+        await poker.checkCommand(challenger, '!check');
+        await handPromise;
+
+        check('the showdown reveals both hands', sentLocal.some((s) => /Вскрытие/.test(s.msg)), true);
+        // Target's hole cards (Q♦5♥) combine with the board's LOW end
+        // (6♦,4♦,3♣ + 2♠ from the flop) into a 6-high straight (6-5-4-3-2)
+        // — easy to miss by eye (it's not "the 5 highest cards"), which is
+        // exactly the kind of window bestHandFromCards has to find. That
+        // beats the challenger's pair of 3s.
+        check('the target\'s hidden 6-high straight beats the challenger\'s pair of 3s', sentLocal.some((s) => /Target побеждает вскрытием/.test(s.msg)), true);
+        // Only real money moved is the preflop call (both flop/turn bet
+        // attempts were rejected or checked through) — pot is 50+50=100,
+        // and the loser's total contribution (50) is what changes hands.
+        check('the winner nets exactly the loser\'s total contribution for the whole hand', await db.getBalance('AUTH_TARGET'), targetBalanceBefore + 50);
+        check('...and the loser loses exactly that much', await db.getBalance('AUTH_CHALLENGER'), challengerBalanceBefore - 50);
+        db.close();
+    }
+
+    // --- folding ends the hand immediately, no reveal, pot goes to the
+    // other player without a showdown ---
+    {
+        const db = createSqliteDatabase(':memory:');
+        db.init();
+        const challenger = { id: 1, name: 'Folder' };
+        const target = { id: 2, name: 'Winner' };
+        const state = { playersAll: [{ ...challenger, team: TeamLocal.SPECTATORS }, { ...target, team: TeamLocal.SPECTATORS }] };
+        await db.addCoins('AUTH_FOLDER', 'Folder', 500);
+        await db.addCoins('AUTH_WINNER', 'Winner', 500);
+        const poker = require(path.join(CORE, 'commands', 'poker'))({
+            room: roomMock, state, db, announcementColor: 1, errorColor: 2, successColor: 3,
+            HaxNotification: HaxNotificationMock, formatCoins, getRandomInt: makeLcg(999),
+        });
+
+        sentLocal.length = 0;
+        const handPromise = poker.runPokerPvp(challenger, target, 'AUTH_FOLDER', 'AUTH_WINNER');
+        // setupHand's own awaits (db.getBalance x2) need a tick to actually
+        // register the session in activeGames before passCommand can find it.
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        await poker.passCommand(challenger, '!pass'); // small blind folds immediately, preflop
+        await handPromise;
+        check('folding preflop ends the hand with no showdown reveal', sentLocal.some((s) => /Вскрытие/.test(s.msg)), false);
+        // The winner's own big blind was never actually deducted from the
+        // DB in the first place (only tracked in-memory) — the only real
+        // money movement is the loser's own total contribution (here, just
+        // their small blind, since they folded before ever calling).
+        check('the folder\'s opponent nets exactly the folder\'s contribution (the small blind)', await db.getBalance('AUTH_WINNER'), 500 + 25);
+        check('...and the folder loses exactly that much, nothing more', await db.getBalance('AUTH_FOLDER'), 500 - 25);
+        db.close();
+    }
+
+    // --- a player leaving mid-hand forfeits exactly like a fold ---
+    {
+        const db = createSqliteDatabase(':memory:');
+        db.init();
+        const challenger = { id: 1, name: 'Leaver' };
+        const target = { id: 2, name: 'Stays' };
+        const state = { playersAll: [{ ...challenger, team: TeamLocal.SPECTATORS }, { ...target, team: TeamLocal.SPECTATORS }] };
+        await db.addCoins('AUTH_LEAVER', 'Leaver', 500);
+        await db.addCoins('AUTH_STAYS', 'Stays', 500);
+        const poker = require(path.join(CORE, 'commands', 'poker'))({
+            room: roomMock, state, db, announcementColor: 1, errorColor: 2, successColor: 3,
+            HaxNotification: HaxNotificationMock, formatCoins, getRandomInt: makeLcg(42),
+        });
+
+        const handPromise = poker.runPokerPvp(challenger, target, 'AUTH_LEAVER', 'AUTH_STAYS');
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        poker.forfeitOnLeave(challenger);
+        await handPromise;
+        check('forfeitOnLeave settles the pot to the other player, same as a fold', await db.getBalance('AUTH_STAYS'), 500 + 25);
+        // No active hand for this id — must be a silent no-op. If this threw,
+        // it would abort the whole test file rather than fail a check().
+        poker.forfeitOnLeave({ id: 999 });
+        db.close();
+    }
+
+    // --- an all-in bet/call skips betting on every remaining street and
+    // goes straight to showdown, with no announceTurn in between ---
+    {
+        const db = createSqliteDatabase(':memory:');
+        db.init();
+        const challenger = { id: 1, name: 'ShortStack' };
+        const target = { id: 2, name: 'BigStack' };
+        const state = { playersAll: [{ ...challenger, team: TeamLocal.SPECTATORS }, { ...target, team: TeamLocal.SPECTATORS }] };
+        await db.addCoins('AUTH_SHORT', 'ShortStack', 100); // stack after the 25 small blind: 75
+        await db.addCoins('AUTH_BIG', 'BigStack', 1000); // stack after the 50 big blind: 950
+        const poker = require(path.join(CORE, 'commands', 'poker'))({
+            room: roomMock, state, db, announcementColor: 1, errorColor: 2, successColor: 3,
+            HaxNotification: HaxNotificationMock, formatCoins, getRandomInt: makeLcg(7),
+        });
+
+        const handPromise = poker.runPokerPvp(challenger, target, 'AUTH_SHORT', 'AUTH_BIG');
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        await poker.callCommand(challenger, '!call'); // preflop call: stack 75 -> 50
+        sentLocal.length = 0;
+        await poker.betCommand(target, '!bet 50'); // exactly the short stack's entire remaining 50 — the max legal bet
+        await poker.callCommand(challenger, '!call'); // this call brings the short stack to exactly 0
+        await handPromise;
+        check('the hand resolved straight through to showdown/settlement in one go — no further betting prompts were needed once a stack hit 0', sentLocal.some((s) => /Вскрытие/.test(s.msg) || /забирает банк/.test(s.msg) || /побеждает вскрытием/.test(s.msg)), true);
+        const finalShort = await db.getBalance('AUTH_SHORT');
+        const finalBig = await db.getBalance('AUTH_BIG');
+        // 0 (lost), 200 (won), or 100 (a tied showdown — a split pot moves
+        // no real money at all, see settleHand's winnerKey==null branch).
+        check('the short stack is fully settled one way or the other, not stuck mid-hand', finalShort === 0 || finalShort === 200 || finalShort === 100, true);
+        check('total chips in the two-player economy are conserved (nothing minted or lost)', finalShort + finalBig, 100 + 1000);
+        db.close();
+    }
+})();
+
+console.log('\n--- commands/minigames.js + commands/poker.js: customEconomy routing skips the generic shared-stake charge/pot logic entirely ---');
+(async () => {
+    const TeamLocal = { RED: 1, BLUE: 2, SPECTATORS: 0 };
+    const HaxNotificationMock = { CHAT: 1 };
+    const sentLocal = [];
+    const roomMock = { sendAnnouncement: (msg, id, color, style) => sentLocal.push({ msg, id, color, style }) };
+    const { createSqliteDatabase } = require(path.join(__dirname, '..', 'db', 'sqlite'));
+    const { formatCoins } = require(path.join(CORE, 'utils'));
+    const db = createSqliteDatabase(':memory:');
+    db.init();
+
+    const authArray = { 1: ['AUTH_CHALLENGER'], 2: ['AUTH_TARGET'] };
+    const state = {
+        playersAll: [
+            { id: 1, name: 'Challenger', team: TeamLocal.SPECTATORS },
+            { id: 2, name: 'Target', team: TeamLocal.SPECTATORS },
+        ],
+    };
+    await db.addCoins('AUTH_CHALLENGER', 'Challenger', 500);
+    await db.addCoins('AUTH_TARGET', 'Target', 500);
+
+    const pokerCmds = require(path.join(CORE, 'commands', 'poker'))({
+        room: roomMock, state, db, announcementColor: 1, errorColor: 2, successColor: 3,
+        HaxNotification: HaxNotificationMock, formatCoins, getRandomInt: (max) => max - 1,
+    });
+    const minigames = require(path.join(CORE, 'commands', 'minigames'))({
+        room: roomMock, state, authArray, db, Team: TeamLocal,
+        announcementColor: 1, errorColor: 2, successColor: 3, HaxNotification: HaxNotificationMock,
+        formatCoins, getRandomInt: (max) => max - 1,
+        runPokerPvp: pokerCmds.runPokerPvp,
+    });
+
+    const challenger = { id: 1, name: 'Challenger', team: TeamLocal.SPECTATORS };
+    const target = { id: 2, name: 'Target', team: TeamLocal.SPECTATORS };
+
+    sentLocal.length = 0;
+    await minigames.minigamesCommand(challenger, '!minigames poker');
+    check('poker requires a target — no target-less bot mode like blackjack has', sentLocal.some((s) => /Использование/.test(s.msg)), true);
+
+    sentLocal.length = 0;
+    await minigames.minigamesCommand(challenger, '!minigames poker #2');
+    check('the challenge is broadcast without any stake amount — poker\'s blinds are fixed, not a shared stake', sentLocal.some((s) => s.id === null && /"Покер"/.test(s.msg)), true);
+    check('...and the invite prompt to the target has no stake number either', sentLocal.some((s) => s.id === 2 && /Покер/.test(s.msg) && !/\d+ монет/.test(s.msg)), true);
+
+    sentLocal.length = 0;
+    const balancesBeforeAccept = [await db.getBalance('AUTH_CHALLENGER'), await db.getBalance('AUTH_TARGET')];
+    const runPromise = minigames.playCommand(target, '!play');
+    // Give playCommand's own microtask chain (invite lookup, then handing
+    // off to game.run()) a chance to actually register the poker session
+    // before checking — same reasoning as the blackjack forfeit test above.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    check('accepting hands off straight to poker.js\'s runPokerPvp — minigames.js never called its own spendCoins at all, balances are untouched by ITS logic', [await db.getBalance('AUTH_CHALLENGER'), await db.getBalance('AUTH_TARGET')], balancesBeforeAccept);
+    check('hole cards were dealt (poker.js\'s own setup actually ran)', sentLocal.some((s) => /Ваши карты/.test(s.msg)), true);
+
+    await pokerCmds.passCommand(challenger, '!pass'); // small blind (challenger) folds immediately
+    await runPromise;
+    check('the fold settles through poker.js\'s own economy — target (big blind) nets the small blind', await db.getBalance('AUTH_TARGET'), 500 + 25);
+    check('...and the challenger loses exactly the small blind, nothing more', await db.getBalance('AUTH_CHALLENGER'), 500 - 25);
 
     db.close();
 })();

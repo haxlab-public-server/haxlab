@@ -23,6 +23,7 @@ const INTENTIONAL_REMOVALS = {
     gameWebhook: '2026-07-25: replaced by a real Discord bot (src/core/discord.js) — see discordReportChannelId in config.js.',
     updateAdmins: '2026-07-26: removed the auto-fill-admin-slots mechanic — the room works fine with nobody admin; onPlayerAdminChange (misc.js) now explicitly revokes any admin badge from a non-master/non-permanent-admin instead (e.g. HaxBall auto-granting it to the first player in an empty room).',
     maxAdmins: '2026-07-26: only used by updateAdmins, removed alongside it.',
+    statsLeaderboardCommand: 'renamed to topsCommand (src/core/commands/player.js, "!tops") — same functionality, name not preserved during the extraction.',
 };
 
 const ROOT = path.join(__dirname, '..');
