@@ -15,13 +15,15 @@ module.exports = function createMasterCommands({
     HaxNotification,
     formatBanRemaining,
     formatVipRemaining,
+    discordBot,
 }) {
     // A grant past its expiry is functionally identical to never having
     // been VIP at all — purged from both the cache and the db the moment
     // any VIP command notices it, same "delete rather than just filter"
     // reasoning as auth_bans (see getAuthBans). Called at the top of every
-    // VIP command rather than on a timer: state.vipList only actually needs
-    // to be accurate when something's about to read or index into it.
+    // VIP command AND on a timer (see entry.js) — the timer is what makes
+    // the Discord role actually get revoked promptly on expiry, rather than
+    // only whenever someone next happens to run a VIP command.
     async function purgeExpiredVips() {
         const now = Date.now();
         const isExpired = (v) => v[2] != null && new Date(v[2]).getTime() <= now;
@@ -29,6 +31,7 @@ module.exports = function createMasterCommands({
         if (expired.length === 0) return;
         state.vipList = state.vipList.filter((v) => !isExpired(v));
         await Promise.all(expired.map((v) => db.removeVip(v[0])));
+        for (const v of expired) discordBot.revokeVipRole(v[0]);
     }
 
     function clearbansCommand(player, message) {
@@ -357,9 +360,17 @@ module.exports = function createMasterCommands({
     // share the exact same "cache + persist" pair instead of duplicating it.
     // Assumes the caller already confirmed `auth` isn't VIP yet (each
     // caller does its own check first, in its own way).
+    //
+    // Also grants the configured Discord VIP role, if this auth has one
+    // linked — including when the grant itself CAME from that role in the
+    // first place (grantVipByAuth): safe, not a loop, since
+    // grantVipRoleOnGuild (discord.js) skips a member who already has it,
+    // and even if it didn't, a redundant role-add never crosses
+    // handleGuildMemberUpdate's false->true edge a second time.
     async function applyVipGrant(auth, targetName, expiresAt) {
         state.vipList.push([auth, targetName, expiresAt]);
         await db.addVip(auth, targetName, expiresAt);
+        discordBot.grantVipRole(auth);
     }
 
     // Called from the Discord bridge (see entry.js's
@@ -387,6 +398,15 @@ module.exports = function createMasterCommands({
         return true;
     }
 
+    // Mirrors applyVipGrant: removes a VIP from both the live cache and the
+    // db, and revokes the Discord role too (if this auth has one linked).
+    // Assumes the caller already confirmed `auth` IS currently VIP.
+    async function revokeVip(auth) {
+        state.vipList = state.vipList.filter((v) => v[0] != auth);
+        await db.removeVip(auth);
+        discordBot.revokeVipRole(auth);
+    }
+
     async function removeVipCommand(player, message) {
         await purgeExpiredVips();
         const msgArray = message.split(/ +/).slice(1);
@@ -397,8 +417,7 @@ module.exports = function createMasterCommands({
                     const playerVip = room.getPlayer(parseInt(msgArray[0]));
 
                     if (state.vipList.map((v) => v[0]).includes(authArray[playerVip.id][0])) {
-                        state.vipList = state.vipList.filter((v) => v[0] != authArray[playerVip.id][0]);
-                        await db.removeVip(authArray[playerVip.id][0]);
+                        await revokeVip(authArray[playerVip.id][0]);
                         room.sendAnnouncement(
                             `${playerVip.name} больше не VIP !`,
                             null,
@@ -432,10 +451,10 @@ module.exports = function createMasterCommands({
                 // needing to be looked up by list index instead.
                 const auth = msgArray[0];
                 const playerVip = state.vipList.find((v) => v[0] == auth);
-                state.vipList = state.vipList.filter((v) => v[0] != auth);
-                await db.removeVip(auth);
+                const vipName = playerVip[1];
+                await revokeVip(auth);
                 room.sendAnnouncement(
-                    `${playerVip[1]} больше не VIP !`,
+                    `${vipName} больше не VIP !`,
                     null,
                     announcementColor,
                     'bold',
@@ -444,8 +463,7 @@ module.exports = function createMasterCommands({
             } else if (msgArray[0].length > 0 && parseInt(msgArray[0]) < state.vipList.length) {
                 const index = parseInt(msgArray[0]);
                 const playerVip = state.vipList[index];
-                state.vipList.splice(index, 1);
-                await db.removeVip(playerVip[0]);
+                await revokeVip(playerVip[0]);
                 room.sendAnnouncement(
                     `${playerVip[1]} больше не VIP !`,
                     null,
@@ -824,6 +842,7 @@ module.exports = function createMasterCommands({
         passwordCommand,
         grantVipByAuth,
         applyVipGrant,
+        purgeExpiredVips,
         restrictCmdCommand,
         unrestrictCmdCommand,
         cmdRestrictionsCommand,

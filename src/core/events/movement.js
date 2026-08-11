@@ -42,6 +42,7 @@ module.exports = function createMovementEvents({
     refundBetIfSubbedIn,
     forfeitBlackjackOnLeave,
     forfeitPokerOnLeave,
+    forfeitPokerOnTeamChange,
 }) {
     async function onPlayerJoin(player) {
         authArray[player.id] = [player.auth, player.conn];
@@ -126,6 +127,13 @@ module.exports = function createMovementEvents({
                 HaxNotification.CHAT
             );
             return;
+        }
+        // A seated poker player heading onto an actual team (not the AFK
+        // auto-revert above, which never really "enters" a team) counts as
+        // leaving the table — see poker.js's forfeitOnTeamChange for the
+        // mid-hand refund-and-remove this triggers.
+        if (changedPlayer.team != Team.SPECTATORS) {
+            forfeitPokerOnTeamChange(changedPlayer);
         }
         updateTeams();
         // Fire-and-forget, same reasoning as applyTeamForms() below — a

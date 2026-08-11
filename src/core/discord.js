@@ -281,6 +281,71 @@ async function checkVipRoleOnLink(guild, discordId, auth, targetName, { discordV
     grantVipByAuth(auth, targetName);
 }
 
+// The missing room->Discord half: a player granted VIP in the room (!setvip,
+// or the 4v4-win lottery) gets the configured Discord role too, once their
+// account is linked (see commands/player.js's linkDiscordCommand) — a no-op
+// if no role is configured, the account isn't linked, or they already have
+// it (checked explicitly rather than relying on Discord to no-op a redundant
+// .add(), so this never fires a pointless API call). Idempotent by design:
+// applyVipGrant (commands/master.js) calls this on every grant path,
+// including the Discord role -> room VIP direction itself (grantVipByAuth)
+// — that's safe, not a loop, since a member who already has the role just
+// gets skipped here, and handleGuildMemberUpdate below only reacts to the
+// false->true edge, which granting a role they already hold never crosses.
+async function grantVipRoleOnGuild(guild, discordId, { discordVipRoleId }) {
+    if (!discordVipRoleId || !guild) return;
+    const member = await guild.members.fetch(discordId).catch(() => null);
+    if (!member || member.roles.cache.has(discordVipRoleId)) return;
+    await member.roles.add(discordVipRoleId).catch((err) => console.error('Discord VIP role grant failed:', err));
+}
+
+// Symmetric to grantVipRoleOnGuild — called on !removevip and on the live
+// expiry sweep (commands/master.js's purgeExpiredVips). Same idempotence
+// reasoning: skips a member who doesn't have the role, and removing a role
+// they DO have only crosses handleGuildMemberUpdate's hadRole(true)->false
+// edge, which that handler explicitly ignores (only the grant edge matters
+// there) — so this can never loop back into re-granting room VIP.
+async function revokeVipRoleOnGuild(guild, discordId, { discordVipRoleId }) {
+    if (!discordVipRoleId || !guild) return;
+    const member = await guild.members.fetch(discordId).catch(() => null);
+    if (!member || !member.roles.cache.has(discordVipRoleId)) return;
+    await member.roles.remove(discordVipRoleId).catch((err) => console.error('Discord VIP role revoke failed:', err));
+}
+
+// Startup/reconnect reconciliation — the self-healing sweep that catches
+// everything the live, event-driven paths above can miss: a room VIP whose
+// account was linked to Discord AFTER the grant already happened (so
+// applyVipGrant's own grantVipRoleOnGuild call had nothing to resolve yet),
+// or an expiry that happened while this process was offline (so
+// purgeExpiredVips never got to fire its own revoke). Runs once per
+// ClientReady, not on a timer — cheap enough (one members.fetch(), one pass
+// over the vips table) that "every reconnect" is already frequent enough for
+// a background-drift fix like this.
+async function reconcileVipRoles(guild, { discordVipRoleId, db }) {
+    if (!discordVipRoleId || !guild) return;
+    const vips = db.getVips();
+    const vipAuths = new Set(vips.map((v) => v.auth));
+    for (const vip of vips) {
+        const discordId = db.getDiscordIdByAuth(vip.auth);
+        if (!discordId) continue;
+        await grantVipRoleOnGuild(guild, discordId, { discordVipRoleId });
+    }
+    // The reverse direction needs every current role-holder, not just known
+    // VIPs — that's the whole point (catching an expiry that happened
+    // without this process around to notice). Only ever revokes from a
+    // member we can trace back to a specific, no-longer-VIP auth; a role
+    // held for any other reason (a manual admin grant unrelated to room VIP,
+    // an unlinked account) is deliberately left alone.
+    const members = await guild.members.fetch().catch(() => null);
+    if (!members) return;
+    for (const member of members.values()) {
+        if (!member.roles.cache.has(discordVipRoleId)) continue;
+        const auth = db.getAuthByDiscordId(member.id);
+        if (!auth || vipAuths.has(auth)) continue;
+        await revokeVipRoleOnGuild(guild, member.id, { discordVipRoleId });
+    }
+}
+
 const OWNER_ONLY_REPLY = { content: 'Только владелец может использовать эту команду.', ephemeral: true };
 const OWNER_OR_ADMIN_ONLY_REPLY = { content: 'Только владелец или админ может использовать эту команду.', ephemeral: true };
 
@@ -542,6 +607,7 @@ module.exports = function createDiscordBot({
         // newly added/changed command can take up to ~1h to show up.
         await client.application.commands.set(slashCommandData).catch((err) => console.error('Discord slash command registration failed:', err));
         updateRoomStatus();
+        await reconcileVipRoles(client.guilds.cache.first(), { discordVipRoleId, db }).catch((err) => console.error('Discord VIP role reconciliation failed:', err));
     });
 
     client.on(Events.MessageCreate, async (message) => {
@@ -654,6 +720,18 @@ module.exports = function createDiscordBot({
             .catch((err) => console.error('Discord checkVipRoleOnLink failed:', err));
     }
 
+    // discordProcess.js's 'grantVipRole'/'revokeVipRole' IPC handling —
+    // called with a discordId already resolved from the room-supplied auth
+    // (see there for why the resolution happens on that side, not this one).
+    function grantVipRoleForGuild(discordId) {
+        grantVipRoleOnGuild(client.guilds.cache.first(), discordId, { discordVipRoleId })
+            .catch((err) => console.error('Discord VIP role grant failed:', err));
+    }
+    function revokeVipRoleForGuild(discordId) {
+        revokeVipRoleOnGuild(client.guilds.cache.first(), discordId, { discordVipRoleId })
+            .catch((err) => console.error('Discord VIP role revoke failed:', err));
+    }
+
     return {
         init,
         sendLog,
@@ -666,6 +744,8 @@ module.exports = function createDiscordBot({
         sendVoteBanNotification,
         sendMentionAlert,
         checkVipRoleOnLink: checkVipRoleOnLinkForGuild,
+        grantVipRole: grantVipRoleForGuild,
+        revokeVipRole: revokeVipRoleForGuild,
     };
 };
 
@@ -676,5 +756,8 @@ module.exports.handleSlashCommand = handleSlashCommand;
 module.exports.handleGuildMemberAdd = handleGuildMemberAdd;
 module.exports.handleGuildMemberUpdate = handleGuildMemberUpdate;
 module.exports.checkVipRoleOnLink = checkVipRoleOnLink;
+module.exports.grantVipRoleOnGuild = grantVipRoleOnGuild;
+module.exports.revokeVipRoleOnGuild = revokeVipRoleOnGuild;
+module.exports.reconcileVipRoles = reconcileVipRoles;
 module.exports.resolveStatsByName = resolveStatsByName;
 module.exports.listCurrentPlayers = listCurrentPlayers;

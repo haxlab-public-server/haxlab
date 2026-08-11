@@ -56,6 +56,12 @@ function createBridgedDiscordBot({ state, authArray }) {
         checkVipRoleOnLink(discordId, auth, targetName) {
             window.__discordSend('checkVipRoleOnLink', { discordId, auth, targetName });
         },
+        grantVipRole(auth) {
+            window.__discordSend('grantVipRole', { auth });
+        },
+        revokeVipRole(auth) {
+            window.__discordSend('revokeVipRole', { auth });
+        },
         updateRoomStatus() {
             window.__discordSend('roster', {
                 players: state.playersAll.map((p) => ({ id: p.id, name: p.name, auth: authArray[p.id]?.[0] ?? null })),

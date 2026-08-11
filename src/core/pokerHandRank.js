@@ -116,16 +116,28 @@ function compareScores(a, b) {
     return 0;
 }
 
-// Every way to leave exactly 2 of the 7 cards out — C(7,2) = C(7,5) = 21,
-// just a cheaper way to enumerate the same 21 five-card subsets.
-function fiveCardSubsets(sevenCards) {
-    const subsets = [];
-    for (let i = 0; i < sevenCards.length; i++) {
-        for (let j = i + 1; j < sevenCards.length; j++) {
-            subsets.push(sevenCards.filter((_, idx) => idx !== i && idx !== j));
+// Every way to choose 5 cards out of an arbitrary-length hand — C(5,5)=1,
+// C(6,5)=6, C(7,5)=21. Genuinely generic (not just "drop 2 of 7"): poker.js
+// evaluates a player's best combination as soon as one exists at all,
+// which means calling this at 6 cards too (2 hole + 4 community, the turn
+// street) — not just the 7-card showdown case this was originally written
+// only to actually get right.
+function fiveCardCombinations(cards) {
+    if (cards.length === 5) return [cards];
+    const combos = [];
+    function choose(start, picked) {
+        if (picked.length === 5) {
+            combos.push(picked.slice());
+            return;
+        }
+        for (let i = start; i < cards.length; i++) {
+            picked.push(cards[i]);
+            choose(i + 1, picked);
+            picked.pop();
         }
     }
-    return subsets;
+    choose(0, []);
+    return combos;
 }
 
 // `cards` is 2 hole + up to 5 community (5, 6, or 7 total — showdown always
@@ -133,7 +145,7 @@ function fiveCardSubsets(sevenCards) {
 // on to check evaluateFiveCardHand's own math directly without a full
 // 7-card showdown around it every time).
 function bestHandFromCards(cards) {
-    const candidates = cards.length === 5 ? [cards] : fiveCardSubsets(cards);
+    const candidates = fiveCardCombinations(cards);
     let best = null;
     for (const combo of candidates) {
         const evaluated = evaluateFiveCardHand(combo);

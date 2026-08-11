@@ -33,10 +33,25 @@ module.exports = function createMinigameCommands({
     getRandomInt,
     runPvpBlackjack,
     runPokerPvp,
+    pokerJoinOpenTable,
+    pokerIsSeated,
 }) {
     const INVITE_DURATION_MS = 30 * 1000;
     const CHAMBERS = 6;
     const SUSPENSE_DELAY_MS = 1200;
+
+    // Who's currently mid-match — set right before game.run() and cleared
+    // once it resolves, so a coinflip/russianroulette/blackjack player can
+    // never be dragged into a SECOND game (as either the target of a new
+    // invite or the one issuing it) while still finishing their first.
+    // Poker needs its own extra check on top of this: an open table's
+    // player stays seated (and busy) across many hands, well past when its
+    // own first hand's run() promise already resolved and cleared them
+    // from this set — see poker.js's isSeated.
+    const busyPlayers = new Set();
+    function isBusy(playerId) {
+        return busyPlayers.has(playerId) || pokerIsSeated(playerId);
+    }
 
     function getAuth(player) {
         return authArray[player.id][0];
@@ -155,7 +170,7 @@ module.exports = function createMinigameCommands({
         // fail fast on an obviously-broke challenger.
         if (game.customEconomy) {
             if (!targetLooksLikeId) {
-                announceError(player, `Использование: !minigames ${gameKey} #<id>. Пример: !minigames ${gameKey} #3.`);
+                announceError(player, `Использование: !minigames ${gameKey} #<id> [open]. Пример: !minigames ${gameKey} #3 open.`);
                 return;
             }
             const targetId = parseInt(targetToken.substring(1));
@@ -172,11 +187,25 @@ module.exports = function createMinigameCommands({
                 announceError(player, `${target.name} сейчас не зритель.`);
                 return;
             }
+            if (isBusy(player.id)) {
+                announceError(player, `Вы не можете вызвать кого-то, пока сами заняты в другой мини-игре.`);
+                return;
+            }
+            if (isBusy(target.id)) {
+                announceError(player, `${target.name} сейчас занят(а) в другой мини-игре — попробуйте позже.`);
+                return;
+            }
             const auth = getAuth(player);
             if (pendingInvites.has(target.id)) {
                 announceError(player, `У ${target.name} уже есть активное приглашение — подождите.`);
                 return;
             }
+            // Poker only: a third "open" argument turns the table into a
+            // real multi-way one (up to 4 seats) that other spectators can
+            // join between hands via "!play #<id>" — see poker.js's own
+            // joinOpenTable. Ignored by every other customEconomy game (none
+            // exist yet, but this stays a no-op rather than an error for one).
+            const open = (msgArray[2] ?? '').toLowerCase() === 'open';
             const timeoutHandle = setTimeout(() => {
                 pendingInvites.delete(target.id);
                 if (isOnline(target.id)) {
@@ -186,9 +215,9 @@ module.exports = function createMinigameCommands({
                     room.sendAnnouncement(`⌛ ${target.name} не принял(а) приглашение вовремя.`, player.id, errorColor, 'bold', HaxNotification.CHAT);
                 }
             }, INVITE_DURATION_MS);
-            pendingInvites.set(target.id, { challengerId: player.id, challengerAuth: auth, gameKey, stake: null, timeoutHandle });
+            pendingInvites.set(target.id, { challengerId: player.id, challengerAuth: auth, gameKey, stake: null, open, timeoutHandle });
             room.sendAnnouncement(
-                `🎲 ${player.name} вызывает ${target.name} на "${game.label}" !`,
+                `🎲 ${player.name} вызывает ${target.name} на "${game.label}"${open ? ' (открытый стол — присоединиться могут и другие зрители)' : ''} !`,
                 null,
                 announcementColor,
                 'bold',
@@ -221,6 +250,14 @@ module.exports = function createMinigameCommands({
         }
         if (target.team !== Team.SPECTATORS) {
             announceError(player, `${target.name} сейчас не зритель.`);
+            return;
+        }
+        if (isBusy(player.id)) {
+            announceError(player, `Вы не можете вызвать кого-то, пока сами заняты в другой мини-игре.`);
+            return;
+        }
+        if (isBusy(target.id)) {
+            announceError(player, `${target.name} сейчас занят(а) в другой мини-игре — попробуйте позже.`);
             return;
         }
         const auth = getAuth(player);
@@ -262,6 +299,36 @@ module.exports = function createMinigameCommands({
     }
 
     async function playCommand(player, message) {
+        const targetToken = message.split(/ +/)[1];
+        // "!play #<id>" — joining an OPEN poker table already in progress,
+        // not accepting a personal invite (a bare "!play" always means the
+        // latter — that branch is unchanged below). <id> is any player
+        // CURRENTLY seated at that table, not necessarily who started it.
+        if (targetToken != null && targetToken[0] === '#') {
+            if (player.team !== Team.SPECTATORS) {
+                announceError(player, `Присоединиться к покеру можно только зрителем.`);
+                return;
+            }
+            if (isBusy(player.id)) {
+                announceError(player, `Вы не можете присоединиться, пока сами заняты в другой мини-игре.`);
+                return;
+            }
+            const seatedPlayerId = parseInt(targetToken.substring(1));
+            const result = pokerJoinOpenTable(player, getAuth(player), seatedPlayerId);
+            if (!result.ok) {
+                const reasons = {
+                    notFound: `За этим игроком сейчас нет открытого покерного стола.`,
+                    notOpen: `Этот покерный стол закрыт для новых игроков.`,
+                    full: `За этим столом уже нет мест.`,
+                    alreadySeated: `Вы уже за покерным столом.`,
+                };
+                announceError(player, reasons[result.reason] ?? `Не удалось присоединиться.`);
+                return;
+            }
+            room.sendAnnouncement(`🃏 ${player.name} садится за покерный стол — присоединится со следующей раздачи.`, null, announcementColor, 'bold', HaxNotification.CHAT);
+            return;
+        }
+
         const invite = pendingInvites.get(player.id);
         if (!invite) {
             announceError(player, `У вас нет активных приглашений в мини-игры.`);
@@ -278,53 +345,72 @@ module.exports = function createMinigameCommands({
             announceError(player, `Один из вас больше не зритель — приглашение отменено.`);
             return;
         }
+        // Defensive re-check — time passed between the invite and this
+        // accept, so either side could have started something else in the
+        // meantime (another accepted invite, or sat down at an unrelated
+        // open poker table).
+        if (isBusy(challenger.id) || isBusy(player.id)) {
+            clearInvite(player.id);
+            announceError(player, `Один из вас уже занят в другой мини-игре — приглашение отменено.`);
+            return;
+        }
         clearInvite(player.id);
 
         const { stake, gameKey, challengerAuth } = invite;
         const targetAuth = getAuth(player);
         const game = GAMES[gameKey];
 
-        // Poker (and any future asymmetric-stakes game): no shared stake to
-        // charge here, no pot to award afterward — game.run() manages
-        // 100% of its own money movement internally (see poker.js).
-        if (game.customEconomy) {
-            await game.run(challenger, player, challengerAuth, targetAuth);
-            return;
-        }
+        busyPlayers.add(challenger.id);
+        busyPlayers.add(player.id);
+        try {
+            // Poker (and any future asymmetric-stakes game): no shared stake
+            // to charge here, no pot to award afterward — game.run() manages
+            // 100% of its own money movement internally (see poker.js).
+            // `open` only means anything to poker's own run() (runPokerPvp);
+            // any other customEconomy game's run() just ignores it.
+            if (game.customEconomy) {
+                await game.run(challenger, player, challengerAuth, targetAuth, { open: invite.open });
+                return;
+            }
 
-        const challengerCharged = await db.spendCoins(challengerAuth, challenger.name, stake);
-        if (!challengerCharged) {
-            sendToMatch(challenger, player, `У ${challenger.name} больше не хватает монет на ставку — игра отменена.`, errorColor);
-            return;
-        }
-        const targetCharged = await db.spendCoins(targetAuth, player.name, stake);
-        if (!targetCharged) {
-            await db.addCoins(challengerAuth, challenger.name, stake);
-            announceError(player, `Недостаточно монет для ставки ${formatCoins(stake)}.`);
-            return;
-        }
+            const challengerCharged = await db.spendCoins(challengerAuth, challenger.name, stake);
+            if (!challengerCharged) {
+                sendToMatch(challenger, player, `У ${challenger.name} больше не хватает монет на ставку — игра отменена.`, errorColor);
+                return;
+            }
+            const targetCharged = await db.spendCoins(targetAuth, player.name, stake);
+            if (!targetCharged) {
+                await db.addCoins(challengerAuth, challenger.name, stake);
+                announceError(player, `Недостаточно монет для ставки ${formatCoins(stake)}.`);
+                return;
+            }
 
-        const pot = stake * 2;
-        sendToMatch(challenger, player, `${game.label}: ${challenger.name} vs ${player.name}, банк ${formatCoins(pot)} !`, announcementColor);
-        const { winner, winnerAuth } = await game.run(challenger, player, challengerAuth, targetAuth);
+            const pot = stake * 2;
+            sendToMatch(challenger, player, `${game.label}: ${challenger.name} vs ${player.name}, банк ${formatCoins(pot)} !`, announcementColor);
+            const { winner, winnerAuth } = await game.run(challenger, player, challengerAuth, targetAuth);
 
-        // Only blackjack can ever produce this (both bust, or an equal
-        // total) — coinflip/russianroulette always name a winner.
-        if (winner == null) {
-            await db.addCoins(challengerAuth, challenger.name, stake);
-            await db.addCoins(targetAuth, player.name, stake);
-            // Broadcast (id: null), same visibility as the win announcement
-            // below — a private sendToMatch here left the whole room with
-            // no idea the match even finished, unlike every win.
-            room.sendAnnouncement(`🤝 ${challenger.name} и ${player.name} сыграли вничью ! Ставки возвращены.`, null, announcementColor, 'bold', HaxNotification.CHAT);
-            return;
-        }
+            // Only blackjack can ever produce this (both bust, or an equal
+            // total) — coinflip/russianroulette always name a winner.
+            if (winner == null) {
+                await db.addCoins(challengerAuth, challenger.name, stake);
+                await db.addCoins(targetAuth, player.name, stake);
+                // Broadcast (id: null), same visibility as the win
+                // announcement below — a private sendToMatch here left the
+                // whole room with no idea the match even finished, unlike
+                // every win.
+                room.sendAnnouncement(`🤝 ${challenger.name} и ${player.name} сыграли вничью ! Ставки возвращены.`, null, announcementColor, 'bold', HaxNotification.CHAT);
+                return;
+            }
 
-        await db.addCoins(winnerAuth, winner.name, pot);
-        const newBalance = await db.getBalance(winnerAuth);
-        room.sendAnnouncement(`🏆 ${winner.name} побеждает и забирает ${formatCoins(pot)} !`, null, successColor, 'bold', HaxNotification.CHAT);
-        if (isOnline(winner.id)) {
-            room.sendAnnouncement(`💰 Баланс: ${formatCoins(newBalance)}`, winner.id, announcementColor, 'bold', HaxNotification.CHAT);
+            await db.addCoins(winnerAuth, winner.name, pot);
+            const newBalance = await db.getBalance(winnerAuth);
+            room.sendAnnouncement(`🏆 ${winner.name} побеждает и забирает ${formatCoins(pot)} !`, null, successColor, 'bold', HaxNotification.CHAT);
+            if (isOnline(winner.id)) {
+                room.sendAnnouncement(`💰 Баланс: ${formatCoins(newBalance)}`, winner.id, announcementColor, 'bold', HaxNotification.CHAT);
+            }
+        } finally {
+            busyPlayers.delete(challenger.id);
+            busyPlayers.delete(player.id);
         }
     }
 

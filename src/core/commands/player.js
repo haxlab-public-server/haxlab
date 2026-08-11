@@ -55,9 +55,12 @@ module.exports = function createPlayerCommands({
     // !up — per-player cooldown so the same VIP can't camp the front of the
     // captain queue every round. The "only one live claim at a time" part
     // is separately enforced via state.priorityCaptainId itself (a single
-    // slot — see team/choosing.js's resolveNextCaptainId).
+    // slot — see team/choosing.js's resolveNextCaptainId). Keyed to an
+    // expiry timestamp (not just presence) so a rejected !up can tell the
+    // player how long is actually left, via the same formatBanRemaining
+    // helper !banauth/!authbans already use for the same "Xmin." shape.
     const UP_COOLDOWN_MS = 30 * 60 * 1000;
-    const upCooldownSet = new Set();
+    const upCooldownMap = new Map();
     function leaveCommand(player, message) {
         room.kickPlayer(player.id, 'Пока !', false);
     }
@@ -362,15 +365,22 @@ module.exports = function createPlayerCommands({
         // state.
         const betweenRandomRounds = state.gameState == State.STOP && !state.chooseMode;
         if (player.team == Team.SPECTATORS || state.players.length == 1 || betweenRandomRounds) {
+            // Room-capacity cap, not an abuse timer, unlike min/max-duration/
+            // cooldown below — but not uniform anymore either: admins are
+            // exempt outright (null = no cap), and a VIP gets one extra slot
+            // (the room's 5th AFK) on top of the regular cap, since neither
+            // is the "too many occupied-but-idle slots" problem this exists
+            // to prevent in the same way an ordinary player camping AFK is.
+            const afkCapForPlayer = getRole(player) >= Role.ADMIN_TEMP
+                ? null
+                : getRole(player) >= Role.VIP
+                    ? maxAFKCount + 1
+                    : maxAFKCount;
             if (AFKSet.has(player.id)) {
                 exitAfk(player);
-            } else if (AFKSet.size >= maxAFKCount) {
-                // Room-capacity cap, not an abuse timer — applies uniformly,
-                // admins included, unlike min/max-duration/cooldown below:
-                // too many occupied-but-idle slots is the actual problem
-                // regardless of who's sitting in them.
+            } else if (afkCapForPlayer != null && AFKSet.size >= afkCapForPlayer) {
                 room.sendAnnouncement(
-                    `Одновременно AFK может быть не больше ${maxAFKCount} игроков. Попробуйте позже.`,
+                    `Одновременно AFK может быть не больше ${afkCapForPlayer} игроков. Попробуйте позже.`,
                     player.id,
                     errorColor,
                     'bold',
@@ -686,9 +696,9 @@ module.exports = function createPlayerCommands({
             );
             return;
         }
-        if (upCooldownSet.has(player.id)) {
+        if (upCooldownMap.has(player.id)) {
             room.sendAnnouncement(
-                `Команду !up можно использовать раз в 30 минут !`,
+                `Команду !up можно использовать раз в 30 минут — осталось ${formatBanRemaining(upCooldownMap.get(player.id))} !`,
                 player.id,
                 errorColor,
                 'bold',
@@ -697,8 +707,9 @@ module.exports = function createPlayerCommands({
             return;
         }
         state.priorityCaptainId = player.id;
-        upCooldownSet.add(player.id);
-        setTimeout(() => upCooldownSet.delete(player.id), UP_COOLDOWN_MS);
+        const upExpiresAt = new Date(Date.now() + UP_COOLDOWN_MS).toISOString();
+        upCooldownMap.set(player.id, upExpiresAt);
+        setTimeout(() => upCooldownMap.delete(player.id), UP_COOLDOWN_MS);
         room.sendAnnouncement(
             `⭐ ${player.name} станет капитаном при следующем формировании команд !`,
             null,

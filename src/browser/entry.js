@@ -671,6 +671,7 @@ const {
     passwordCommand,
     grantVipByAuth,
     applyVipGrant,
+    purgeExpiredVips,
 } = createMasterCommands({
     room,
     state,
@@ -682,6 +683,7 @@ const {
     HaxNotification,
     formatBanRemaining,
     formatVipRemaining,
+    discordBot,
 });
 
 // Reaches into __roomBridge (defined earlier, before createMasterCommands
@@ -690,6 +692,16 @@ const {
 // getting the configured VIP role (see index.js's 'grantVip' handling and
 // discordProcess.js/discord.js's guildMemberUpdate wiring).
 window.__roomBridge.grantVipByAuth = grantVipByAuth;
+
+// Proactive VIP-expiry sweep — purgeExpiredVips() also runs reactively at
+// the top of every VIP command, but that alone would leave an expired VIP's
+// Discord role sitting there indefinitely until someone next happens to run
+// !setvip/!removevip/!vips. This is what actually makes role revocation
+// "automatic" on expiry rather than just "eventually, if anyone asks".
+const VIP_EXPIRY_CHECK_INTERVAL_MS = 5 * 60 * 1000;
+setInterval(() => {
+    purgeExpiredVips().catch((err) => discordBot.sendLog(`⚠️ Не удалось проверить истекшие VIP: ${err.message}`));
+}, VIP_EXPIRY_CHECK_INTERVAL_MS);
 
 /* GAME FUNCTIONS */
 
@@ -1367,6 +1379,8 @@ const {
 const createPokerCommands = require('../core/commands/poker');
 const {
     runPokerPvp,
+    joinOpenTable: pokerJoinOpenTable,
+    isSeated: pokerIsSeated,
     // Renamed on the way out — core/betting.js's own (currently disabled,
     // see commands.js) spectator match-betting feature already claimed the
     // plain `betCommand` name earlier in this file. Only ONE of the two
@@ -1378,6 +1392,7 @@ const {
     checkCommand,
     passCommand,
     forfeitOnLeave: forfeitPokerOnLeave,
+    forfeitOnTeamChange: forfeitPokerOnTeamChange,
 } = createPokerCommands({
     room,
     state,
@@ -1405,6 +1420,8 @@ const { minigamesCommand, playCommand } = createMinigameCommands({
     getRandomInt,
     runPvpBlackjack,
     runPokerPvp,
+    pokerJoinOpenTable,
+    pokerIsSeated,
 });
 
 /* COMMANDS */
@@ -1530,6 +1547,7 @@ Object.assign(room, wrapEventHandlers(createMovementEvents({
     refundBetIfSubbedIn,
     forfeitBlackjackOnLeave,
     forfeitPokerOnLeave,
+    forfeitPokerOnTeamChange,
 })));
 
 /* PLAYER ACTIVITY */

@@ -155,10 +155,20 @@ console.log('\n--- commands/master.js: writes must land in shared state ---');
     authArray[9] = ['AUTH_CALLER'];
     authArray[5] = ['AUTH_TARGET'];
     const { formatBanRemaining, formatVipRemaining } = require(path.join(CORE, 'utils'));
+    // Every VIP grant/revoke path is supposed to fire the matching Discord
+    // role bridge call (see commands/master.js's applyVipGrant/revokeVip) —
+    // tracked here so the tests below can confirm it actually happens, not
+    // just that state.vipList/the db changed.
+    const discordRoleCalls = [];
+    const discordBotMock = {
+        grantVipRole: (auth) => discordRoleCalls.push({ fn: 'grant', auth }),
+        revokeVipRole: (auth) => discordRoleCalls.push({ fn: 'revoke', auth }),
+    };
     const master = require(path.join(CORE, 'commands', 'master'))({
         room, state, authArray, db, masterList: ['AUTH_CALLER'],
         announcementColor: 1, errorColor: 2, HaxNotification,
         formatBanRemaining, formatVipRemaining,
+        discordBot: discordBotMock,
     });
     const caller = { id: 9, name: 'Master' };
 
@@ -203,10 +213,12 @@ console.log('\n--- commands/master.js: writes must land in shared state ---');
     // does), not room.getPlayer — needs a matching entry.
     state.playersAll = [{ id: 5, name: 'NewAdmin' }];
     roomCalls.length = 0;
+    discordRoleCalls.length = 0;
     await master.setVipCommand(caller, '!setvip #5');
     check('setVipCommand adds to the in-memory vipList', state.vipList, [['AUTH_TARGET', 'NewAdmin', null]]);
     check('setVipCommand persists the VIP to the database', db.getVips(), [{ auth: 'AUTH_TARGET', playerName: 'NewAdmin', expiresAt: null }]);
     check('setVipCommand never touches the room admin badge', roomCalls.some((c) => c.startsWith('setPlayerAdmin')), false);
+    check('setVipCommand grants the Discord VIP role too', discordRoleCalls, [{ fn: 'grant', auth: 'AUTH_TARGET' }]);
 
     sent.length = 0;
     await master.setVipCommand(caller, '!setvip #5');
@@ -217,10 +229,12 @@ console.log('\n--- commands/master.js: writes must land in shared state ---');
     check('vipListCommand lists the current VIP with "навсегда" for a permanent grant', sent[0].msg, '📢 Список VIP : NewAdmin (навсегда) [0].');
 
     roomCalls.length = 0;
+    discordRoleCalls.length = 0;
     await master.removeVipCommand(caller, '!removevip #5');
     check('removeVipCommand clears the in-memory vipList', state.vipList, []);
     check('removeVipCommand removes the VIP from the database', db.getVips(), []);
     check('removeVipCommand never touches the room admin badge', roomCalls.some((c) => c.startsWith('setPlayerAdmin')), false);
+    check('removeVipCommand revokes the Discord VIP role too', discordRoleCalls, [{ fn: 'revoke', auth: 'AUTH_TARGET' }]);
 
     sent.length = 0;
     await master.vipListCommand(caller, '!vips');
@@ -244,10 +258,12 @@ console.log('\n--- commands/master.js: writes must land in shared state ---');
     state.vipList[0][2] = new Date(Date.now() - 1000).toISOString();
     await db.addVip('AUTH_TARGET', 'NewAdmin', state.vipList[0][2]);
     sent.length = 0;
+    discordRoleCalls.length = 0;
     await master.vipListCommand(caller, '!vips');
     check('an expired VIP is purged from state by the next VIP command', state.vipList, []);
     check('an expired VIP is purged from the db too', db.getVips(), []);
     check('the purge leaves the list reporting empty', /никого нет/.test(sent[0].msg), true);
+    check('the purge revokes the Discord VIP role — this is what makes expiry actually automatic, not just lazy', discordRoleCalls, [{ fn: 'revoke', auth: 'AUTH_TARGET' }]);
 
     // Granting VIP by raw auth (offline players too — the ask this turn).
     sent.length = 0;
@@ -270,11 +286,17 @@ console.log('\n--- commands/master.js: writes must land in shared state ---');
     // discord.js's handleGuildMemberUpdate). Always permanent, and shares
     // the exact same in-memory+db write setVipCommand itself does.
     sent.length = 0;
+    discordRoleCalls.length = 0;
     const grantedFirstTime = await master.grantVipByAuth('AUTH_DISCORD_VIP', 'DiscordGuy');
     check('grantVipByAuth reports a fresh grant', grantedFirstTime, true);
     check('grantVipByAuth adds to the in-memory vipList as a permanent grant', state.vipList.some((v) => v[0] === 'AUTH_DISCORD_VIP' && v[2] === null), true);
     check('grantVipByAuth persists to the db', db.getVips().some((v) => v.auth === 'AUTH_DISCORD_VIP' && v.expiresAt === null), true);
     check('grantVipByAuth announces the grant', /DiscordGuy/.test(sent[0].msg), true);
+    // Goes through applyVipGrant same as !setvip, so it fires the same
+    // Discord role bridge call — redundant in reality (they already have
+    // the role, that's WHY this path fired at all) but harmless: discord.js's
+    // grantVipRoleOnGuild checks .cache.has before adding anything.
+    check('grantVipByAuth still calls the Discord role grant bridge (a harmless no-op on the real Discord side)', discordRoleCalls, [{ fn: 'grant', auth: 'AUTH_DISCORD_VIP' }]);
 
     sent.length = 0;
     const grantedAgain = await master.grantVipByAuth('AUTH_DISCORD_VIP', 'DiscordGuy');
@@ -659,6 +681,10 @@ console.log('\n--- db + roomStats.js/player.js: player data actually round-trips
     sent.length = 0;
     player.upCommand({ id: 1, name: 'Alice', team: Team.SPECTATORS }, '!up');
     check('the SAME VIP is still rate-limited by their own 30-minute cooldown, even after their claim was consumed', /раз в 30 минут/.test(sent[0].msg), true);
+    // The claim above was JUST made (a moment ago, in this same test), so
+    // the full ~30 minutes should still be showing — confirms the rejection
+    // reports an actual remaining time, not just a generic "try later".
+    check('...and it reports how much of the cooldown is actually left, not just that one exists', /осталось 30 мин\./.test(sent[0].msg), true);
 
     sent.length = 0;
     player.upCommand({ id: 2, name: 'Bob', team: Team.SPECTATORS }, '!up');
@@ -1956,7 +1982,7 @@ console.log('\n--- discord.js: message/interaction-handling logic (no live Disco
 // enough for it to finish before counting pass/fail.
 (async () => {
     const { createSqliteDatabase } = require(path.join(__dirname, '..', 'db', 'sqlite'));
-    const { handleIncomingMessage, handleSlashCommand, handleGuildMemberAdd, handleGuildMemberUpdate, checkVipRoleOnLink, listCurrentPlayers } = require(path.join(CORE, 'discord'));
+    const { handleIncomingMessage, handleSlashCommand, handleGuildMemberAdd, handleGuildMemberUpdate, checkVipRoleOnLink, grantVipRoleOnGuild, revokeVipRoleOnGuild, reconcileVipRoles, listCurrentPlayers } = require(path.join(CORE, 'discord'));
     const db = createSqliteDatabase(':memory:');
     db.init();
     db.savePlayerStats('AUTH_X', { playerName: 'Xara', games: 3, wins: 2, goals: 7, assists: 1, ownGoals: 0, CS: 1, playtime: 900 });
@@ -2231,6 +2257,90 @@ console.log('\n--- discord.js: message/interaction-handling logic (no live Disco
     granted.length = 0;
     await checkVipRoleOnLink(guildWith(vipMember), 'DISCORD_SOME_OTHER_ID', 'AUTH_PRELINKED', 'PrelinkedGuy', { discordVipRoleId: 'VIP_ROLE_ID', grantVipByAuth });
     check('checkVipRoleOnLink is a no-op if the member can\'t even be fetched (e.g. left the server)', granted, []);
+
+    // grantVipRoleOnGuild/revokeVipRoleOnGuild: the missing room->Discord
+    // half — a real GuildMember shape needs .roles.cache (a Collection,
+    // just .has() here) AND separate .roles.add()/.roles.remove() methods
+    // (not Set mutation), matching discord.js's actual API surface.
+    function makeMember(id, initialRoleIds = []) {
+        const cache = new Set(initialRoleIds);
+        const calls = { added: [], removed: [] };
+        return {
+            id,
+            roles: {
+                cache: { has: (rid) => cache.has(rid) },
+                add: (rid) => { cache.add(rid); calls.added.push(rid); return Promise.resolve(); },
+                remove: (rid) => { cache.delete(rid); calls.removed.push(rid); return Promise.resolve(); },
+            },
+            _calls: calls,
+        };
+    }
+    // A single fetch stand-in serves both guild.members.fetch(id) (one
+    // member) and guild.members.fetch() with no args (bulk — returns
+    // something with .values(), like a real discord.js Collection).
+    function guildFetchingByIds(members) {
+        const byId = new Map(members.map((m) => [m.id, m]));
+        return {
+            members: {
+                fetch: (id) => id === undefined
+                    ? Promise.resolve(byId)
+                    : (byId.has(id) ? Promise.resolve(byId.get(id)) : Promise.reject(new Error('unknown member'))),
+            },
+        };
+    }
+
+    const grantTarget = makeMember('DISCORD_GRANT_TARGET', []);
+    const guildForGrant = guildFetchingByIds([grantTarget]);
+    await grantVipRoleOnGuild(guildForGrant, 'DISCORD_GRANT_TARGET', { discordVipRoleId: 'VIP_ROLE_ID' });
+    check('grantVipRoleOnGuild adds the role to a member who does not have it', grantTarget.roles.cache.has('VIP_ROLE_ID'), true);
+
+    const alreadyHasRole = makeMember('DISCORD_ALREADY_VIP', ['VIP_ROLE_ID']);
+    await grantVipRoleOnGuild(guildFetchingByIds([alreadyHasRole]), 'DISCORD_ALREADY_VIP', { discordVipRoleId: 'VIP_ROLE_ID' });
+    check('grantVipRoleOnGuild is a no-op (no API call) for a member who already has the role', alreadyHasRole._calls.added, []);
+
+    await grantVipRoleOnGuild(guildForGrant, 'DISCORD_UNKNOWN', { discordVipRoleId: 'VIP_ROLE_ID' });
+    check('grantVipRoleOnGuild does not throw when the member cannot be fetched', true, true);
+
+    await grantVipRoleOnGuild(guildForGrant, 'DISCORD_GRANT_TARGET', { discordVipRoleId: '' });
+    check('grantVipRoleOnGuild is a no-op when no VIP role is configured', true, true);
+
+    const revokeTarget = makeMember('DISCORD_REVOKE_TARGET', ['VIP_ROLE_ID']);
+    await revokeVipRoleOnGuild(guildFetchingByIds([revokeTarget]), 'DISCORD_REVOKE_TARGET', { discordVipRoleId: 'VIP_ROLE_ID' });
+    check('revokeVipRoleOnGuild removes the role from a member who has it', revokeTarget.roles.cache.has('VIP_ROLE_ID'), false);
+
+    const noRoleToRevoke = makeMember('DISCORD_NO_ROLE', []);
+    await revokeVipRoleOnGuild(guildFetchingByIds([noRoleToRevoke]), 'DISCORD_NO_ROLE', { discordVipRoleId: 'VIP_ROLE_ID' });
+    check('revokeVipRoleOnGuild is a no-op (no API call) for a member who does not have the role', noRoleToRevoke._calls.removed, []);
+
+    // reconcileVipRoles: startup/reconnect self-heal — grants the role to
+    // every current VIP with a linked account that's missing it, AND
+    // revokes it from anyone holding it whose linked auth is no longer VIP
+    // (an expiry that happened while this process was offline, missing the
+    // live purgeExpiredVips path entirely). Never touches a role-holder it
+    // can't trace back to a specific auth either way.
+    await db.addVip('AUTH_RECONCILE_MISSING_ROLE', 'MissingRole', null);
+    db.linkDiscordId('AUTH_RECONCILE_MISSING_ROLE', 'DISCORD_RECONCILE_GRANT');
+    await db.addVip('AUTH_RECONCILE_STILL_VIP', 'StillVip', null);
+    db.linkDiscordId('AUTH_RECONCILE_STILL_VIP', 'DISCORD_RECONCILE_KEEP');
+    db.linkDiscordId('AUTH_RECONCILE_EXPIRED_OFFLINE', 'DISCORD_RECONCILE_STALE');
+    // Deliberately no VIP row for AUTH_RECONCILE_EXPIRED_OFFLINE — simulates
+    // it having expired while nothing was around to run purgeExpiredVips.
+
+    const reconcileGrant = makeMember('DISCORD_RECONCILE_GRANT', []); // VIP, linked, missing the role
+    const reconcileKeep = makeMember('DISCORD_RECONCILE_KEEP', ['VIP_ROLE_ID']); // VIP, linked, already correct
+    const reconcileStale = makeMember('DISCORD_RECONCILE_STALE', ['VIP_ROLE_ID']); // NOT VIP anymore, linked — should lose it
+    const reconcileUnlinked = makeMember('DISCORD_RECONCILE_UNLINKED', ['VIP_ROLE_ID']); // has the role, no linked auth at all — untouchable
+    const reconcileGuild = guildFetchingByIds([reconcileGrant, reconcileKeep, reconcileStale, reconcileUnlinked]);
+
+    await reconcileVipRoles(reconcileGuild, { discordVipRoleId: 'VIP_ROLE_ID', db });
+    check('reconcileVipRoles grants the role to a current VIP who is missing it', reconcileGrant.roles.cache.has('VIP_ROLE_ID'), true);
+    check('reconcileVipRoles leaves a correctly-synced VIP untouched (no redundant API calls)', [reconcileKeep._calls.added, reconcileKeep._calls.removed], [[], []]);
+    check('reconcileVipRoles revokes the role from an auth that is no longer VIP (an offline expiry)', reconcileStale.roles.cache.has('VIP_ROLE_ID'), false);
+    check('reconcileVipRoles never touches a role-holder it cannot trace to any linked auth', [reconcileUnlinked._calls.added, reconcileUnlinked._calls.removed], [[], []]);
+
+    const reconcileGrantAgain = makeMember('DISCORD_RECONCILE_GRANT', []);
+    await reconcileVipRoles(guildFetchingByIds([reconcileGrantAgain]), { discordVipRoleId: '', db });
+    check('reconcileVipRoles is a no-op when no VIP role is configured', reconcileGrantAgain.roles.cache.has('VIP_ROLE_ID'), false);
 
     db.close();
 })();
@@ -2843,6 +2953,7 @@ console.log('\n--- events/movement.js: auth-bans block a join regardless of conn
         refundBetIfSubbedIn: async () => {},
         forfeitBlackjackOnLeave: noop,
         forfeitPokerOnLeave: noop,
+        forfeitPokerOnTeamChange: noop,
     });
 
     roomCalls.length = 0;
@@ -5293,40 +5404,63 @@ console.log('\n--- commands/player.js: !afk never fires a no-op room.setPlayerTe
     check('!afk from the lone remaining player, still on a team, does move them to spectators', roomCallsLocal, [`setPlayerTeam:3:${Team.SPECTATORS}`]);
 }
 
-console.log('\n--- commands/player.js: !afk enforces a room-wide concurrent cap ---');
+console.log('\n--- commands/player.js: !afk room-wide concurrent cap — 4 for everyone, +1 (5th) for VIP, none for admins ---');
 {
     // Too many players sitting AFK at once starves the room of people
     // actually available to play — a room-capacity cap, not an abuse timer
-    // (min duration/cooldown above), so it applies uniformly, admins
-    // included.
+    // (min duration/cooldown above). No longer uniform though: a VIP gets
+    // one extra slot (the room's 5th), and an admin is exempt outright.
     const Team = { RED: 1, BLUE: 2, SPECTATORS: 0 };
     const State = { PLAY: 0, PAUSE: 1, STOP: 2 };
     const HaxNotificationMock = { CHAT: 1 };
+    const Role = { PLAYER: 0, VIP: 1, ADMIN_TEMP: 2 };
     const sentLocal = [];
     const roomMock = { setPlayerTeam: () => {}, sendAnnouncement: (msg, id, color, style) => sentLocal.push({ msg, id, style }) };
     const AFKSetLocal = new Map([[10, Date.now()], [11, Date.now()], [12, Date.now()], [13, Date.now()]]);
+    // getRole is captured once at factory time, but every call site here
+    // wants a DIFFERENT role for a DIFFERENT hypothetical player — a live
+    // variable it reads at call time lets one player.js instance (and one
+    // evolving AFKSetLocal) serve every case instead of rebuilding the
+    // factory per role.
+    let roleForNextCall = Role.PLAYER;
     const player = require(path.join(CORE, 'commands', 'player'))({
         room: roomMock, state: { players: [], gameState: State.PLAY }, Team, State, AFKSet: AFKSetLocal,
         AFKMinSet: new Set(), AFKCooldownSet: new Set(), minAFKDuration: 5, maxAFKDuration: 30, maxAFKDurationVip: 60, maxAFKCount: 4, AFKCooldown: 2,
-        Role: { PLAYER: 0, VIP: 1 }, getRole: () => 0,
+        Role, getRole: () => roleForNextCall,
         announcementColor: 1, errorColor: 2, HaxNotification: HaxNotificationMock,
         handlePlayersJoin: () => {}, handlePlayersLeave: () => {}, updateTeams: () => {},
     });
 
     sentLocal.length = 0;
-    player.afkCommand({ id: 14, name: 'FifthOne', team: Team.SPECTATORS, admin: false }, '!afk');
-    check('a 5th concurrent AFK is rejected once the cap (4) is already reached', AFKSetLocal.has(14), false);
+    roleForNextCall = Role.PLAYER;
+    player.afkCommand({ id: 14, name: 'FifthOne', team: Team.SPECTATORS }, '!afk');
+    check('an ordinary player is rejected once the base cap (4) is already reached', AFKSetLocal.has(14), false);
     check('...with a clear reason why', /не больше 4/.test(sentLocal[0].msg), true);
 
     sentLocal.length = 0;
-    player.afkCommand({ id: 14, name: 'FifthOne', team: Team.SPECTATORS, admin: true }, '!afk');
-    check('the cap applies to admins too, not just ordinary players', AFKSetLocal.has(14), false);
+    roleForNextCall = Role.VIP;
+    player.afkCommand({ id: 14, name: 'FifthVip', team: Team.SPECTATORS }, '!afk');
+    check('a VIP gets the room\'s 5th AFK slot even though ordinary players are already capped at 4', AFKSetLocal.has(14), true);
 
-    // Someone returns, freeing a slot — the next attempt succeeds normally.
-    AFKSetLocal.delete(10);
     sentLocal.length = 0;
-    player.afkCommand({ id: 14, name: 'FifthOne', team: Team.SPECTATORS, admin: false }, '!afk');
-    check('once a slot frees up, the next !afk goes through normally', AFKSetLocal.has(14), true);
+    roleForNextCall = Role.VIP;
+    player.afkCommand({ id: 15, name: 'SixthVip', team: Team.SPECTATORS }, '!afk');
+    check('...but a SECOND VIP is still rejected once even the VIP-extended cap (5) is reached', AFKSetLocal.has(15), false);
+    check('...and the message reflects the VIP\'s own (higher) cap, not the base one', /не больше 5/.test(sentLocal[0].msg), true);
+
+    sentLocal.length = 0;
+    roleForNextCall = Role.ADMIN_TEMP;
+    player.afkCommand({ id: 16, name: 'Admin', team: Team.SPECTATORS }, '!afk');
+    check('an admin is exempt from the cap entirely, even past the VIP-extended limit', AFKSetLocal.has(16), true);
+
+    // Someone returns, freeing a slot — the next ordinary-player attempt succeeds normally.
+    AFKSetLocal.delete(10);
+    AFKSetLocal.delete(14);
+    AFKSetLocal.delete(16);
+    sentLocal.length = 0;
+    roleForNextCall = Role.PLAYER;
+    player.afkCommand({ id: 17, name: 'Normal', team: Team.SPECTATORS }, '!afk');
+    check('once slots free up, an ordinary player\'s !afk goes through normally again', AFKSetLocal.has(17), true);
 }
 
 console.log('\n--- commands/player.js: a current VIP gets a longer max AFK duration before auto-return ---');
@@ -5679,11 +5813,14 @@ console.log('\n--- core/overflowPassword.js: activates/rotates/deactivates aroun
     // Unlike the checks above, reuse never applies here — only the interval
     // (20ms) drives further rotation now, so this needs real elapsed time
     // rather than the synchronous "free" regenerations the pre-fix version
-    // got from every re-crossing. 150ms gives it ~7 possible ticks, well
-    // clear of ordinary event-loop jitter for a >=3 threshold.
+    // got from every re-crossing. 400ms gives it ~20 possible ticks — wide
+    // margin above ordinary event-loop jitter for a >=3 threshold, sized up
+    // from 150ms once this file's own growing pile of concurrent async test
+    // blocks started contending for the event loop enough to occasionally
+    // starve a 150ms window down to under 3 real ticks.
     setTimeout(() => {
         check('the password still rotates on its own while the room stays full', passwords.length >= 3, true);
-    }, 150);
+    }, 400);
 }
 
 console.log('\n--- core/overflowPassword.js: reuses a persisted password across a simulated restart ---');
@@ -5750,12 +5887,15 @@ console.log('\n--- core/announcements.js: cycles through messages in order, on a
     });
     start();
 
-    // 20ms interval, checked at 250ms — well over the 4 ticks needed to
+    // 20ms interval, checked at 800ms — well over the 4 ticks needed to
     // prove the loop-back, with plenty of margin for event-loop jitter from
-    // the other timer-driven checks running in this same process.
+    // the other timer-driven checks running in this same process (widened
+    // from 250ms, then 500ms, as this file's own growing pile of concurrent
+    // async test blocks kept contending for the event loop enough to
+    // occasionally starve a tighter window down to fewer than 4 real ticks).
     setTimeout(() => {
         check('messages are sent in order and loop back to the start', sentLocal.slice(0, 4), ['one', 'two', 'three', 'one']);
-    }, 250);
+    }, 800);
 }
 
 console.log('\n--- core/announcements.js: an empty message list never fires (and never throws) ---');
@@ -7409,6 +7549,7 @@ console.log('\n--- commands/minigames.js: only the challenge and the final winne
         announcementColor: 1, errorColor: 2, successColor: 3, HaxNotification: HaxNotificationMock,
         formatCoins,
         getRandomInt: () => 0, // coinflip: challenger always wins immediately, no need to wait out a second sleep
+        pokerIsSeated: () => false, // no poker in this test
     });
 
     const challenger = { id: 1, name: 'Challenger', team: TeamLocal.SPECTATORS };
@@ -7625,6 +7766,7 @@ console.log('\n--- core/commands/blackjack.js + minigames.js: pvp mode (closest 
         announcementColor: 1, errorColor: 2, successColor: 3, HaxNotification: HaxNotificationMock,
         formatCoins, getRandomInt: (max) => max - 1,
         runPvpBlackjack: bjPvp.runPvpBlackjack,
+        pokerIsSeated: () => false, // no poker in this test
     });
 
     const challenger = { id: 1, name: 'Challenger', team: TeamLocal.SPECTATORS };
@@ -7649,6 +7791,23 @@ console.log('\n--- core/commands/blackjack.js + minigames.js: pvp mode (closest 
     await minigames.playCommand(target, '!play');
     check('accepting deals both hands and prompts the challenger first (challenger goes first)', sentLocal.some((s) => s.id === 1 && /Ваш ход/.test(s.msg)), true);
     check('the target sees a waiting message instead, not their own hand yet', sentLocal.some((s) => s.id === 2 && /Ход Challenger/.test(s.msg)), true);
+
+    // Busy-player guard: while this hand is still mid-progress (playCommand
+    // is suspended awaiting game.run(), which only resolves once the hand
+    // settles below), neither the target nor the challenger can be pulled
+    // into a SECOND minigame — nor can they issue a new invite themselves.
+    const onlooker = { id: 3, name: 'Onlooker', team: TeamLocal.SPECTATORS };
+    state.playersAll.push(onlooker);
+    authArray[3] = ['AUTH_ONLOOKER'];
+    await db.addCoins('AUTH_ONLOOKER', 'Onlooker', 500);
+
+    sentLocal.length = 0;
+    await minigames.minigamesCommand(onlooker, '!minigames coinflip #2 50');
+    check('a third player can\'t invite someone already mid-hand into a second minigame', /занят/.test(sentLocal[0].msg), true);
+
+    sentLocal.length = 0;
+    await minigames.minigamesCommand(target, '!minigames coinflip #3 50');
+    check('...and the busy player can\'t issue a new invite of their own either', /сами заняты/.test(sentLocal[0].msg), true);
 
     sentLocal.length = 0;
     await bjPvp.hitCommand(target, '!hit');
@@ -7739,9 +7898,20 @@ console.log('\n--- core/pokerHandRank.js: pure hand evaluation — every categor
     const pairPreserved = bestHandFromCards(hand('3♥', '8♦', '2♠', '6♦', '10♠', '4♦', '3♣'));
     check('best-5-of-7 keeps the pair (3♥3♣) rather than discarding one 3 for a higher single kicker', pairPreserved.category, CATEGORY.PAIR);
     check('...kickers are the top 3 remaining ranks (10,8,6), not just the first 3 cards in hand order', pairPreserved.score.slice(1), [3, 10, 8, 6, 0]);
+
+    // Exactly 6 cards (2 hole + 4 community — the turn street, before the
+    // river completes a real 7-card showdown) used to crash: the old
+    // fiveCardSubsets only actually handled "drop 2 of 7" correctly,
+    // silently producing 4-card (not 5-card) combos for any other length,
+    // which evaluateFiveCardHand then choked on. Caught by poker.js's own
+    // "show the current combination as soon as one exists" feature, which
+    // calls this at every street once 5+ cards are available — including 6.
+    const sixCardBest = bestHandFromCards(hand('A♠', 'K♠', 'Q♠', 'J♠', '10♠', '2♥'));
+    check('best-of-6 (the turn street) finds the ace-high straight flush instead of crashing', sixCardBest.category, CATEGORY.STRAIGHT_FLUSH);
+    check('...and correctly ignores the unrelated 6th card', sixCardBest.score[1], 14);
 })();
 
-console.log('\n--- core/commands/poker.js: heads-up Texas Hold\'em — blinds, betting validation, streets, showdown settlement ---');
+console.log('\n--- core/commands/poker.js: regular (non-open) heads-up — blinds, betting validation, streets, showdown, private-vs-public visibility ---');
 (async () => {
     const TeamLocal = { RED: 1, BLUE: 2, SPECTATORS: 0 };
     const HaxNotificationMock = { CHAT: 1 };
@@ -7807,37 +7977,53 @@ console.log('\n--- core/commands/poker.js: heads-up Texas Hold\'em — blinds, b
         sentLocal.length = 0;
         await poker.callCommand(challenger, '!call');
         check('the challenger calling the big blind is announced', sentLocal.some((s) => /уравнивает/.test(s.msg)), true);
+        check('...and it\'s private — sent only to the two players in the hand, never broadcast (id: null) to the room', sentLocal.every((s) => s.id !== null), true);
 
         sentLocal.length = 0;
         await poker.callCommand(target, '!call');
         check('calling with nothing to call is rejected — use "!check" instead', sentLocal.some((s) => /Уравнивать нечего/.test(s.msg)), true);
 
-        // Flop — big blind (target) acts first postflop.
+        // The challenger's call alone doesn't end preflop — heads-up, the
+        // big blind still gets their own real option (check or raise) even
+        // once the small blind has already called. THIS is what actually
+        // deals the flop.
+        sentLocal.length = 0;
+        await poker.checkCommand(target, '!check');
+        check('the big blind\'s own preflop option ends the street and deals the flop (3 community cards now shown)', sentLocal.some((s) => /Стол: \S+ \S+ \S+ \|/.test(s.msg)), true);
+
+        // Flop — big blind (target) acts first postflop too.
         sentLocal.length = 0;
         await poker.betCommand(target, '!bet 10'); // below MIN_BET (50) and not a capped all-in
         check('a bet below the minimum is rejected', sentLocal.some((s) => /Минимальная ставка/.test(s.msg)), true);
         await poker.betCommand(target, '!bet 100000'); // bigger than target's own remaining stack (450)
         check('a bet bigger than your own stack is rejected', sentLocal.some((s) => /Недостаточно монет/.test(s.msg)), true);
-        await poker.checkCommand(target, '!check'); // there's nothing to call yet, so a check is legal too
+        sentLocal.length = 0;
+        await poker.checkCommand(target, '!check'); // target's real flop action — legal, nothing to call yet
         check('a legal check on the flop passes the turn to the other player without ending the street yet', sentLocal.some((s) => s.id === 1 && /Ваш ход/.test(s.msg)), true);
-        await poker.checkCommand(challenger, '!check'); // wrong turn now (it's the challenger's turn — this one's legal, ends the street)
+        await poker.checkCommand(challenger, '!check'); // ends the flop — turn dealt
 
         sentLocal.length = 0;
         // Turn — big blind acts first again.
         await poker.betCommand(challenger, '!bet 50'); // not target's turn
         check('betting out of turn on the turn street is rejected', sentLocal.some((s) => /не ваш ход/.test(s.msg)), true);
         await poker.checkCommand(target, '!check');
-        await poker.checkCommand(challenger, '!check');
+        await poker.checkCommand(challenger, '!check'); // ends the turn — river dealt
 
         // River — check through to showdown.
-        sentLocal.length = 0;
         const challengerBalanceBefore = await db.getBalance('AUTH_CHALLENGER');
         const targetBalanceBefore = await db.getBalance('AUTH_TARGET');
+        sentLocal.length = 0;
         await poker.checkCommand(target, '!check');
-        await poker.checkCommand(challenger, '!check');
+        // The river completes the board (5 community cards) — from here on
+        // each player's re-shown hand should name their own current best
+        // combination: challenger's pair of 3s, target's 6-high straight
+        // (see the showdown assertions below for the same two hands).
+        check('once the river completes the board, each player\'s re-shown hand names their own current combination', sentLocal.some((s) => s.id === 1 && /Пара/.test(s.msg)) && sentLocal.some((s) => s.id === 2 && /Стрит/.test(s.msg)), true);
+        await poker.checkCommand(challenger, '!check'); // ends the river — showdown
         await handPromise;
 
         check('the showdown reveals both hands', sentLocal.some((s) => /Вскрытие/.test(s.msg)), true);
+        check('...but only privately, to the two players — never broadcast to the room', sentLocal.filter((s) => /Вскрытие/.test(s.msg)).every((s) => s.id !== null), true);
         // Target's hole cards (Q♦5♥) combine with the board's LOW end
         // (6♦,4♦,3♣ + 2♠ from the flop) into a 6-high straight (6-5-4-3-2)
         // — easy to miss by eye (it's not "the 5 highest cards"), which is
@@ -7972,6 +8158,8 @@ console.log('\n--- commands/minigames.js + commands/poker.js: customEconomy rout
         announcementColor: 1, errorColor: 2, successColor: 3, HaxNotification: HaxNotificationMock,
         formatCoins, getRandomInt: (max) => max - 1,
         runPokerPvp: pokerCmds.runPokerPvp,
+        pokerJoinOpenTable: pokerCmds.joinOpenTable,
+        pokerIsSeated: pokerCmds.isSeated,
     });
 
     const challenger = { id: 1, name: 'Challenger', team: TeamLocal.SPECTATORS };
@@ -7984,6 +8172,7 @@ console.log('\n--- commands/minigames.js + commands/poker.js: customEconomy rout
     sentLocal.length = 0;
     await minigames.minigamesCommand(challenger, '!minigames poker #2');
     check('the challenge is broadcast without any stake amount — poker\'s blinds are fixed, not a shared stake', sentLocal.some((s) => s.id === null && /"Покер"/.test(s.msg)), true);
+    check('...and it does NOT mention an open table (no "open" argument given)', sentLocal.some((s) => s.id === null && /открытый стол/.test(s.msg)), false);
     check('...and the invite prompt to the target has no stake number either', sentLocal.some((s) => s.id === 2 && /Покер/.test(s.msg) && !/\d+ монет/.test(s.msg)), true);
 
     sentLocal.length = 0;
@@ -8000,8 +8189,276 @@ console.log('\n--- commands/minigames.js + commands/poker.js: customEconomy rout
     await runPromise;
     check('the fold settles through poker.js\'s own economy — target (big blind) nets the small blind', await db.getBalance('AUTH_TARGET'), 500 + 25);
     check('...and the challenger loses exactly the small blind, nothing more', await db.getBalance('AUTH_CHALLENGER'), 500 - 25);
+    check('a REGULAR (non-open) table is closed after its one hand — no third party can ever join it', pokerCmds.joinOpenTable({ id: 99, name: 'Nosy' }, 'AUTH_NOSY', 1), { ok: false, reason: 'notFound' });
 
     db.close();
+})();
+
+console.log('\n--- core/commands/poker.js: open tables — "!mg poker #id open", "!play #<seated id>" to join, rotating blinds, multi-way settlement ---');
+(async () => {
+    const TeamLocal = { RED: 1, BLUE: 2, SPECTATORS: 0 };
+    const HaxNotificationMock = { CHAT: 1 };
+    const sentLocal = [];
+    const roomMock = { sendAnnouncement: (msg, id, color, style) => sentLocal.push({ msg, id, color, style }) };
+    const { createSqliteDatabase } = require(path.join(__dirname, '..', 'db', 'sqlite'));
+    const { formatCoins } = require(path.join(CORE, 'utils'));
+
+    function makeLcg(seed) {
+        let s = seed;
+        return (max) => {
+            s = (s * 1103515245 + 12345) & 0x7fffffff;
+            return s % max;
+        };
+    }
+
+    const db = createSqliteDatabase(':memory:');
+    db.init();
+    const authArray = { 1: ['AUTH_ALICE'], 2: ['AUTH_BOB'], 3: ['AUTH_CAROL'] };
+    const alice = { id: 1, name: 'Alice', team: TeamLocal.SPECTATORS };
+    const bob = { id: 2, name: 'Bob', team: TeamLocal.SPECTATORS };
+    const carol = { id: 3, name: 'Carol', team: TeamLocal.SPECTATORS };
+    const state = { playersAll: [alice, bob, carol] };
+    await db.addCoins('AUTH_ALICE', 'Alice', 500);
+    await db.addCoins('AUTH_BOB', 'Bob', 500);
+    await db.addCoins('AUTH_CAROL', 'Carol', 500);
+
+    // Seed 777, continued across BOTH hands below (one shared getRandomInt
+    // closure) — computed offline the same way as the heads-up LCG scenario
+    // above: hand #1's own deck doesn't matter (Alice folds blind), hand
+    // #2's real deal (verified via pokerHandRank.js directly, not by hand)
+    // gives Bob "две пары (Q,7)" beating Alice's "две пары (Q,6)" and
+    // Carol's "пара" — a clean single winner, no split.
+    const poker = require(path.join(CORE, 'commands', 'poker'))({
+        room: roomMock, state, db, announcementColor: 1, errorColor: 2, successColor: 3,
+        HaxNotification: HaxNotificationMock, formatCoins, getRandomInt: makeLcg(777),
+    });
+    const minigames = require(path.join(CORE, 'commands', 'minigames'))({
+        room: roomMock, state, authArray, db, Team: TeamLocal,
+        announcementColor: 1, errorColor: 2, successColor: 3, HaxNotification: HaxNotificationMock,
+        formatCoins, getRandomInt: (max) => max - 1,
+        runPokerPvp: poker.runPokerPvp,
+        pokerJoinOpenTable: poker.joinOpenTable,
+        pokerIsSeated: poker.isSeated,
+    });
+
+    sentLocal.length = 0;
+    await minigames.minigamesCommand(alice, '!minigames poker #2 open');
+    check('the "open" argument is reflected in the public challenge broadcast', sentLocal.some((s) => s.id === null && /открытый стол/.test(s.msg)), true);
+
+    // Bob accepts — hand #1 deals immediately with just the two of them
+    // (an open table's FIRST hand is always exactly the original
+    // challenge; nobody else has had anywhere to join yet).
+    sentLocal.length = 0;
+    const hand1Promise = minigames.playCommand(bob, '!play');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    check('hand #1 deals with just the two original players', sentLocal.filter((s) => /Ваши карты/.test(s.msg)).length, 2);
+
+    // Carol joins mid-hand #1, referencing Alice's id (any CURRENTLY
+    // seated player works, not just whoever originally issued the
+    // challenge) — queued, not dealt into the hand already in progress.
+    sentLocal.length = 0;
+    await minigames.playCommand(carol, '!play #1');
+    check('joining is announced to the whole room', sentLocal.some((s) => s.id === null && /садится за покерный стол/.test(s.msg)), true);
+    sentLocal.length = 0;
+    await poker.betCommand(carol, '!bet 10');
+    check('Carol has no seat in the hand ALREADY in progress — only queued for the next one', sentLocal.some((s) => /не ваш ход/.test(s.msg)), true);
+
+    // Alice (small blind/button, heads-up) folds immediately — ends hand #1.
+    // passCommand's own await chain runs all the way through settleHand ->
+    // maybeStartNextHand -> startHand synchronously (no dangling background
+    // work), so hand #2 (open table, still >=2 seats, Carol now graduated
+    // in from waitingToJoin) is ALREADY fully dealt by the time this
+    // resolves — clear sentLocal beforehand, not after, or its messages
+    // are gone before there's anything left to check.
+    sentLocal.length = 0;
+    await poker.passCommand(alice, '!pass');
+    check('hand #1 resolves as a normal fold — Bob nets the small blind', await db.getBalance('AUTH_BOB'), 500 + 25);
+    check('...Alice loses exactly that much', await db.getBalance('AUTH_ALICE'), 500 - 25);
+    await hand1Promise;
+
+    // The button has rotated: it was Alice (seat 0) for hand #1, so it's
+    // Bob (seat 1) now. With 3 players, the button posts nothing — Carol
+    // (seat 2) is small blind, Alice (seat 0) is big blind.
+    check('hand #2 auto-deals once it resolves — no command needed to start it', sentLocal.filter((s) => /Ваши карты/.test(s.msg)).length, 3);
+    check('the button rotated — Carol (the newcomer) is small blind this hand', sentLocal.some((s) => s.id === null && /Carol — small blind/.test(s.msg)), true);
+    check('...and Alice, who was small blind/button last hand, is now big blind', sentLocal.some((s) => s.id === null && /Alice — big blind/.test(s.msg)), true);
+
+    // Busy-player guard, the poker-specific half: a seated player stays
+    // "busy" for as long as they're at the table — not just for the single
+    // game.run() call minigames.js's own busyPlayers set would cover — so
+    // this has to come from poker.js's own isSeated, not just busyPlayers.
+    const dave = { id: 4, name: 'Dave', team: TeamLocal.SPECTATORS };
+    state.playersAll.push(dave);
+    authArray[4] = ['AUTH_DAVE'];
+    await db.addCoins('AUTH_DAVE', 'Dave', 500);
+    sentLocal.length = 0;
+    await minigames.minigamesCommand(dave, '!minigames coinflip #2 50'); // Bob is seated, mid-hand
+    check('a seated poker player can\'t be invited into an unrelated minigame either', /занят/.test(sentLocal[0].msg), true);
+
+    // Preflop: 3-handed action starts left of the big blind (UTG) — that's
+    // Bob (the button, since he's neither blind this time).
+    await poker.callCommand(bob, '!call');
+    await poker.callCommand(carol, '!call'); // completes her small blind to the full 50
+    await poker.checkCommand(alice, '!check'); // big blind's option — preflop ends
+
+    // Postflop: small blind (Carol) acts first every street, all the way
+    // through to the river — nobody bets, so the board just fills out.
+    await poker.checkCommand(carol, '!check');
+    await poker.checkCommand(alice, '!check');
+    await poker.checkCommand(bob, '!check'); // flop over
+    await poker.checkCommand(carol, '!check');
+    await poker.checkCommand(alice, '!check');
+    await poker.checkCommand(bob, '!check'); // turn over
+
+    const aliceBefore = await db.getBalance('AUTH_ALICE');
+    const bobBefore = await db.getBalance('AUTH_BOB');
+    const carolBefore = await db.getBalance('AUTH_CAROL');
+    sentLocal.length = 0;
+    await poker.checkCommand(carol, '!check');
+    await poker.checkCommand(alice, '!check');
+    await poker.checkCommand(bob, '!check'); // river over — showdown, settles
+
+    check('the three-way showdown reveals every live hand, still privately', sentLocal.some((s) => /Вскрытие/.test(s.msg) && s.id !== null), true);
+    check('...and never broadcasts the reveal itself', sentLocal.filter((s) => /Вскрытие/.test(s.msg)).some((s) => s.id === null), false);
+    check('Bob\'s two pair (Q,7) beats Alice\'s two pair (Q,6) and Carol\'s pair — he nets exactly what the other two put in (50 each, 100 total)', await db.getBalance('AUTH_BOB'), bobBefore + 100);
+    check('...Alice loses her 50', await db.getBalance('AUTH_ALICE'), aliceBefore - 50);
+    check('...Carol (the newcomer) loses hers too — same rules as anyone else at the table', await db.getBalance('AUTH_CAROL'), carolBefore - 50);
+    check('total chips across the whole three-player economy are conserved end to end', (await db.getBalance('AUTH_ALICE')) + (await db.getBalance('AUTH_BOB')) + (await db.getBalance('AUTH_CAROL')), 1500);
+
+    db.close();
+})();
+
+console.log('\n--- core/commands/poker.js: joining an open table — capacity, closed tables, and not-found targets ---');
+(async () => {
+    const TeamLocal = { RED: 1, BLUE: 2, SPECTATORS: 0 };
+    const HaxNotificationMock = { CHAT: 1 };
+    const sentLocal = [];
+    const roomMock = { sendAnnouncement: (msg, id, color, style) => sentLocal.push({ msg, id, color, style }) };
+    const { createSqliteDatabase } = require(path.join(__dirname, '..', 'db', 'sqlite'));
+    const { formatCoins } = require(path.join(CORE, 'utils'));
+    const db = createSqliteDatabase(':memory:');
+    db.init();
+
+    const seats = [1, 2].map((id) => ({ id, name: `P${id}`, auth: `AUTH_P${id}` }));
+    for (const s of seats) await db.addCoins(s.auth, s.name, 500);
+    const state = { playersAll: seats.map((s) => ({ id: s.id, name: s.name, team: TeamLocal.SPECTATORS })) };
+    const poker = require(path.join(CORE, 'commands', 'poker'))({
+        room: roomMock, state, db, announcementColor: 1, errorColor: 2, successColor: 3,
+        HaxNotification: HaxNotificationMock, formatCoins, getRandomInt: (max) => max - 1,
+    });
+
+    check('joining a player with no table at all is reported as not found', poker.joinOpenTable({ id: 99, name: 'X' }, 'AUTH_X', 1), { ok: false, reason: 'notFound' });
+
+    poker.runPokerPvp(seats[0], seats[1], seats[0].auth, seats[1].auth, { open: true });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    check('joining a REAL open table succeeds', poker.joinOpenTable({ id: 3, name: 'Q1' }, 'AUTH_Q1', 1), { ok: true });
+    check('joining a table you\'re already seated at (or already queued for) is rejected', poker.joinOpenTable({ id: 3, name: 'Q1' }, 'AUTH_Q1', 1), { ok: false, reason: 'alreadySeated' });
+    check('a second newcomer can still get in — open tables hold up to 4', poker.joinOpenTable({ id: 4, name: 'Q2' }, 'AUTH_Q2', 1), { ok: true });
+    check('a table already at its 4-seat cap (2 seated + 2 queued) rejects a third newcomer', poker.joinOpenTable({ id: 5, name: 'Q3' }, 'AUTH_Q3', 1), { ok: false, reason: 'full' });
+
+    db.close();
+})();
+
+console.log('\n--- core/commands/poker.js: a seated player switching onto an actual team is treated as leaving the table — mid-hand contribution refunded, pot shrinks ---');
+(async () => {
+    const TeamLocal = { RED: 1, BLUE: 2, SPECTATORS: 0 };
+    const HaxNotificationMock = { CHAT: 1 };
+    const sentLocal = [];
+    const roomMock = { sendAnnouncement: (msg, id, color, style) => sentLocal.push({ msg, id, color, style }) };
+    const { createSqliteDatabase } = require(path.join(__dirname, '..', 'db', 'sqlite'));
+    const { formatCoins } = require(path.join(CORE, 'utils'));
+
+    // --- heads-up: the ONLY other player leaving mid-hand is a walkover —
+    // net zero for the one who stays too, since nothing was ever really
+    // deducted from either side mid-hand in the first place (see the file
+    // header) — "winning the pot" just means getting your own money back. ---
+    {
+        const db = createSqliteDatabase(':memory:');
+        db.init();
+        const alice = { id: 1, name: 'Alice' };
+        const bob = { id: 2, name: 'Bob' };
+        const state = { playersAll: [{ ...alice, team: TeamLocal.SPECTATORS }, { ...bob, team: TeamLocal.SPECTATORS }] };
+        await db.addCoins('AUTH_ALICE', 'Alice', 500);
+        await db.addCoins('AUTH_BOB', 'Bob', 500);
+        const poker = require(path.join(CORE, 'commands', 'poker'))({
+            room: roomMock, state, db, announcementColor: 1, errorColor: 2, successColor: 3,
+            HaxNotification: HaxNotificationMock, formatCoins, getRandomInt: (max) => max - 1,
+        });
+        const handPromise = poker.runPokerPvp(alice, bob, 'AUTH_ALICE', 'AUTH_BOB');
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        await poker.callCommand(alice, '!call'); // small blind calls up to 50
+        sentLocal.length = 0;
+        poker.forfeitOnTeamChange(bob); // Bob heads onto an actual team mid-hand
+        check('the departing player gets a private confirmation their stake was refunded', sentLocal.some((s) => s.id === 2 && /возвращена/.test(s.msg)), true);
+        await handPromise;
+        check('nobody\'s real balance changes when the ONLY other player at a heads-up table leaves mid-hand', await db.getBalance('AUTH_ALICE'), 500);
+        check('...the departing player\'s own balance is untouched too — nothing was ever really deducted from them to begin with', await db.getBalance('AUTH_BOB'), 500);
+        db.close();
+    }
+
+    // --- 3-way table: one departure doesn't end the hand — the remaining
+    // two just keep playing, and the leaver's contribution comes straight
+    // out of the pot they're playing for. ---
+    {
+        const db = createSqliteDatabase(':memory:');
+        db.init();
+        const authArray = { 1: ['AUTH_ALICE'], 2: ['AUTH_BOB'], 3: ['AUTH_CAROL'] };
+        const alice = { id: 1, name: 'Alice', team: TeamLocal.SPECTATORS };
+        const bob = { id: 2, name: 'Bob', team: TeamLocal.SPECTATORS };
+        const carol = { id: 3, name: 'Carol', team: TeamLocal.SPECTATORS };
+        const state = { playersAll: [alice, bob, carol] };
+        await db.addCoins('AUTH_ALICE', 'Alice', 500);
+        await db.addCoins('AUTH_BOB', 'Bob', 500);
+        await db.addCoins('AUTH_CAROL', 'Carol', 500);
+        const poker = require(path.join(CORE, 'commands', 'poker'))({
+            room: roomMock, state, db, announcementColor: 1, errorColor: 2, successColor: 3,
+            HaxNotification: HaxNotificationMock, formatCoins, getRandomInt: (max) => max - 1,
+        });
+        const minigames = require(path.join(CORE, 'commands', 'minigames'))({
+            room: roomMock, state, authArray, db, Team: TeamLocal,
+            announcementColor: 1, errorColor: 2, successColor: 3, HaxNotification: HaxNotificationMock,
+            formatCoins, getRandomInt: (max) => max - 1,
+            runPokerPvp: poker.runPokerPvp,
+            pokerJoinOpenTable: poker.joinOpenTable,
+            pokerIsSeated: poker.isSeated,
+        });
+
+        await minigames.minigamesCommand(alice, '!minigames poker #2 open');
+        const hand1Promise = minigames.playCommand(bob, '!play');
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        await minigames.playCommand(carol, '!play #1'); // queues for hand #2
+        await poker.passCommand(alice, '!pass'); // ends hand #1 fast
+        await hand1Promise;
+        await new Promise((resolve) => setTimeout(resolve, 0)); // hand #2 auto-deals, now 3-way: button=Bob, sb=Carol, bb=Alice, UTG=Bob
+
+        const balancesBefore = { alice: await db.getBalance('AUTH_ALICE'), bob: await db.getBalance('AUTH_BOB'), carol: await db.getBalance('AUTH_CAROL') };
+
+        await poker.callCommand(bob, '!call'); // UTG calls the big blind
+        sentLocal.length = 0;
+        poker.forfeitOnTeamChange(carol); // Carol leaves before her own preflop action — fire-and-forget, same shape as forfeitOnLeave
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        check('the refund confirmation itself is private to her alone', sentLocal.filter((s) => /возвращена/.test(s.msg)).every((s) => s.id === 3), true);
+        // The hand continuing without her DOES still update the remaining
+        // players (whose turn it now is, the smaller pot) — that's
+        // desirable, not a leak; the only thing that must stay silent is
+        // announcing the departure itself to the whole room.
+        check('...but nothing about it is ever broadcast to the whole room', sentLocal.some((s) => s.id === null), false);
+        await poker.checkCommand(alice, '!check'); // big blind's option — Carol being gone doesn't skip this
+        // Flop — small blind normally acts first, but Carol (that seat) is
+        // gone, so it falls to the next live seat: Alice.
+        await poker.checkCommand(alice, '!check');
+        await poker.passCommand(bob, '!pass'); // Bob folds — Alice wins what's left by default
+
+        check('Carol\'s balance is completely untouched by a hand she left', await db.getBalance('AUTH_CAROL'), balancesBefore.carol);
+        check('Alice wins the shrunk pot — exactly what she and Bob (not Carol) put in this hand', await db.getBalance('AUTH_ALICE'), balancesBefore.alice + 50);
+        check('Bob loses exactly his own contribution, nothing extra from Carol\'s departure', await db.getBalance('AUTH_BOB'), balancesBefore.bob - 50);
+
+        sentLocal.length = 0;
+        await poker.betCommand(carol, '!bet 10');
+        check('the departed player has no active game left at all — fully removed from the table, not just folded for one hand', sentLocal.some((s) => /нет активной игры/.test(s.msg)), true);
+        db.close();
+    }
 })();
 
 // The movement.js leave broadcast fires from inside a 10ms setTimeout, the

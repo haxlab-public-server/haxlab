@@ -230,6 +230,16 @@ process.on('message', (msg) => {
         case 'checkVipRoleOnLink':
             discordBot.checkVipRoleOnLink(msg.discordId, msg.auth, msg.targetName);
             break;
+        case 'grantVipRole': {
+            const discordId = db.getDiscordIdByAuth(msg.auth);
+            if (discordId) discordBot.grantVipRole(discordId);
+            break;
+        }
+        case 'revokeVipRole': {
+            const discordId = db.getDiscordIdByAuth(msg.auth);
+            if (discordId) discordBot.revokeVipRole(discordId);
+            break;
+        }
         case 'roster':
             state.playersAll = msg.players.map((p) => ({ id: p.id, name: p.name }));
             authArray.length = 0;
