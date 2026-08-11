@@ -4487,7 +4487,16 @@ console.log('\n--- team/balance.js: a genuine surplus hands off to picking on th
 
     balance.handlePlayersStop(null);
     (async () => {
-        await new Promise((resolve) => setTimeout(resolve, 100));
+        // The actual chain (bench -> 10ms defer -> nested 5ms stadium-switch
+        // defer -> choosePlayer) lands well under 100ms in isolation — but
+        // this file's own growing pile of concurrent async test blocks has
+        // been starving tighter windows like that one down to occasional
+        // failures despite the underlying logic being correct (confirmed by
+        // reproducing this exact scenario standalone, outside the full
+        // suite, where it reliably lands by ~35ms). Widened to 400ms for
+        // the same real-world reason as the overflowPassword/announcements
+        // loop-back margins elsewhere in this file.
+        await new Promise((resolve) => setTimeout(resolve, 400));
         check('chooseMode activates for the genuine surplus', state.chooseMode, true);
         check('the stadium is switched to big BEFORE/as picking starts, not left on classic', state.currentStadium, 'big');
         check('the switch actually went through room.stadiumCommand', stadiumCalls, ['!big']);
