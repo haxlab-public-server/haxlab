@@ -723,6 +723,44 @@ module.exports = function createPokerCommands({
         removePlayerFromTable(player.id, { refund: true }).catch((err) => console.error('[poker] forfeitOnTeamChange failed:', err));
     }
 
+    // !leavetable — a deliberate, voluntary exit while staying online as a
+    // spectator (as opposed to forfeitOnLeave/forfeitOnTeamChange above,
+    // which are triggered by room events, not typed commands). Refunds like
+    // forfeitOnTeamChange, not forfeitOnLeave: standing up cleanly while
+    // still around is a lot closer to "heading off to do something else in
+    // the room" than to disappearing mid-hand.
+    async function leaveTableCommand(player, message) {
+        if (!seatedAt.has(player.id)) {
+            announceError(player, 'Вы не сидите ни за одним покерным столом.');
+            return;
+        }
+        await removePlayerFromTable(player.id, { refund: true });
+        if (isOnline(player.id)) {
+            room.sendAnnouncement(`🚪 Вы вышли из-за покерного стола.`, player.id, announcementColor, 'bold', HaxNotification.CHAT);
+        }
+    }
+
+    // !table [#<id>] — who's actually sitting where, privately to whoever
+    // asks. With no argument, shows the caller's OWN table (if they're
+    // seated at one); with #<id>, shows whichever table THAT player is
+    // seated at — useful to check who's playing before "!play #<id>"-ing
+    // your way into an open one.
+    function tablePlayersCommand(player, message) {
+        const targetToken = message.split(/ +/)[1];
+        const table = targetToken && targetToken[0] === '#'
+            ? seatedAt.get(parseInt(targetToken.substring(1)))
+            : seatedAt.get(player.id);
+        if (!table) {
+            announceError(player, targetToken ? 'За этим игроком нет покерного стола.' : 'Вы не сидите ни за одним покерным столом.');
+            return;
+        }
+        let text = `🃏 За столом: ${table.seats.map((s) => s.name).join(', ')}`;
+        if (table.waitingToJoin.length > 0) {
+            text += `\nПодсядут со следующей раздачи: ${table.waitingToJoin.map((s) => s.name).join(', ')}`;
+        }
+        room.sendAnnouncement(text, player.id, announcementColor, 'bold', HaxNotification.CHAT);
+    }
+
     return {
         SMALL_BLIND,
         BIG_BLIND,
@@ -733,6 +771,8 @@ module.exports = function createPokerCommands({
         callCommand,
         checkCommand,
         passCommand,
+        leaveTableCommand,
+        tablePlayersCommand,
         forfeitOnLeave,
         forfeitOnTeamChange,
     };

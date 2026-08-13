@@ -60,6 +60,8 @@ module.exports = function createCommands({
     callCommand,
     checkCommand,
     passCommand,
+    leaveTableCommand,
+    tablePlayersCommand,
 }) {
     return {
 
@@ -587,7 +589,7 @@ module.exports = function createCommands({
     Пример: !minigames blackjack #3 100 вызовет игрока с id 3 на блэкджек на 100 монет.
     Пример: !minigames poker #3 вызовет игрока с id 3 на покер (вы — small blind 25, он — big blind 50), только вы вдвоём.
     Пример: !minigames poker #3 open — то же самое, но открытый стол: другие зрители тоже могут подсесть командой "!play #<id любого игрока за столом>", максимум 4 места, вступают со следующей раздачи. Если ушедший на матч игрок был в игре — его ставка возвращается, банк уменьшается.
-    Приглашенный игрок должен ввести "!play", чтобы принять вызов.`,
+    Приглашенный игрок должен ввести "!play", чтобы принять вызов. "!table" покажет состав стола, "!leavetable" — встать из-за него.`,
         function: minigamesCommand,
     },
     play: {
@@ -645,6 +647,22 @@ module.exports = function createCommands({
         desc: `
         В активной игре покер (!minigames poker/покер) сбрасывает карты и выходит из текущей раздачи.`,
         function: passCommand,
+    },
+    leavetable: {
+        aliases: ['встать'],
+        roles: Role.PLAYER,
+        desc: `
+        Встаёт из-за покерного стола, оставаясь зрителем — в отличие от "!pass", убирает вас со стола насовсем, а не только из текущей раздачи.
+    Если вы были в раздаче — ваша ставка в ней возвращается.`,
+        function: leaveTableCommand,
+    },
+    table: {
+        aliases: ['стол'],
+        roles: Role.PLAYER,
+        desc: `
+        Показывает, кто сидит за покерным столом (и кто подсядет со следующей раздачи).
+    Без аргумента — ваш собственный стол. С аргументом #<id> — стол, за которым сидит игрок с этим id (удобно перед "!play #<id>").`,
+        function: tablePlayersCommand,
     },
 
     };

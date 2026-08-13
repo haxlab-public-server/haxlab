@@ -8304,6 +8304,21 @@ console.log('\n--- core/commands/poker.js: open tables — "!mg poker #id open",
     await minigames.minigamesCommand(dave, '!minigames coinflip #2 50'); // Bob is seated, mid-hand
     check('a seated poker player can\'t be invited into an unrelated minigame either', /занят/.test(sentLocal[0].msg), true);
 
+    // !table — preview who's actually seated before joining, and check on
+    // your own table once you are one of them.
+    sentLocal.length = 0;
+    poker.tablePlayersCommand(dave, '!table #2'); // Dave isn't seated himself — checking on Bob's table
+    check('!table #<id> shows the table THAT player is at, even for someone not seated themselves', sentLocal[0].msg.includes('Alice, Bob, Carol'), true);
+    check('...sent privately to whoever asked', sentLocal[0].id, dave.id);
+
+    sentLocal.length = 0;
+    poker.tablePlayersCommand(dave, '!table');
+    check('!table with no argument, from someone not seated anywhere, is refused', /не сидите/.test(sentLocal[0].msg), true);
+
+    sentLocal.length = 0;
+    poker.tablePlayersCommand(bob, '!table');
+    check('!table with no argument shows YOUR OWN table when you\'re actually seated at one', /Alice/.test(sentLocal[0].msg) && /Bob/.test(sentLocal[0].msg) && /Carol/.test(sentLocal[0].msg), true);
+
     // Preflop: 3-handed action starts left of the big blind (UTG) — that's
     // Bob (the button, since he's neither blind this time).
     await poker.callCommand(bob, '!call');
@@ -8468,6 +8483,84 @@ console.log('\n--- core/commands/poker.js: a seated player switching onto an act
         check('the departed player has no active game left at all — fully removed from the table, not just folded for one hand', sentLocal.some((s) => /нет активной игры/.test(s.msg)), true);
         db.close();
     }
+})();
+
+console.log('\n--- core/commands/poker.js: !leavetable — standing up from the table on purpose, while staying a spectator ---');
+(async () => {
+    const TeamLocal = { RED: 1, BLUE: 2, SPECTATORS: 0 };
+    const HaxNotificationMock = { CHAT: 1 };
+    const sentLocal = [];
+    const roomMock = { sendAnnouncement: (msg, id, color, style) => sentLocal.push({ msg, id, color, style }) };
+    const { createSqliteDatabase } = require(path.join(__dirname, '..', 'db', 'sqlite'));
+    const { formatCoins } = require(path.join(CORE, 'utils'));
+    const db = createSqliteDatabase(':memory:');
+    db.init();
+
+    const authArray = { 1: ['AUTH_ALICE'], 2: ['AUTH_BOB'], 3: ['AUTH_CAROL'] };
+    const alice = { id: 1, name: 'Alice', team: TeamLocal.SPECTATORS };
+    const bob = { id: 2, name: 'Bob', team: TeamLocal.SPECTATORS };
+    const carol = { id: 3, name: 'Carol', team: TeamLocal.SPECTATORS };
+    const state = { playersAll: [alice, bob, carol] };
+    await db.addCoins('AUTH_ALICE', 'Alice', 500);
+    await db.addCoins('AUTH_BOB', 'Bob', 500);
+    await db.addCoins('AUTH_CAROL', 'Carol', 500);
+
+    const poker = require(path.join(CORE, 'commands', 'poker'))({
+        room: roomMock, state, db, announcementColor: 1, errorColor: 2, successColor: 3,
+        HaxNotification: HaxNotificationMock, formatCoins, getRandomInt: (max) => max - 1,
+    });
+    const minigames = require(path.join(CORE, 'commands', 'minigames'))({
+        room: roomMock, state, authArray, db, Team: TeamLocal,
+        announcementColor: 1, errorColor: 2, successColor: 3, HaxNotification: HaxNotificationMock,
+        formatCoins, getRandomInt: (max) => max - 1,
+        runPokerPvp: poker.runPokerPvp,
+        pokerJoinOpenTable: poker.joinOpenTable,
+        pokerIsSeated: poker.isSeated,
+    });
+
+    sentLocal.length = 0;
+    await poker.leaveTableCommand({ id: 99, name: 'Nobody' }, '!leavetable');
+    check('!leavetable is refused for someone not seated at any table', /не сидите/.test(sentLocal[0].msg), true);
+
+    await minigames.minigamesCommand(alice, '!minigames poker #2 open');
+    const hand1Promise = minigames.playCommand(bob, '!play');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    // Carol queues for hand #2, then changes her mind before it's even
+    // dealt — has to happen before Alice's fold below, since that fold's
+    // own await chain runs all the way through to hand #2 actually dealing
+    // (see the open-tables test block above for the same reasoning).
+    await minigames.playCommand(carol, '!play #1');
+    sentLocal.length = 0;
+    await poker.leaveTableCommand(carol, '!leavetable');
+    check('leaving while only queued (never actually dealt a hand) needs no refund message — there was never a stake', sentLocal.some((s) => /возвращена/.test(s.msg)), false);
+    check('...just a plain confirmation', /вышли из-за покерного стола/.test(sentLocal[0].msg), true);
+    check('...and the balance is untouched — nothing was ever at risk', await db.getBalance('AUTH_CAROL'), 500);
+
+    sentLocal.length = 0;
+    await poker.passCommand(alice, '!pass'); // ends hand #1 fast
+    await hand1Promise;
+    check('hand #2 auto-deals with just Alice and Bob — Carol stood up before ever being seated for it', sentLocal.filter((s) => /Ваши карты/.test(s.msg)).length, 2);
+
+    // Hand #2: button rotated to Bob (was Alice for hand #1) — heads-up, so
+    // Bob is now small blind, Alice big blind.
+    await poker.callCommand(bob, '!call'); // Bob (SB) calls up to 50
+    await poker.checkCommand(alice, '!check'); // Alice's BB option — preflop ends, flop dealt
+
+    const aliceBeforeLeave = await db.getBalance('AUTH_ALICE');
+    const bobBeforeLeave = await db.getBalance('AUTH_BOB');
+    sentLocal.length = 0;
+    await poker.leaveTableCommand(bob, '!leavetable');
+    check('leaving mid-hand gets the specific refund message first', sentLocal.some((s) => s.id === 2 && /возвращена/.test(s.msg)), true);
+    check('...followed by the generic "you left the table" confirmation', sentLocal.some((s) => s.id === 2 && /вышли из-за покерного стола/.test(s.msg)), true);
+    check('heads-up: the ONLY other player leaving mid-hand is a walkover — nobody\'s balance actually changes', await db.getBalance('AUTH_ALICE'), aliceBeforeLeave);
+    check('...the leaver\'s own balance is untouched too — refunded, not forfeited, unlike a room-leave', await db.getBalance('AUTH_BOB'), bobBeforeLeave);
+
+    sentLocal.length = 0;
+    await poker.leaveTableCommand(bob, '!leavetable');
+    check('leaving again once already gone is refused, not a silent no-op or a crash', /не сидите/.test(sentLocal[0].msg), true);
+
+    db.close();
 })();
 
 // The movement.js leave broadcast fires from inside a 10ms setTimeout, the

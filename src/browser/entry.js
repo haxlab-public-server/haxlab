@@ -1391,6 +1391,8 @@ const {
     callCommand,
     checkCommand,
     passCommand,
+    leaveTableCommand,
+    tablePlayersCommand,
     forfeitOnLeave: forfeitPokerOnLeave,
     forfeitOnTeamChange: forfeitPokerOnTeamChange,
 } = createPokerCommands({
@@ -1494,6 +1496,8 @@ const commands = createCommands({
     callCommand,
     checkCommand,
     passCommand,
+    leaveTableCommand,
+    tablePlayersCommand,
 });
 
 stadiumCommand(emptyPlayer, "!training");
