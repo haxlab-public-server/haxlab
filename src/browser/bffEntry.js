@@ -355,6 +355,22 @@ function handleActivity() {
     }
 }
 
+// Real bug fixed here (reported live 2026-08-14: "меня кикнуло, хотя я
+// двигался, как и все"): room.onPlayerActivity — HaxBall's own native
+// per-player "did something this tick" signal — was never wired at all.
+// Without it, pComp.inactivityTicks (incremented every tick by
+// handleActivityPlayer above) never got reset by actual movement/input, so
+// it climbed to the kick threshold regardless of how active the player
+// really was. The main room's own events/activity.js has this exact
+// handler; BFF never reuses that module (too coupled to trophies/clubs/
+// economy), so it just never got ported over.
+function onPlayerActivity(player) {
+    if (state.gameState !== State.STOP) {
+        const pComp = getPlayerComp(player);
+        if (pComp != null) pComp.inactivityTicks = 0;
+    }
+}
+
 /* LINEUP (reused as-is, no economy coupling) */
 const createLineupHelpers = require('../core/team/lineup');
 const { getStartingLineups, handleLineupChangeTeamChange, handleLineupChangeLeave } = createLineupHelpers({
@@ -531,6 +547,11 @@ room.onGameStop = wrapEventHandlers({
     },
 }).onGameStop;
 
+// Nothing else sets room.onPlayerActivity, so no "original" to merge with
+// (unlike onPlayerTeamChange/onGameStop above) — see onPlayerActivity's own
+// doc comment for why this exists.
+Object.assign(room, wrapEventHandlers({ onPlayerActivity }));
+
 /* COMMANDS */
 const { computeOrdinal } = require('../core/bff/rating');
 const createBffCommands = require('../core/bff/commands');
@@ -692,10 +713,14 @@ room.onPlayerChat = wrapEventHandlers({
         }
         // Role-prefixed chat — MASTER/ADMIN/VIP only (see haxchill-vip-
         // and-chat-prefixes memory), everyone else's message is left alone
-        // to render as HaxBall's own native chat bubble — UNLESS it
-        // contains an @mention (below), which needs the manual
-        // per-viewer path regardless of role, since only that path can
-        // target the mention sound at just one recipient.
+        // (return true) to render as HaxBall's own native chat bubble.
+        // Deliberately NOT intercepting @mentions here (tried, then
+        // reverted 2026-08-14): unlike the main room, which never uses the
+        // native bubble for anyone, BFF's plain-player messages already go
+        // through it — and native HaxBall already plays its own "mention"
+        // sound correctly for a native "@name" mention on its own. Manually
+        // rerouting those messages through sendAnnouncement only replaced
+        // working native behavior with a redundant, worse reimplementation.
         const role = getRole(player);
         const showAdminPrefix = !hiddenAdminsSet.has(player.id);
         let rolePrefix = null;
@@ -710,26 +735,8 @@ room.onPlayerChat = wrapEventHandlers({
             rolePrefix = '[⭐ВИП]';
             prefixColor = vipChatColor;
         }
-        // "@<name>" mentions of any currently-connected player — gives just
-        // THEM the native HaxBall "mention" notification sound, same
-        // simple case-insensitive substring match as the main room's own
-        // (see events/activity.js). Self-mentions excluded.
-        const lowerMessage = message.toLowerCase();
-        const mentionedIds = new Set(
-            state.playersAll
-                .filter((p) => p.id !== player.id && lowerMessage.includes('@' + p.name.toLowerCase()))
-                .map((p) => p.id)
-        );
-        if (rolePrefix == null && mentionedIds.size === 0) return true;
-        const text = rolePrefix ? `${rolePrefix} ${player.name}: ${message}` : `${player.name}: ${message}`;
-        const style = rolePrefix ? 'bold' : 'normal';
-        if (mentionedIds.size === 0) {
-            room.sendAnnouncement(text, null, prefixColor, style, null);
-        } else {
-            for (const viewer of state.playersAll) {
-                room.sendAnnouncement(text, viewer.id, prefixColor, style, mentionedIds.has(viewer.id) ? HaxNotification.MENTION : null);
-            }
-        }
+        if (rolePrefix == null) return true;
+        room.sendAnnouncement(`${rolePrefix} ${player.name}: ${message}`, null, prefixColor, 'bold', null);
         return false;
     },
 }).onPlayerChat;

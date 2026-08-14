@@ -15,10 +15,6 @@ const path = require('path');
 
 const calls = [];
 const stubPlayers = [];
-// Full args, not just the method name — needed to verify the @mention
-// sound-targeting feature (which player gets HaxNotification.MENTION vs
-// null/CHAT), something the plain `calls` name-only tracking can't tell.
-const sendAnnouncementCalls = [];
 function makeRoom() {
     return new Proxy(
         {},
@@ -27,10 +23,6 @@ function makeRoom() {
                 if (prop in target) return target[prop];
                 return (...args) => {
                     calls.push(String(prop));
-                    if (prop === 'sendAnnouncement') {
-                        const [msg, id, color, style, sound] = args;
-                        sendAnnouncementCalls.push({ msg, id, color, style, sound });
-                    }
                     if (prop === 'getScores') return { red: 0, blue: 0, time: 0, timeLimit: 0 };
                     if (prop === 'getPlayerList') return stubPlayers;
                     if (prop === 'getDiscProperties' || prop === 'getPlayerDiscProperties')
@@ -104,7 +96,7 @@ ready.then((errorOrResult) => {
     // through the REAL bffEntry.js wiring (not a mock) — this is the only
     // way to catch a destructuring name mismatch that yields `undefined`
     // silently at wiring time instead of throwing there.
-    const { Team, HaxNotification } = require(path.join(__dirname, '..', 'src', 'core', 'constants'));
+    const { Team } = require(path.join(__dirname, '..', 'src', 'core', 'constants'));
     const wiringErrors = [];
     const originalConsoleError = console.error;
     console.error = (...args) => {
@@ -112,21 +104,21 @@ ready.then((errorOrResult) => {
         originalConsoleError(...args);
     };
     const fakePlayer = { id: 999001, name: 'BffLoadCheckProbe', auth: 'BFF_LOAD_CHECK_PROBE_AUTH', conn: 'BFF_LOAD_CHECK_PROBE_CONN', team: Team.SPECTATORS, admin: false };
-    const secondPlayer = { id: 999002, name: 'BffMentionTarget', auth: 'BFF_MENTION_TARGET_AUTH', conn: 'BFF_MENTION_TARGET_CONN', team: Team.SPECTATORS, admin: false };
     stubPlayers.push(fakePlayer);
     (async () => {
         await capturedRoom.onPlayerJoin(fakePlayer);
-        // Pushed only now, matching realistic sequencing — room.getPlayerList()
-        // (this stub's stubPlayers) must reflect the CURRENT roster at each
-        // point in time, so the duplicate-auth ghost-kick check on the
-        // second join doesn't see a player who hasn't actually joined yet
-        // (their authArray entry wouldn't exist).
-        stubPlayers.push(secondPlayer);
-        await capturedRoom.onPlayerJoin(secondPlayer);
         fakePlayer.team = Team.RED;
         capturedRoom.onPlayerTeamChange(fakePlayer, null);
         fakePlayer.team = Team.SPECTATORS;
         capturedRoom.onPlayerTeamChange(fakePlayer, null);
+        // Exercises onPlayerActivity's own wiring (added 2026-08-14 — real
+        // bug fixed: it was never wired at all before, so a player's
+        // inactivityTicks counter never reset on genuine movement/input,
+        // eventually auto-kicking them regardless of how active they
+        // actually were). Not exercising the actual reset here (gameState
+        // is STOP in this stub, so the guard inside short-circuits) — this
+        // just proves it's wired and doesn't throw.
+        capturedRoom.onPlayerActivity(fakePlayer);
         // Exercises onPlayerChat's spam-guard/voteban/command-dispatch path
         // too — a plain chat message (not a command, not a vote), which is
         // exactly the path checkSpamFlood/handleVoteBanMessage/isMuted run
@@ -137,13 +129,6 @@ ready.then((errorOrResult) => {
         // destructuring mismatch there wouldn't throw synchronously, same
         // "is not a function" risk class this whole file exists to catch.
         capturedRoom.onPlayerChat(fakePlayer, 't hello from load-check');
-        // Exercises the real @mention sound-targeting through the ACTUAL
-        // bffEntry.js wiring (see haxchill-second-room-plan memory) — a
-        // wrong dependency name there (e.g. HaxNotification) wouldn't
-        // throw, it would just silently send the wrong/no sound.
-        sendAnnouncementCalls.length = 0;
-        capturedRoom.onPlayerChat(fakePlayer, `эй @${secondPlayer.name} тут кто-то есть?`);
-        capturedRoom.onPlayerLeave(secondPlayer);
         capturedRoom.onPlayerLeave(fakePlayer);
         await new Promise((resolve) => setTimeout(resolve, 0));
         console.error = originalConsoleError;
@@ -154,14 +139,7 @@ ready.then((errorOrResult) => {
             console.log('  ' + brokenWiring.join('\n  '));
             process.exit(1);
         }
-
-        const mentionCall = sendAnnouncementCalls.find((c) => c.id === secondPlayer.id);
-        if (!mentionCall || mentionCall.sound !== HaxNotification.MENTION) {
-            console.log('BFF INITIALISATION FAILED: an @mention did not give the mentioned player the real MENTION sound through the actual bffEntry.js wiring:');
-            console.log('  ' + JSON.stringify(sendAnnouncementCalls.filter((c) => c.id === fakePlayer.id || c.id === secondPlayer.id)));
-            process.exit(1);
-        }
-        console.log('a real BFF join/team-change/chat/leave round-trip produced no "is not a function" wiring errors, and @mentions correctly target the mention sound');
+        console.log('a real BFF join/team-change/chat/leave round-trip produced no "is not a function" wiring errors');
         process.exit(0);
     })();
 });

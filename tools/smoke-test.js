@@ -8777,6 +8777,50 @@ console.log('--- core/bff/matchFlow.js: rating-driven match assembly (no captain
     await new Promise((resolve) => setTimeout(resolve, 80));
     check('startGame fires shortly after assembly', roomCallsLocal.some((c) => c.fn === 'startGame'), true);
 
+    // --- real bug fixed: a 2nd player joining a solo trainee's session
+    // must actually promote it to a real match, not sit forever ignored.
+    // The lone trainee lives on state.teamRed (not teamSpec — they're
+    // "playing", even alone), which the plain "match already live, don't
+    // interrupt" guard used to treat identically to a genuine match. ---
+    roomCallsLocal.length = 0;
+    limitCalls.length = 0;
+    stateLocal.gameState = StateEnum.PLAY;
+    stateLocal.currentStadium = 'training';
+    stateLocal.teamRed = [mkPlayer(10, 'A10', 'SoloTrainer')];
+    stateLocal.teamBlue = [];
+    stateLocal.teamSpec = [mkPlayer(11, 'A11', 'Newcomer')];
+    await matchFlow.assembleMatch();
+    check('a 2nd joiner stops the solo training session (not left running forever)', roomCallsLocal.some((c) => c.fn === 'stopGame'), true);
+    check('...but does NOT reassign teams in this same call (avoids racing the native onGameStop cascade)', roomCallsLocal.some((c) => c.fn === 'setPlayerTeam'), false);
+
+    // Simulates the native onGameStop -> core/bff/events.js -> matchFlow's
+    // own handlePlayersStop(null, null) cascade that room.stopGame() (just
+    // above) triggers in production — this lightweight mock doesn't wire
+    // that automatically. state.endGameVariable is false for a solo
+    // session (endGame() is never called there), so production really
+    // does take this exact "not a natural end" branch.
+    stateLocal.gameState = StateEnum.STOP;
+    roomCallsLocal.length = 0;
+    await matchFlow.handlePlayersStop(null, null);
+    check('the solo trainee is benched back to spectators by the cascade', roomCallsLocal.some((c) => c.fn === 'setPlayerTeam' && c.id === 10 && c.team === TeamLocal.SPECTATORS), true);
+    check('no rating touched (never a real teamSize-vs-teamSize match)', ratingsDb.has('A10'), false);
+    stateLocal.teamRed = [];
+    stateLocal.teamBlue = [];
+    stateLocal.teamSpec = [mkPlayer(10, 'A10', 'SoloTrainer'), mkPlayer(11, 'A11', 'Newcomer')];
+
+    roomCallsLocal.length = 0;
+    limitCalls.length = 0;
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    const promotedAssignments = roomCallsLocal.filter((c) => c.fn === 'setPlayerTeam');
+    check('once the pause elapses, a real 1v1 forms from both the ex-trainee and the newcomer', promotedAssignments.length, 2);
+    check('...covering both of them specifically', promotedAssignments.map((c) => c.id).sort((a, b) => a - b), [10, 11]);
+    check('...and it goes through real rating-based assembly (applyLimitsForSize called), not the training bootstrap', limitCalls.includes(1), true);
+    // The applyLimitsForSize mock above only records the call — it doesn't
+    // actually flip state.currentStadium the way the real roomSetup.js
+    // would, so it's reset explicitly here to avoid leaking 'training'
+    // into the tests below.
+    stateLocal.currentStadium = 'classic';
+
     // --- live match in progress: joins/leaves don't reassemble mid-game ---
     roomCallsLocal.length = 0;
     stateLocal.gameState = StateEnum.PLAY;

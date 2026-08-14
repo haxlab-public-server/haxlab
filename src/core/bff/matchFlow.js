@@ -50,7 +50,39 @@ module.exports = function createBffMatchFlow({
         // via handlePlayersJoin/handlePlayersLeave and — since gameState is
         // already STOP by then — would start the next match immediately,
         // cutting the pause short for whoever's still reading the result.
-        if (state.gameState !== State.STOP || state.reassembling) return;
+        if (state.reassembling) return;
+        // Real bug fixed here (reported live 2026-08-14: "1 in the room, a
+        // 2nd joins, 1v1 doesn't start"): a solo player's training session
+        // is NOT a real match — same bootstrap case the main room's own
+        // team/balance.js special-cases with an instant training->classic
+        // restart the moment a 2nd player shows up. Without this, the
+        // blanket "don't interrupt a live match" guard below treated it
+        // exactly like a genuine match in progress, so the 2nd joiner just
+        // sat in state.teamSpec forever, never promoted into a real game.
+        //
+        // Deliberately NOT reassigning teams directly in this same call:
+        // room.stopGame() re-enters this whole flow synchronously via
+        // HaxBall's native onGameStop -> core/bff/events.js's own onGameStop
+        // -> handlePlayersStop(null, null) (state.endGameVariable is false
+        // here — no real result was ever set — so it takes the "not a
+        // natural end" branch, not the rating path). Trying to also
+        // reassign teams here, in THIS call, would race that cascade:
+        // depending on exactly when HaxBall fires the native event relative
+        // to this function's own continuation, handlePlayersStop's own
+        // unconditional bench-everyone step could run either before OR
+        // after a fresh team assignment made here, either doing nothing
+        // useful or immediately un-assigning a match that was just started.
+        // Letting handlePlayersStop's own already-correct, already-tested
+        // bench+reassemble machinery own the whole transition avoids that
+        // race entirely — the one accepted trade-off is the standard
+        // reassembleDelayMs pause before the new match actually starts,
+        // same as any other match end, rather than an instant restart.
+        if (state.gameState !== State.STOP && state.currentStadium === 'training' && state.teamSpec.length > 0) {
+            room.stopGame();
+            return;
+        }
+        if (state.gameState !== State.STOP) return;
+
         // Sorted by state.specQueueSince (oldest-waiting first), NOT plain
         // array order — real bug fixed here: state.teamSpec's order tracks
         // room.getPlayerList(), effectively room-join order, which has
