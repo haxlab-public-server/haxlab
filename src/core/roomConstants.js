@@ -10,7 +10,7 @@
 const roomName = '🧪 HaxLab | Новый сезон 🧪'; // room name
 const maxPlayers = 20;
 const roomPublic = true;
-const geo = { code: 'RU', lat: 53.7558, lon: 37.6173 }; // Moscow — shown as the room's flag/location
+const geo = { code: 'RU', lat: 55.3, lon: 37.6173 }; // Moscow — shown as the room's flag/location
 
 const fetchRecordingVariable = true;
 const timeLimit = 5;

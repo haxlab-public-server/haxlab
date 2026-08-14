@@ -65,6 +65,17 @@ console.log('--- stats/print.js: !stats shows the full stat block ---');
     const bffOutput = await printStats.printPlayerStats(bffStats);
     check('BFF stats (ratingOrdinal set) DO show a rounded rating line', bffOutput.includes('⚔️ Рейтинг: 28'), true);
 
+    // Real bug fixed 2026-08-14: getStatRank's own SQL always returns
+    // {rank: 1, total: 0} when the whole player_stats table is empty (a
+    // brand new room, e.g. BFF on its first day) — displaying that raw
+    // read as "1/0", a nonsensical-looking "rank 1 of 0" rather than
+    // "nobody has any data yet".
+    const emptyRoomDb = { getStatRank: async () => ({ rank: 1, total: 0 }) };
+    const emptyRoomPrintStats = createPrintStats({ getTimeStats: (s) => `${Math.floor(s / 60)}m`, db: emptyRoomDb });
+    const emptyRoomOutput = await emptyRoomPrintStats.printPlayerStats({ ...stats, playerName: 'Newbie', goals: 0, assists: 0, CS: 0 });
+    check('an empty player_stats table shows "—", never the misleading "1/0"', emptyRoomOutput.includes('1/0'), false);
+    check('...shows a clear placeholder instead', emptyRoomOutput.includes('Ранг по голам: —(0)'), true);
+
     const ratingDbFew = { getRatingLeaderboard: async () => [{ playerName: 'A', ordinal: 40 }, { playerName: 'B', ordinal: 30 }] };
     check('buildRatingRankingString returns null below the 5-player quorum', await require(path.join(CORE, 'stats', 'print')).buildRatingRankingString(ratingDbFew), null);
 
@@ -8824,9 +8835,59 @@ console.log('--- core/bff/matchFlow.js: rating-driven match assembly (no captain
     // --- live match in progress: joins/leaves don't reassemble mid-game ---
     roomCallsLocal.length = 0;
     stateLocal.gameState = StateEnum.PLAY;
+    stateLocal.teamRed = [];
+    stateLocal.teamBlue = [];
     stateLocal.teamSpec = [mkPlayer(3, 'A3', 'Carol'), mkPlayer(4, 'A4', 'Dave')];
     await matchFlow.handlePlayersJoin();
-    check('a join during a live match does not touch teams (never interrupts a running game)', roomCallsLocal.length, 0);
+    check('a join during a live match with BALANCED teams does not touch teams (never interrupts a running game)', roomCallsLocal.length, 0);
+    stateLocal.gameState = StateEnum.STOP;
+
+    // --- real bug fixed: a mid-match departure leaving a side short is
+    // filled from a waiting spectator WITHOUT interrupting the game, same
+    // policy as the main room's own balanceTeams() (exact-parity fills
+    // only — see matchFlow.js's own comment) ---
+    roomCallsLocal.length = 0;
+    stateLocal.gameState = StateEnum.PLAY;
+    stateLocal.currentStadium = 'classic';
+    stateLocal.teamRed = [mkPlayer(20, 'A20', 'Solo1v1')];
+    stateLocal.teamBlue = [];
+    stateLocal.teamSpec = [mkPlayer(21, 'A21', 'Sub')];
+    await matchFlow.handlePlayersLeave();
+    check('the waiting spectator is pulled onto the SHORT side (blue), live, no stop/restart', roomCallsLocal, [{ fn: 'setPlayerTeam', id: 21, team: TeamLocal.BLUE }]);
+
+    // --- the mirror case: red is short instead of blue ---
+    roomCallsLocal.length = 0;
+    stateLocal.teamRed = [];
+    stateLocal.teamBlue = [mkPlayer(22, 'A22', 'Solo1v1B')];
+    stateLocal.teamSpec = [mkPlayer(23, 'A23', 'Sub2')];
+    await matchFlow.handlePlayersLeave();
+    check('...and the mirror case correctly targets red', roomCallsLocal, [{ fn: 'setPlayerTeam', id: 23, team: TeamLocal.RED }]);
+
+    // --- a bigger gap (2 short) with exactly 2 waiting also gets fully filled ---
+    roomCallsLocal.length = 0;
+    stateLocal.teamRed = [mkPlayer(24, 'A24', 'R1'), mkPlayer(25, 'A25', 'R2'), mkPlayer(26, 'A26', 'R3'), mkPlayer(27, 'A27', 'R4')];
+    stateLocal.teamBlue = [mkPlayer(28, 'A28', 'B1'), mkPlayer(29, 'A29', 'B2')];
+    stateLocal.teamSpec = [mkPlayer(30, 'A30', 'Sub3'), mkPlayer(31, 'A31', 'Sub4')];
+    await matchFlow.handlePlayersLeave();
+    const bigGapFills = roomCallsLocal.filter((c) => c.fn === 'setPlayerTeam');
+    check('a 2-player gap with exactly 2 waiting pulls in both, restoring a genuine 4v4', bigGapFills.length, 2);
+    check('...both onto the short (blue) side', bigGapFills.every((c) => c.team === TeamLocal.BLUE), true);
+
+    // --- gap bigger than the waiting pool: room policy is "keep playing uneven", not a partial/forced fill ---
+    roomCallsLocal.length = 0;
+    stateLocal.teamRed = [mkPlayer(32, 'A32', 'R5'), mkPlayer(33, 'A33', 'R6'), mkPlayer(34, 'A34', 'R7')];
+    stateLocal.teamBlue = [mkPlayer(35, 'A35', 'B3')];
+    stateLocal.teamSpec = [mkPlayer(36, 'A36', 'OnlyOneWaiting')];
+    await matchFlow.handlePlayersLeave();
+    check('a gap of 2 with only 1 spectator waiting is left alone entirely (no partial fill)', roomCallsLocal.length, 0);
+
+    // --- already balanced mid-match: no-op either way ---
+    roomCallsLocal.length = 0;
+    stateLocal.teamRed = [mkPlayer(37, 'A37', 'R8')];
+    stateLocal.teamBlue = [mkPlayer(38, 'A38', 'B4')];
+    stateLocal.teamSpec = [mkPlayer(39, 'A39', 'JustWatching')];
+    await matchFlow.handlePlayersJoin();
+    check('a join with teams already balanced does not pull anyone in', roomCallsLocal.length, 0);
     stateLocal.gameState = StateEnum.STOP;
 
     // --- a full 8-player house forms a genuine 4v4 ---

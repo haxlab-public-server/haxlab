@@ -39,11 +39,13 @@ module.exports = function createBffMatchFlow({
     // LONGEST-WAITING currently-spectating players (any extra beyond that
     // wait, same per-side cap the main room enforces) — see the queue sort
     // below for why "longest-waiting" and not "array order". Does nothing
-    // with zero players, or if a match is already live (BFF never
-    // interrupts a running match to reassemble — same "don't cut off a
-    // live game" principle as the main room). A lone player has no one to
-    // balance against, so they go straight to the training map instead of
-    // through rating logic — same bootstrap case the main room handles.
+    // with zero players, or if a match is already live (BFF never fully
+    // REASSEMBLES/restarts a running match — same "don't cut off a live
+    // game" principle as the main room — though a live match's roster CAN
+    // still get an exact-parity gap filled from spectators, see below). A
+    // lone player has no one to balance against, so they go straight to
+    // the training map instead of through rating logic — same bootstrap
+    // case the main room handles.
     async function assembleMatch() {
         // state.reassembling guards the reassembleDelayMs pause below:
         // without it, any join/leave landing inside that window calls this
@@ -81,7 +83,30 @@ module.exports = function createBffMatchFlow({
             room.stopGame();
             return;
         }
-        if (state.gameState !== State.STOP) return;
+        // Real bug fixed here (reported live 2026-08-14: "if someone
+        // leaves a 1v1 with 1 spectator waiting, it just continues 1v0
+        // forever, in any team size"): a genuine live match was never
+        // touched at all, even when a departure leaves a side short by
+        // EXACTLY as many players as are sitting in state.teamSpec. The
+        // main room's own team/balance.js already handles this precise
+        // case (see its own balanceTeams() — pulls spectators in to
+        // restore parity WITHOUT restarting/reassembling, only when the
+        // gap and the available pool match exactly; a gap bigger than the
+        // waiting pool is left to "just keep playing uneven" instead,
+        // rather than benching someone on the fuller side to force it).
+        // Simply calling room.setPlayerTeam onto a live match's short side
+        // does not stop or restart the game at all — HaxBall allows
+        // roster changes mid-match — so this never touches ratings, the
+        // stadium, or score/time limits, just adds players.
+        if (state.gameState !== State.STOP) {
+            const diff = state.teamRed.length - state.teamBlue.length;
+            if (diff !== 0 && Math.abs(diff) === state.teamSpec.length) {
+                const shortSide = diff > 0 ? Team.BLUE : Team.RED;
+                const fillQueue = [...state.teamSpec].sort((a, b) => (state.specQueueSince.get(a.id) ?? 0) - (state.specQueueSince.get(b.id) ?? 0));
+                fillQueue.forEach((p) => room.setPlayerTeam(p.id, shortSide));
+            }
+            return;
+        }
 
         // Sorted by state.specQueueSince (oldest-waiting first), NOT plain
         // array order — real bug fixed here: state.teamSpec's order tracks

@@ -79,6 +79,19 @@ module.exports = function createPrintStats({
     getTimeStats,
     db,
 }) {
+    // getStatRank's own SQL (db/sqlite.js) computes rank as COUNT(rows
+    // exceeding this value) + 1 — when the whole table has zero rows
+    // (total === 0), that COUNT can only ever be 0 too, so rank always
+    // comes back exactly 1. Displaying that raw as "1/0" reads as a real
+    // rank ("1st of 0") instead of what it actually means: nobody in this
+    // room has any qualifying data yet. Real bug fixed 2026-08-14 — first
+    // hit in BFF (a brand new room, so player_stats starts genuinely
+    // empty), but the underlying getStatRank behavior is shared with the
+    // main room too, just never empty enough there to show it.
+    function formatRank(rankInfo) {
+        return rankInfo.total === 0 ? '—' : `${rankInfo.rank}/${rankInfo.total}`;
+    }
+
     async function printPlayerStats(stats) {
         const goalsRank = await db.getStatRank('goals', stats.goals);
         const assistsRank = await db.getStatRank('assists', stats.assists);
@@ -86,10 +99,10 @@ module.exports = function createPrintStats({
         const playtimeRank = await db.getStatRank('playtime', stats.playtime);
         let text = `${stats.playerName} ` +
             `[🏆 ${stats.winrate} побед, 🕹️ ${stats.games} игр] ` +
-            `[🏅 Ранг по голам: ${goalsRank.rank}/${goalsRank.total}(${stats.goals}), ` +
-            `ассистам: ${assistsRank.rank}/${assistsRank.total}(${stats.assists}), ` +
-            `сухим матчам: ${csRank.rank}/${csRank.total}(${stats.CS}), ` +
-            `времени игры: ${playtimeRank.rank}/${playtimeRank.total}(${getTimeStats(stats.playtime)})]`;
+            `[🏅 Ранг по голам: ${formatRank(goalsRank)}(${stats.goals}), ` +
+            `ассистам: ${formatRank(assistsRank)}(${stats.assists}), ` +
+            `сухим матчам: ${formatRank(csRank)}(${stats.CS}), ` +
+            `времени игры: ${formatRank(playtimeRank)}(${getTimeStats(stats.playtime)})]`;
         // BFF-only (see core/bff/rating.js) — the main room never sets this
         // field on the stats object it passes in, so this stays 100%
         // unchanged there. Rounded for display; the DB keeps the real
