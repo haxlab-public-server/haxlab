@@ -193,6 +193,7 @@ const discordBot = createDiscordBot({
     getAuthArray: () => authArray,
     getPrintPlayerStats: () => printPlayerStats,
     relayToRoom,
+    relayToBffRoom,
     kickPlayerByAuth,
     grantVipByAuth,
     muteByAuth,
@@ -291,6 +292,26 @@ process.on('message', (msg) => {
  * message rate (a handful of events per minute, not a firehose). */
 const net = require('node:net');
 
+// Tracks the single active BFF connection (bffIndex.js only ever opens one)
+// so relayToBffRoom below has something to write to — the bridge was
+// write-only from BFF's side until now (log/report/recording/status/
+// voteBanNotification/adminCall all flow BFF -> here, nothing flowed back
+// the other way). !saybff/`/saybff` (discord.js) need the reverse
+// direction, so this is the first thing sent back down this socket.
+let bffSocket = null;
+
+// Fire-and-forget, same as relayToRoom (index.js's IPC 'relay' message) —
+// a disconnected/reconnecting BFF bridge degrades to "this message never
+// reached the room," never to the command itself erroring.
+function relayToBffRoom(username, content) {
+    if (!bffSocket || bffSocket.destroyed) return;
+    try {
+        bffSocket.write(JSON.stringify({ type: 'relay', username, content }) + '\n');
+    } catch (err) {
+        console.error('[BFF bridge] Failed to write relay message:', err.message);
+    }
+}
+
 function handleBffBridgeMessage(msg) {
     if (!msg || typeof msg !== 'object') return;
     switch (msg.type) {
@@ -330,6 +351,10 @@ function handleBffBridgeMessage(msg) {
 }
 
 const bffBridgeServer = net.createServer((socket) => {
+    // bffIndex.js reconnects with backoff on drop (see its own
+    // connectDiscordBridge) — always the latest/only connection, so a
+    // fresh one here simply replaces whatever was tracked before.
+    bffSocket = socket;
     let buffer = '';
     socket.on('data', (chunk) => {
         buffer += chunk.toString('utf8');
@@ -344,6 +369,9 @@ const bffBridgeServer = net.createServer((socket) => {
                 console.error('[BFF bridge] Failed to parse message:', err);
             }
         }
+    });
+    socket.on('close', () => {
+        if (bffSocket === socket) bffSocket = null;
     });
     socket.on('error', (err) => {
         console.error('[BFF bridge] Socket error:', err.message);

@@ -7,6 +7,7 @@ module.exports = function createCommands({
     renameCommand,
     customColorsCommand,
     vipColorCommand,
+    vipHideCommand,
     vipHelpCommand,
     linkDiscordCommand,
     topsCommand,
@@ -138,6 +139,13 @@ module.exports = function createCommands({
     Аргумент 1: <hex> цвет в hex-формате. Без аргумента цвет сбрасывается на стандартный.
     Пример: !vipcolor ff8800.`,
         function: vipColorCommand,
+    },
+    viphide: {
+        aliases: [],
+        roles: Role.VIP,
+        desc: `
+        Эта команда скрывает (или снова показывает) ваш VIP-префикс в чате. Права доступа не меняются, только видимость.`,
+        function: vipHideCommand,
     },
     viphelp: {
         aliases: [],

@@ -22,6 +22,7 @@ module.exports = function createPlayerCommands({
     maxAFKCount,
     AFKCooldown,
     silencedAuths,
+    hiddenVipSet,
     announcementColor,
     errorColor,
     infoColor,
@@ -228,10 +229,28 @@ module.exports = function createPlayerCommands({
         room.sendAnnouncement(`✔️ Ваш VIP-цвет обновлен !`, player.id, successColor, 'bold', HaxNotification.CHAT);
     }
 
+    // Role-gated to Role.VIP in commands.js, same trust-the-dispatcher
+    // convention as vipColorCommand above. Same shape as commands/admin.js's
+    // hideCommand (suppresses just the chat prefix without touching
+    // role/permissions), but simpler — VIP has no native room badge the way
+    // admin does, so there's no room.setPlayerAdmin/onPlayerAdminChange
+    // interaction to worry about, just the one Set events/activity.js's
+    // chat-prefix logic already checks.
+    function vipHideCommand(player) {
+        if (hiddenVipSet.has(player.id)) {
+            hiddenVipSet.delete(player.id);
+            room.sendAnnouncement(`👁️ Скрытность отключена — VIP-префикс снова виден.`, player.id, successColor, 'bold', HaxNotification.CHAT);
+        } else {
+            hiddenVipSet.add(player.id);
+            room.sendAnnouncement(`🕶️ Скрытность включена — VIP-префикс скрыт.`, player.id, successColor, 'bold', HaxNotification.CHAT);
+        }
+    }
+
     function vipHelpCommand(player, message) {
         const text = [
             '⭐ Команды VIP:',
             '!vipcolor <hex> — изменить цвет вашего VIP-префикса в чате, или без аргумента чтобы сбросить на стандартный. Пример: !vipcolor ff8800.',
+            '!viphide — скрыть (или снова показать) ваш VIP-префикс в чате. Права доступа не меняются, только видимость.',
             '!viphelp — эта команда.',
             '',
             '⭐ Также, пока у вас есть VIP: анимации "Дым", "Фейерверк" и "Черная дыра" после гола доступны бесплатно — просто наденьте их через "!equip smoke-<цвет>", "!equip fireworks" или "!equip blackhole", без покупки.',
@@ -726,6 +745,7 @@ module.exports = function createPlayerCommands({
         renameCommand,
         customColorsCommand,
         vipColorCommand,
+        vipHideCommand,
         vipHelpCommand,
         linkDiscordCommand,
         topsCommand,

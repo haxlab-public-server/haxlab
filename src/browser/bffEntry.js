@@ -110,7 +110,6 @@ const createRoomSetup = require('../core/bff/roomSetup');
 state.currentStadium = 'training';
 room.setCustomStadium(bffTrainingMap);
 room.setTeamsLock(true);
-room.setKickRateLimit(6, 12, 4);
 state.roomPassword = window.__secrets.bffRoomPassword;
 room.setPassword(state.roomPassword != '' ? state.roomPassword : null);
 
@@ -213,6 +212,9 @@ state.checkStadiumVariable = true;
 state.endGameVariable = false;
 state.goldenGoal = false;
 const hiddenAdminsSet = new Set();
+// !viphide toggle (VIP only) — same shape as hiddenAdminsSet above, just
+// for the VIP chat prefix specifically (no native badge to also suppress).
+const hiddenVipSet = new Set();
 const AFKSet = new Map();
 
 const emptyPlayer = { id: 0 };
@@ -496,7 +498,7 @@ const matchFlow = createBffMatchFlow({
 
 const createBffAfk = require('../core/bff/afk');
 const afkSystem = createBffAfk({
-    room, state, Team, State, Role,
+    room, state, Team, Role,
     AFKSet, AFKMinSet, AFKCooldownSet,
     minAFKDuration, maxAFKDuration, maxAFKDurationVip, maxAFKCount, AFKCooldown,
     announcementColor, errorColor, HaxNotification,
@@ -525,6 +527,19 @@ Object.assign(room, wrapEventHandlers(createMiscEvents({
     checkTime, getDate, getGameStats, getLastTouchOfTheBall, getRole,
     handleActivity, stadiumCommand: bffStadiumCommand, updateTeams,
 })));
+
+// Real design change here (requested live 2026-08-14: "убери кикрейт у
+// BFF") — BFF no longer applies any kick rate limit at all (the initial
+// room.setKickRateLimit(6, 12, 4) call above and its onGameStart re-apply
+// in bff/events.js were both removed for the same reason). misc.js's own
+// onKickRateLimitSet (reused as-is, shared with the main room) exists
+// specifically to fight tampering by re-locking to "6-12-4" — since BFF no
+// longer wants ANY fixed rate, that handler is fully replaced here (not
+// layered on top of, unlike the overrides below) with a no-op: nothing
+// re-locks it, whatever rate (or none) is in effect just stays that way.
+// The main room's own kick rate lock (entry.js/gameManagement.js) is
+// untouched.
+room.onKickRateLimitSet = wrapEventHandlers({ onKickRateLimitSet: () => {} }).onKickRateLimitSet;
 
 // onPlayerAdminChange (wired above via misc.js) fires on room join, but the
 // activity/lineup team-change hooks below aren't part of misc.js — folded
@@ -569,9 +584,10 @@ Object.assign(room, wrapEventHandlers({ onPlayerActivity }));
 /* COMMANDS */
 const { computeOrdinal } = require('../core/bff/rating');
 const createBffCommands = require('../core/bff/commands');
-const { meCommand, topsCommand, renameCommand, helpCommand } = createBffCommands({
+const { meCommand, topsCommand, renameCommand, helpCommand, leaveCommand, vipHideCommand } = createBffCommands({
     room, state, authArray, db, HaxStatistics, HaxNotification, Role,
     infoColor, errorColor, successColor, getTimeStats, getRole, computeOrdinal, bffRoomStats,
+    hiddenVipSet,
 });
 
 // Master-level moderation (bans/admins/VIPs/password/restrictions) — reused
@@ -627,6 +643,8 @@ const commands = {
     tops: { aliases: ['top'], roles: Role.PLAYER, function: topsCommand },
     rename: { aliases: [], roles: Role.PLAYER, function: renameCommand },
     help: { aliases: ['commands', 'рудз'], roles: Role.PLAYER, function: helpCommand },
+    bb: { aliases: ['bye', 'gn', 'cya', 'ии'], roles: Role.PLAYER, function: leaveCommand },
+    viphide: { aliases: [], roles: Role.VIP, function: vipHideCommand },
     t: { aliases: [], roles: Role.PLAYER, function: teamChat },
     p: { aliases: [], roles: Role.PLAYER, function: playerChat },
     voteban: { aliases: [], roles: Role.PLAYER, function: votebanCommand },
@@ -737,6 +755,7 @@ room.onPlayerChat = wrapEventHandlers({
         // working native behavior with a redundant, worse reimplementation.
         const role = getRole(player);
         const showAdminPrefix = !hiddenAdminsSet.has(player.id);
+        const showVipPrefix = !hiddenVipSet.has(player.id);
         let rolePrefix = null;
         let prefixColor = null;
         if (showAdminPrefix && role == Role.MASTER) {
@@ -745,7 +764,7 @@ room.onPlayerChat = wrapEventHandlers({
         } else if (showAdminPrefix && role >= Role.ADMIN_TEMP) {
             rolePrefix = '[🛡️АДМ]';
             prefixColor = adminChatColor;
-        } else if (role == Role.VIP) {
+        } else if (showVipPrefix && role == Role.VIP) {
             rolePrefix = '[⭐ВИП]';
             prefixColor = vipChatColor;
         }

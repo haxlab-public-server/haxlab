@@ -90,12 +90,19 @@ module.exports = function createBffMatchFlow({
         //
         // 1. "if someone leaves a 1v1 with 1 spectator waiting, it just
         //    continues 1v0 forever, in any team size" — a departure
-        //    leaving a side short was never backfilled at all, even when
-        //    the gap exactly equals who's waiting. Same policy as the main
-        //    room's own team/balance.js balanceTeams(): restore exact
-        //    parity only when the gap and the waiting pool match exactly;
-        //    a bigger gap is left "just keep playing uneven" rather than
-        //    benching someone on the fuller side to force it.
+        //    leaving a side short was never backfilled at all. Same policy
+        //    as the main room's own team/balance.js balanceTeams(): only
+        //    restore exact parity, never force a fill by benching someone
+        //    on the fuller side. Real bug fixed here too (reported live
+        //    2026-08-14 in 4v4 specifically): the original check required
+        //    the waiting pool to be EXACTLY the gap size
+        //    (`Math.abs(diff) === fillQueue.length`) — with more people
+        //    waiting than the gap (routine at 4v4, since the room holds up
+        //    to 14 while a match only uses 8), that equality never held, so
+        //    a departure was never backfilled at all despite plenty waiting.
+        //    Fixed to require only ENOUGH waiting (`>=`), taking just the
+        //    needed number (oldest-first) and leaving any surplus in the
+        //    queue for the growth step below.
         // 2. "1v1 on the field with 2 spectators doesn't grow to 2v2" —
         //    once already balanced (or just rebalanced by step 1), extra
         //    waiting spectators were never pulled in either, even when the
@@ -112,11 +119,13 @@ module.exports = function createBffMatchFlow({
             let blueCount = state.teamBlue.length;
 
             const diff = redCount - blueCount;
-            if (diff !== 0 && Math.abs(diff) === fillQueue.length) {
+            if (diff !== 0 && fillQueue.length >= Math.abs(diff)) {
                 const shortSide = diff > 0 ? Team.BLUE : Team.RED;
-                fillQueue.forEach((p) => room.setPlayerTeam(p.id, shortSide));
+                const needed = Math.abs(diff);
+                for (let i = 0; i < needed; i++) {
+                    room.setPlayerTeam(fillQueue.shift().id, shortSide);
+                }
                 redCount = blueCount = Math.max(redCount, blueCount);
-                fillQueue.length = 0;
             }
 
             if (redCount === blueCount) {
@@ -252,7 +261,28 @@ module.exports = function createBffMatchFlow({
                 assembleMatch().catch((err) => console.error('[bff/matchFlow] assembleMatch failed:', err));
             }, reassembleDelayMs);
         } else {
-            await assembleMatch();
+            // Real bug fixed here (reported live 2026-08-14: "если админ
+            // стопает игру... 8 человек в зрителях, а иногда собиралось
+            // 2х2" — should be the max the headcount supports, e.g. 4v4).
+            // This used to call assembleMatch() synchronously, immediately
+            // after the bench loop above — but that loop just fired up to
+            // 2*teamSize back-to-back room.setPlayerTeam() calls, and
+            // assembleMatch() reads state.teamSpec, which is only updated
+            // by each call's own onPlayerTeamChange echo landing. The main
+            // room's team/balance.js has extensive documented history of
+            // this EXACT race (see its own handlePlayersStop comments on
+            // "the just-benched losers weren't reliably counted in
+            // state.teamSpec yet, undercounting how many were actually
+            // available") — a tight loop of setPlayerTeam calls is not
+            // reliably fully echoed before the very next line runs in real
+            // production. Assembling too early saw only a partial bench
+            // (e.g. 4 of 8 already landed), forming a smaller match (2v2)
+            // than the full house actually available (4v4). Fixed with the
+            // same short defer balance.js already relies on for this exact
+            // purpose, so every bench call's echo has landed first.
+            setTimeout(() => {
+                assembleMatch().catch((err) => console.error('[bff/matchFlow] assembleMatch failed:', err));
+            }, 10);
         }
     }
 

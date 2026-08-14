@@ -159,15 +159,6 @@ module.exports = function createBffEvents({
     }
 
     function onGameStart() {
-        // Real gap found comparing against the main room's own onGameStart:
-        // events/misc.js (reused as-is) has onKickRateLimitSet, which slaps
-        // the kick rate limit down to (6,0,0) the instant anyone tampers
-        // with it — the main room's onGameStart re-applies the real (6,12,4)
-        // every match specifically to undo that lockdown before the next
-        // kickoff. Without this, a single tampering attempt would leave
-        // BFF's kick rate degraded for the rest of the room's life, never
-        // restored by anything.
-        room.setKickRateLimit(6, 12, 4);
         // Defensive, matching the main room's own onGameStart: guards
         // against a stale scheduled room.stopGame() (from checkTime/
         // onTeamGoal's own state.stopTimeout) firing after a fresh match

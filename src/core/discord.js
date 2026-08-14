@@ -13,6 +13,10 @@ const { formatBanRemaining } = require('./utils');
 const { buildRankingString, buildAllRankingsText, buildClubRankingString } = require('./stats/print');
 
 const SAY_PREFIX = '!say';
+// Checked BEFORE SAY_PREFIX everywhere below — "!saybff ..." also satisfies
+// a plain startsWith("!say") check, so the more specific prefix has to win
+// or every !saybff message would get relayed to futsal instead of BFF.
+const SAY_BFF_PREFIX = '!saybff';
 const STATS_COMMAND_PREFIX = '!stats';
 const TOPS_COMMAND_PREFIX = '!tops';
 const PLAYERS_PREFIX = '!players';
@@ -59,7 +63,13 @@ function isOwnerOrAdmin(userId, member, discordOwnerId, discordAdminRoleId) {
 const slashCommandData = [
     new SlashCommandBuilder()
         .setName('say')
-        .setDescription('Отправить сообщение в чат комнаты HaxBall (владелец и админы)')
+        .setDescription('Отправить сообщение в чат комнаты Futsal (владелец и админы)')
+        .addStringOption((option) =>
+            option.setName('message').setDescription('Текст для отправки в комнату').setRequired(true)
+        ),
+    new SlashCommandBuilder()
+        .setName('saybff')
+        .setDescription('Отправить сообщение в чат комнаты BFF (владелец и админы)')
         .addStringOption((option) =>
             option.setName('message').setDescription('Текст для отправки в комнату').setRequired(true)
         ),
@@ -141,8 +151,16 @@ function listCurrentPlayers(state, getAuthArray) {
 // incoming Discord message, without touching the discord.js Client itself.
 // Async because kickPlayerByAuth crosses to the game process over IPC (see
 // core/discordProcess.js) — it's no longer a same-process function call.
-async function handleIncomingMessage(message, { discordOwnerId, discordAdminRoleId, db, state, getAuthArray, getPrintPlayerStats, relayToRoom, kickPlayerByAuth, muteByAuth, unmuteByAuth, getTimeStats }) {
+async function handleIncomingMessage(message, { discordOwnerId, discordAdminRoleId, db, state, getAuthArray, getPrintPlayerStats, relayToRoom, relayToBffRoom, kickPlayerByAuth, muteByAuth, unmuteByAuth, getTimeStats }) {
     if (message.author.bot) return null;
+
+    if (message.content.toLowerCase().startsWith(SAY_BFF_PREFIX)) {
+        if (!isOwnerOrAdmin(message.author.id, message.member, discordOwnerId, discordAdminRoleId)) return null;
+        const text = message.content.slice(SAY_BFF_PREFIX.length).trim();
+        if (text === '') return 'Использование: !saybff <message>';
+        relayToBffRoom(message.author.displayName, text);
+        return null;
+    }
 
     if (message.content.toLowerCase().startsWith(SAY_PREFIX)) {
         if (!isOwnerOrAdmin(message.author.id, message.member, discordOwnerId, discordAdminRoleId)) return null;
@@ -354,14 +372,21 @@ const OWNER_OR_ADMIN_ONLY_REPLY = { content: 'Только владелец ил
 // behavior command-for-command, just reading typed slash-command options instead
 // of parsing message text — /stats replies publicly (like !stats) since it's an
 // open lookup, the rest stay ephemeral (owner-only moderation/utility actions).
-async function handleSlashCommand(interaction, { discordOwnerId, discordAdminRoleId, db, state, getAuthArray, getPrintPlayerStats, relayToRoom, kickPlayerByAuth, muteByAuth, unmuteByAuth, getTimeStats }) {
+async function handleSlashCommand(interaction, { discordOwnerId, discordAdminRoleId, db, state, getAuthArray, getPrintPlayerStats, relayToRoom, relayToBffRoom, kickPlayerByAuth, muteByAuth, unmuteByAuth, getTimeStats }) {
     const { commandName } = interaction;
 
     if (commandName === 'say') {
         if (!isOwnerOrAdmin(interaction.user.id, interaction.member, discordOwnerId, discordAdminRoleId)) return OWNER_OR_ADMIN_ONLY_REPLY;
         const text = interaction.options.getString('message');
         relayToRoom(interaction.user.displayName, text);
-        return { content: `Отправлено: ${text}`, ephemeral: true };
+        return { content: `Отправлено в Futsal: ${text}`, ephemeral: true };
+    }
+
+    if (commandName === 'saybff') {
+        if (!isOwnerOrAdmin(interaction.user.id, interaction.member, discordOwnerId, discordAdminRoleId)) return OWNER_OR_ADMIN_ONLY_REPLY;
+        const text = interaction.options.getString('message');
+        relayToBffRoom(interaction.user.displayName, text);
+        return { content: `Отправлено в BFF: ${text}`, ephemeral: true };
     }
 
     if (commandName === 'tops') {
@@ -505,6 +530,7 @@ module.exports = function createDiscordBot({
     getAuthArray,
     getPrintPlayerStats,
     relayToRoom,
+    relayToBffRoom,
     kickPlayerByAuth,
     grantVipByAuth,
     muteByAuth,
@@ -648,7 +674,7 @@ module.exports = function createDiscordBot({
     });
 
     client.on(Events.MessageCreate, async (message) => {
-        const reply = await handleIncomingMessage(message, { discordOwnerId, discordAdminRoleId, db, state, getAuthArray, getPrintPlayerStats, relayToRoom, kickPlayerByAuth, muteByAuth, unmuteByAuth, getTimeStats });
+        const reply = await handleIncomingMessage(message, { discordOwnerId, discordAdminRoleId, db, state, getAuthArray, getPrintPlayerStats, relayToRoom, relayToBffRoom, kickPlayerByAuth, muteByAuth, unmuteByAuth, getTimeStats });
         if (reply) message.channel.send(reply).catch((err) => console.error('Discord reply failed:', err));
     });
 
@@ -662,7 +688,7 @@ module.exports = function createDiscordBot({
 
     client.on(Events.InteractionCreate, async (interaction) => {
         if (!interaction.isChatInputCommand()) return;
-        const reply = await handleSlashCommand(interaction, { discordOwnerId, discordAdminRoleId, db, state, getAuthArray, getPrintPlayerStats, relayToRoom, kickPlayerByAuth, muteByAuth, unmuteByAuth, getTimeStats });
+        const reply = await handleSlashCommand(interaction, { discordOwnerId, discordAdminRoleId, db, state, getAuthArray, getPrintPlayerStats, relayToRoom, relayToBffRoom, kickPlayerByAuth, muteByAuth, unmuteByAuth, getTimeStats });
         if (reply) interaction.reply(reply).catch((err) => console.error('Discord interaction reply failed:', err));
     });
 

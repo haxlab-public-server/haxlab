@@ -7,7 +7,7 @@
  * config.js, read by the orchestrator — see src/index.js) and get injected
  * into the page separately as window.__secrets, rather than living here.
  */
-const roomName = '🧪 HaxLab | Futsal 4x4 WinStay Captains 🧪'; // room name
+const roomName = '🧪 HaxLab | Futsal | 4x4 WinStay 🧪'; // room name
 const maxPlayers = 20;
 const roomPublic = true;
 const geo = { code: 'RU', lat: 55.3, lon: 37.6173 }; // Moscow — shown as the room's flag/location

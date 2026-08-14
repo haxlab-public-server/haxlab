@@ -561,9 +561,11 @@ console.log('\n--- db + roomStats.js/player.js: player data actually round-trips
     const printClubRankingsCalls = [];
     const { formatCoins, formatBanRemaining } = require(path.join(CORE, 'utils'));
     const discordBotCalls = [];
+    const hiddenVipSetForPlayerTest = new Set();
     const player = require(path.join(CORE, 'commands', 'player'))({
         room, state, Team, Role: { PLAYER: 0 }, HaxStatistics, authArray, db,
         AFKSet: new Set(), AFKMinSet: new Set(), AFKCooldownSet: new Set(),
+        hiddenVipSet: hiddenVipSetForPlayerTest,
         minAFKDuration: 0, maxAFKDuration: 0, AFKCooldown: 0,
         announcementColor: 1, errorColor: 3, infoColor: 5, successColor: 6, HaxNotification,
         getCommand: () => false, getRole: () => 0, handlePlayersJoin: () => {}, handlePlayersLeave: () => {},
@@ -757,6 +759,19 @@ console.log('\n--- db + roomStats.js/player.js: player data actually round-trips
     await player.vipColorCommand({ id: 3, name: 'NewPlayer' }, '!vipcolor');
     check('vipColorCommand with no argument resets to default', /сброшен/.test(sent[0].msg), true);
     check('the reset is cleared from state', state.vipColors['AUTH_NEW_PLAYER'], undefined);
+
+    // !viphide: same shape as commands/admin.js's !hide, but VIP-only and
+    // with no native badge to also toggle.
+    check('AUTH_NEW_PLAYER starts visible (not in hiddenVipSet)', hiddenVipSetForPlayerTest.has(3), false);
+    sent.length = 0;
+    player.vipHideCommand({ id: 3, name: 'NewPlayer' });
+    check('vipHideCommand confirms hiding', /Скрытность включена/.test(sent[0].msg), true);
+    check('the player is recorded as hidden', hiddenVipSetForPlayerTest.has(3), true);
+
+    sent.length = 0;
+    player.vipHideCommand({ id: 3, name: 'NewPlayer' });
+    check('vipHideCommand again confirms un-hiding', /Скрытность отключена/.test(sent[0].msg), true);
+    check('the hidden flag is cleared', hiddenVipSetForPlayerTest.has(3), false);
     check('the reset is cleared from the db', db.getAllVipColors(), []);
 
     sent.length = 0;
@@ -1242,6 +1257,25 @@ console.log('\n--- core/commands/club.js: create/invite/join/kick/leave/disband/
     check('the second slot costs 100 more than the first (600)', db.getBalance('AUTH_OWNER'), 0);
     check('slots went from 6 to 7', state.clubs[0].slots, 7);
 
+    // --- hard cap at 10, confirmed 2026-08-14: buys up to the cap, then
+    // refuses further purchases regardless of balance ---
+    db.addCoins('AUTH_OWNER', 'Alice', 700 + 800 + 900);
+    await club.clubSlotsCommand(alice, '!clubslots buy'); // 7 -> 8 (700)
+    await club.clubSlotsCommand(alice, '!clubslots buy'); // 8 -> 9 (800)
+    await club.clubSlotsCommand(alice, '!clubslots buy'); // 9 -> 10 (900)
+    check('slots reached the cap (10)', state.clubs[0].slots, 10);
+    check('...and every coin was actually spent getting there', db.getBalance('AUTH_OWNER'), 0);
+
+    db.addCoins('AUTH_OWNER', 'Alice', 10000);
+    sent.length = 0;
+    await club.clubSlotsCommand(alice, '!clubslots buy');
+    check('a purchase past the cap is refused, even with plenty of coins', /максимум слотов/.test(sent[0].msg), true);
+    check('...slots stay at 10', state.clubs[0].slots, 10);
+    check('...and no coins are spent on the refused purchase', db.getBalance('AUTH_OWNER'), 10000);
+    // Drains the 10000 back out — restores the "balance is 0" precondition
+    // the clubrename tests right below this depend on.
+    db.addCoins('AUTH_OWNER', 'Alice', -10000);
+
     sent.length = 0;
     await club.clubRenameCommand(bob, '!clubrename Ravens RVN');
     check('a non-member cannot rename', /не состоите/.test(sent[0].msg), true);
@@ -1262,10 +1296,10 @@ console.log('\n--- core/commands/club.js: create/invite/join/kick/leave/disband/
     await club.clubRenameCommand(alice, '!clubrename Ravens RV2');
     check('clubrename accepts a prefix with a digit', /1-4 букв|Использование/.test(sent[0].msg), false);
     check('clubrename fails without enough coins (balance is 0 after the slot buys)', /Недостаточно монет/.test(sent[0].msg), true);
-    check('the cost mentioned is 100', /100/.test(sent[0].msg), true);
+    check('the cost mentioned is 500', /500/.test(sent[0].msg), true);
     check('an unsuccessful rename does not touch state', { name: state.clubs[0].name, prefix: state.clubs[0].prefix }, { name: 'Falcons', prefix: 'FLC' });
 
-    db.addCoins('AUTH_OWNER', 'Alice', 100);
+    db.addCoins('AUTH_OWNER', 'Alice', 500);
     sent.length = 0;
     await club.clubRenameCommand(alice, '!clubrename Ravens RVN');
     check('clubrename succeeds once affordable', /переименован/.test(sent[0].msg), true);
@@ -1273,7 +1307,7 @@ console.log('\n--- core/commands/club.js: create/invite/join/kick/leave/disband/
     check('the announcement mentions both the old and new name', /"Falcons" переименован в "Ravens"/.test(sent[0].msg), true);
     check('the name/prefix are updated in state', { name: state.clubs[0].name, prefix: state.clubs[0].prefix }, { name: 'Ravens', prefix: 'RVN' });
     check('the name/prefix are persisted to the db', { name: db.getClub(clubId).name, prefix: db.getClub(clubId).prefix }, { name: 'Ravens', prefix: 'RVN' });
-    check('the 100 cost was deducted', db.getBalance('AUTH_OWNER'), 0);
+    check('the 500 cost was deducted', db.getBalance('AUTH_OWNER'), 0);
 
     sent.length = 0;
     await club.clubDisbandCommand(bob, '!clubdisband');
@@ -2025,6 +2059,7 @@ console.log('\n--- discord.js: message/interaction-handling logic (no live Disco
     const discordState = { playersAll: [{ id: 42, name: 'NewNick' }] };
 
     const relayed = [];
+    const relayedBff = [];
     const deps = {
         discordOwnerId: 'OWNER_ID',
         discordAdminRoleId: 'ADMIN_ROLE_ID',
@@ -2040,6 +2075,7 @@ console.log('\n--- discord.js: message/interaction-handling logic (no live Disco
         // then just shows "приложение не отвечает") went uncaught before.
         getPrintPlayerStats: () => async (stats) => `${stats.playerName}: ${stats.goals}G`,
         relayToRoom: (username, content) => relayed.push({ username, content }),
+        relayToBffRoom: (username, content) => relayedBff.push({ username, content }),
         getTimeStats: (s) => `${s}s`,
     };
     const memberWithRoles = (roleIds) => ({ roles: { cache: { has: (id) => roleIds.includes(id) } } });
@@ -2070,6 +2106,27 @@ console.log('\n--- discord.js: message/interaction-handling logic (no live Disco
     await handleIncomingMessage(msg('OWNER_ID', 'just chatting, not a command'), deps);
     check('an ordinary owner message is NOT relayed (no more blanket relay)', relayed, []);
 
+    // --- !saybff — separate command/relay for the BFF room, added
+    // 2026-08-14 ("сделай так, чтобы я мог через дискорд писать отдельно в
+    // руму с bff и с futsal через say"). Real bug caught while writing this:
+    // "!saybff hello" also satisfies a plain startsWith("!say") check, so
+    // SAY_BFF_PREFIX must be checked BEFORE SAY_PREFIX in discord.js, or
+    // every !saybff message would get silently relayed to futsal instead. ---
+    relayedBff.length = 0;
+    await handleIncomingMessage(msg('OWNER_ID', '!saybff hello bff'), deps);
+    check('!saybff from the owner relays to BFF specifically (prefix stripped)', relayedBff, [{ username: 'OWNER_ID', content: 'hello bff' }]);
+    check('...and NOT to futsal at all', relayed, []);
+
+    relayedBff.length = 0;
+    await handleIncomingMessage(msg('SOME_OTHER_USER', '!saybff nope'), deps);
+    check('!saybff from a non-owner is ignored', relayedBff, []);
+
+    relayedBff.length = 0;
+    await handleIncomingMessage(msg('ADMIN_USER', '!saybff hi from admin', false, ['ADMIN_ROLE_ID']), deps);
+    check('!saybff from a member with the admin role is relayed too', relayedBff, [{ username: 'ADMIN_USER', content: 'hi from admin' }]);
+
+    check('!saybff with no text shows usage', await handleIncomingMessage(msg('OWNER_ID', '!saybff'), deps), 'Использование: !saybff <message>');
+
     check('!say with no text shows usage', await handleIncomingMessage(msg('OWNER_ID', '!say'), deps), 'Использование: !say <message>');
     check('bot messages are ignored entirely', await handleIncomingMessage(msg('OWNER_ID', '!stats Xara', true), deps), null);
 
@@ -2094,7 +2151,7 @@ console.log('\n--- discord.js: message/interaction-handling logic (no live Disco
     relayed.length = 0;
     const ownerReply = await handleSlashCommand(interaction('OWNER_ID', 'say', { message: 'hi from slash' }), deps);
     check('/say from the owner relays the text with the sender name', relayed, [{ username: 'OWNER_ID', content: 'hi from slash' }]);
-    check('/say confirms back to the owner, ephemerally', ownerReply, { content: 'Отправлено: hi from slash', ephemeral: true });
+    check('/say confirms back to the owner, ephemerally', ownerReply, { content: 'Отправлено в Futsal: hi from slash', ephemeral: true });
 
     relayed.length = 0;
     const strangerReply = await handleSlashCommand(interaction('SOME_OTHER_USER', 'say', { message: 'hi from slash' }), deps);
@@ -2104,7 +2161,19 @@ console.log('\n--- discord.js: message/interaction-handling logic (no live Disco
     relayed.length = 0;
     const adminReply = await handleSlashCommand(interaction('ADMIN_USER', 'say', { message: 'hi from admin' }, ['ADMIN_ROLE_ID']), deps);
     check('/say from a member with the admin role relays too', relayed, [{ username: 'ADMIN_USER', content: 'hi from admin' }]);
-    check('/say confirms back to the admin, ephemerally', adminReply, { content: 'Отправлено: hi from admin', ephemeral: true });
+    check('/say confirms back to the admin, ephemerally', adminReply, { content: 'Отправлено в Futsal: hi from admin', ephemeral: true });
+
+    relayedBff.length = 0;
+    relayed.length = 0;
+    const ownerBffReply = await handleSlashCommand(interaction('OWNER_ID', 'saybff', { message: 'hi bff from slash' }), deps);
+    check('/saybff from the owner relays to BFF specifically', relayedBff, [{ username: 'OWNER_ID', content: 'hi bff from slash' }]);
+    check('...and NOT to futsal', relayed, []);
+    check('/saybff confirms back to the owner, ephemerally', ownerBffReply, { content: 'Отправлено в BFF: hi bff from slash', ephemeral: true });
+
+    relayedBff.length = 0;
+    const strangerBffReply = await handleSlashCommand(interaction('SOME_OTHER_USER', 'saybff', { message: 'nope' }), deps);
+    check('/saybff from a non-owner is rejected, not relayed', relayedBff, []);
+    check('/saybff rejection is ephemeral', strangerBffReply.ephemeral, true);
 
     relayed.length = 0;
     const unrelatedRoleReply = await handleSlashCommand(interaction('SOME_OTHER_USER', 'say', { message: 'nope' }, ['SOME_UNRELATED_ROLE']), deps);
@@ -2406,12 +2475,14 @@ console.log('\n--- events/activity.js: every chat message goes through room.send
     const roles = { 1: Role.MASTER, 2: Role.ADMIN_TEMP, 3: Role.VIP, 4: Role.PLAYER, 5: Role.PLAYER };
     const discordLogs = [];
     const hiddenAdminsSetMock = new Set();
+    const hiddenVipSetMock = new Set();
     const activity = require(path.join(CORE, 'events', 'activity'))({
         room, state, authArray, BallTouch: class {}, HaxNotification, Role,
         Situation: {}, State, Team, Trophies,
         adminChatColor: 'ADMIN_COLOR', masterChatColor: 'MASTER_COLOR', vipChatColor: 'VIP_COLOR',
         commands: {}, discordBot: { sendLog: (m) => discordLogs.push(m) }, errorColor: 2,
         hiddenAdminsSet: hiddenAdminsSetMock,
+        hiddenVipSet: hiddenVipSetMock,
         // !silence (commands/player.js) is a per-viewer Map<viewerAuth,
         // Set<speakerAuth>> — activity.js reads its .size unconditionally
         // (see onPlayerChat), so this must exist even when this test never
@@ -2495,6 +2566,14 @@ console.log('\n--- events/activity.js: every chat message goes through room.send
     check('a hidden MASTER is still intercepted', hiddenMasterResult, false);
     check('a hidden MASTER gets no prefix and the normal style', sent[0], { msg: 'Boss: sneaky', id: null, style: 'normal' });
     hiddenAdminsSetMock.delete(1);
+
+    // !viphide (commands/player.js) — same idea, VIP-specific.
+    hiddenVipSetMock.add(3);
+    sent.length = 0;
+    const hiddenVipResult = activity.onPlayerChat({ id: 3, name: 'Donor', team: Team.SPECTATORS, admin: false }, 'sneaky vip');
+    check('a hidden VIP is still intercepted', hiddenVipResult, false);
+    check('a hidden VIP gets no prefix and the normal style', sent[0], { msg: 'Donor: sneaky vip', id: null, style: 'normal' });
+    hiddenVipSetMock.delete(3);
 
     // Club prefix (core/commands/club.js) — a regular player in a club gets
     // intercepted just like a VIP/ADMIN/MASTER would, but with the club's
@@ -2639,7 +2718,7 @@ console.log('\n--- events/activity.js: choose-mode picking beats a stale vote fo
         Role: {}, Situation: {}, State: {}, Team, Trophies: {},
         adminChatColor: '', masterChatColor: '', vipChatColor: '',
         commands: {}, discordBot: { sendLog: () => {} }, errorColor: 2,
-        hiddenAdminsSet: new Set(), silencedAuths: new Map(), muteArray: { getByAuth: () => null },
+        hiddenAdminsSet: new Set(), hiddenVipSet: new Set(), silencedAuths: new Map(), muteArray: { getByAuth: () => null },
         MutePlayer: class { constructor() {} setDuration() {} },
         checkGoalKickTouch: () => null,
         // Only red (id 1) is entitled to pick right now (teamRed no longer
@@ -2711,7 +2790,7 @@ console.log('\n--- events/activity.js: checkSpamFlood auto-mutes a player who fl
         Role: {}, Situation: {}, State: {}, Team, Trophies: {},
         adminChatColor: '', masterChatColor: '', vipChatColor: '',
         commands: {}, discordBot: { sendLog: () => {} }, errorColor: 2,
-        hiddenAdminsSet: new Set(), silencedAuths: new Map(), muteArray: muteArrayLocal,
+        hiddenAdminsSet: new Set(), hiddenVipSet: new Set(), silencedAuths: new Map(), muteArray: muteArrayLocal,
         MutePlayer: class {
             constructor(name, id, auth) { mutesCreated.push({ name, id, auth }); }
             setDuration(minutes) { mutesCreated[mutesCreated.length - 1].minutes = minutes; }
@@ -2767,7 +2846,7 @@ console.log('\n--- events/activity.js: bare "т"/"ч" also trigger team chat, sa
         Role: {}, Situation: {}, State: {}, Team, Trophies: {},
         adminChatColor: '', masterChatColor: '', vipChatColor: '',
         commands: {}, discordBot: { sendLog: () => {} }, errorColor: 2,
-        hiddenAdminsSet: new Set(), silencedAuths: new Map(), muteArray: { getByAuth: () => null },
+        hiddenAdminsSet: new Set(), hiddenVipSet: new Set(), silencedAuths: new Map(), muteArray: { getByAuth: () => null },
         MutePlayer: class { constructor() {} setDuration() {} },
         checkGoalKickTouch: () => null, chooseModeFunction: () => false, formatTrophyLabel: () => '', resolveTrophyRank: () => null,
         getCommand: () => false, getDate: () => 'DATE', getGoalGame: () => null,
@@ -2818,7 +2897,7 @@ console.log('\n--- events/activity.js: a muted player can\'t route around it thr
         Role: {}, Situation: {}, State: {}, Team, Trophies: {},
         adminChatColor: '', masterChatColor: '', vipChatColor: '',
         commands: {}, discordBot: { sendLog: () => {} }, errorColor: 2,
-        hiddenAdminsSet: new Set(), silencedAuths: new Map(),
+        hiddenAdminsSet: new Set(), hiddenVipSet: new Set(), silencedAuths: new Map(),
         // Only AUTH_MUTED (and AUTH_MUTED_ADMIN, to prove the admin
         // exemption still applies even to a muteArray entry) are muted.
         muteArray: { getByAuth: (auth) => (auth === 'AUTH_MUTED' || auth === 'AUTH_MUTED_ADMIN' ? { auth } : null) },
@@ -2896,7 +2975,7 @@ console.log('\n--- events/activity.js + commands/player.js: bare "jj" exits AFK 
         Role: {}, Situation: {}, State, Team, Trophies: {},
         adminChatColor: '', masterChatColor: '', vipChatColor: '',
         commands: {}, discordBot: { sendLog: () => {} }, errorColor: 2,
-        hiddenAdminsSet: new Set(), silencedAuths: new Map(), muteArray: { getByAuth: () => null },
+        hiddenAdminsSet: new Set(), hiddenVipSet: new Set(), silencedAuths: new Map(), muteArray: { getByAuth: () => null },
         MutePlayer: class { constructor() {} setDuration() {} },
         checkGoalKickTouch: () => null, chooseModeFunction: () => false, formatTrophyLabel: () => '', resolveTrophyRank: () => null,
         getCommand: () => false, getDate: () => 'DATE', getGoalGame: () => null,
@@ -7537,7 +7616,7 @@ console.log('\n--- events/activity.js: onPlayerChat relays "@<MENTION_WATCH_NAME
             room: roomMock, state: stateLocal, authArray: authArrayLocal, HaxNotification: HaxNotificationMock,
             Role: { PLAYER: 0, VIP: 1, ADMIN_TEMP: 2, ADMIN_PERM: 3, MASTER: 4 }, State: StateLocal, Team: TeamLocal,
             adminChatColor: 1, commands: {}, discordBot: discordBotMock, errorColor: 2,
-            hiddenAdminsSet: new Set(), masterChatColor: 3, mentionWatchName, muteArray: { getByAuth: () => null },
+            hiddenAdminsSet: new Set(), hiddenVipSet: new Set(), masterChatColor: 3, mentionWatchName, muteArray: { getByAuth: () => null },
             MutePlayer: class { constructor() {} setDuration() {} },
             silencedAuths: new Map(), vipChatColor: 4,
             chooseModeFunction: () => false, swapModeFunction: () => false, slowModeFunction: () => false,
@@ -7588,7 +7667,7 @@ console.log('\n--- events/activity.js: onPlayerChat gives a mentioned PLAYER (no
         room: roomMock, state: stateLocal, authArray: authArrayLocal, HaxNotification: HaxNotificationMock,
         Role: { PLAYER: 0, VIP: 1, ADMIN_TEMP: 2, ADMIN_PERM: 3, MASTER: 4 }, State: StateLocal, Team: TeamLocal,
         adminChatColor: 1, commands: {}, discordBot: { sendLog: () => {} }, errorColor: 2,
-        hiddenAdminsSet: new Set(), masterChatColor: 3, mentionWatchName: '', muteArray: { getByAuth: () => null },
+        hiddenAdminsSet: new Set(), hiddenVipSet: new Set(), masterChatColor: 3, mentionWatchName: '', muteArray: { getByAuth: () => null },
         MutePlayer: class { constructor() {} setDuration() {} },
         silencedAuths: new Map(), vipChatColor: 4,
         // Spam-flood auto-mute isn't what this test is about (see the
@@ -8903,6 +8982,28 @@ console.log('--- core/bff/matchFlow.js: rating-driven match assembly (no captain
     check('a 2-player gap with exactly 2 waiting pulls in both, restoring a genuine 4v4', bigGapFills.length, 2);
     check('...both onto the short (blue) side', bigGapFills.every((c) => c.team === TeamLocal.BLUE), true);
 
+    // --- real bug fixed (reported live 2026-08-14, specifically at 4v4): a
+    // gap SMALLER than the waiting pool used to never get filled either —
+    // the original check required the waiting pool to be EXACTLY the gap
+    // size, so extra spectators waiting beyond what's needed (routine in a
+    // 14-capacity room running an 8-player 4v4) silently blocked the fill
+    // entirely. Only the needed number should be pulled, oldest-first,
+    // leaving any surplus in the queue for the growth step. ---
+    roomCallsLocal.length = 0;
+    stateLocal.currentStadium = 'big';
+    stateLocal.teamRed = [mkPlayer(60, 'A60', 'R20'), mkPlayer(61, 'A61', 'R21'), mkPlayer(62, 'A62', 'R22'), mkPlayer(63, 'A63', 'R23')];
+    stateLocal.teamBlue = [mkPlayer(64, 'A64', 'B20'), mkPlayer(65, 'A65', 'B21'), mkPlayer(66, 'A66', 'B22')];
+    const surplusWaiters = [mkPlayer(70, 'A70', 'Sub10'), mkPlayer(71, 'A71', 'Sub11'), mkPlayer(72, 'A72', 'Sub12')];
+    stateLocal.specQueueSince.clear();
+    surplusWaiters.forEach((p, i) => stateLocal.specQueueSince.set(p.id, i));
+    stateLocal.teamSpec = surplusWaiters;
+    await matchFlow.handlePlayersLeave();
+    const surplusFills = roomCallsLocal.filter((c) => c.fn === 'setPlayerTeam');
+    check('a 1-player gap in a live 4v4 IS filled even with MORE than 1 waiting (3 waiting)', surplusFills.length, 1);
+    check('...the oldest-waiting one specifically gets pulled in', surplusFills[0].id, 70);
+    check('...onto the short (blue) side', surplusFills[0].team, TeamLocal.BLUE);
+    stateLocal.currentStadium = 'classic';
+
     // --- gap bigger than the waiting pool: room policy is "keep playing uneven", not a partial/forced fill ---
     roomCallsLocal.length = 0;
     stateLocal.teamRed = [mkPlayer(32, 'A32', 'R5'), mkPlayer(33, 'A33', 'R6'), mkPlayer(34, 'A34', 'R7')];
@@ -9070,7 +9171,46 @@ console.log('--- core/bff/matchFlow.js: rating-driven match assembly (no captain
     const forcedBench = roomCallsLocal.filter((c) => c.fn === 'setPlayerTeam' && c.team === TeamLocal.SPECTATORS);
     check('all 8 players from the forced-stopped match are benched back to spectators', forcedBench.map((c) => c.id).sort((a, b) => a - b), [1, 2, 3, 4, 5, 6, 7, 8]);
     check('...with fresh fairness-queue timestamps too', [1, 2, 3, 4, 5, 6, 7, 8].every((id) => stateLocal.specQueueSince.has(id)), true);
-    check('the room self-heals IMMEDIATELY, no pause — an already-waiting player is pulled onto a team right away', roomCallsLocal.some((c) => c.fn === 'setPlayerTeam' && c.id === 50 && c.team !== TeamLocal.SPECTATORS), true);
+    // Real bug fixed here (reported live 2026-08-14, at 4v4 specifically):
+    // assembleMatch() used to run SYNCHRONOUSLY right here, immediately
+    // after the bench loop's up-to-8 back-to-back room.setPlayerTeam()
+    // calls — reading state.teamSpec before every one of those calls'
+    // onPlayerTeamChange echo had necessarily landed, exactly the race
+    // team/balance.js has extensive documented history fighting for the
+    // main room. Now deferred by a short, fixed delay (see matchFlow.js's
+    // own comment) — self-heals almost immediately still (no
+    // reassembleDelayMs pause, that's natural-end-only), just no longer
+    // synchronously in the same tick as the bench loop.
+    check('reassembly has NOT happened yet in the same tick as the bench loop', roomCallsLocal.some((c) => c.fn === 'setPlayerTeam' && c.id === 50), false);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    check('...but self-heals almost immediately (short defer, not the 10s natural-end pause) — the already-waiting player gets pulled onto a team', roomCallsLocal.some((c) => c.fn === 'setPlayerTeam' && c.id === 50 && c.team !== TeamLocal.SPECTATORS), true);
+
+    // --- the actual race the fix targets: state.teamSpec doesn't yet
+    // reflect the bench loop's own room.setPlayerTeam calls at the moment
+    // handlePlayersStop is called (this mock doesn't auto-wire
+    // onPlayerTeamChange -> updateTeams(), same as the earlier simulated-
+    // cascade tests above) — simulating that echo landing AFTER the
+    // synchronous part of handlePlayersStop returns, but before the
+    // deferred assembleMatch() fires, proves the defer is actually doing
+    // its job: forming the full 8-player 4v4 once the bench has genuinely
+    // landed, not whatever partial state existed synchronously. ---
+    roomCallsLocal.length = 0;
+    stateLocal.gameState = StateEnum.PLAY;
+    stateLocal.currentStadium = 'big';
+    const raceRed = [1, 2, 3, 4].map((n) => mkPlayer(n, 'RACE_R' + n, 'RR' + n));
+    const raceBlue = [5, 6, 7, 8].map((n) => mkPlayer(n, 'RACE_B' + n, 'RB' + n));
+    stateLocal.teamRed = raceRed;
+    stateLocal.teamBlue = raceBlue;
+    stateLocal.teamSpec = [];
+    await matchFlow.handlePlayersStop({ id: 99 }, null);
+    stateLocal.teamSpec = [...raceRed, ...raceBlue];
+    stateLocal.teamRed = [];
+    stateLocal.teamBlue = [];
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    const raceAssignments = roomCallsLocal.filter((c) => c.fn === 'setPlayerTeam' && c.team !== TeamLocal.SPECTATORS);
+    check('a forced stop reassembles the FULL 8-player pool into a fresh 4v4 once the bench echo lands, not a smaller match', raceAssignments.length, 8);
+    check('...4 on each side', raceAssignments.filter((c) => c.team === TeamLocal.RED).length, 4);
+    stateLocal.currentStadium = 'classic';
 })();
 
 console.log('--- core/bff/threeDefLine.js: "3 defenders" rule (big map only) ---');
@@ -9348,7 +9488,11 @@ console.log('--- core/bff/commands.js: !me/!tops/!help, no economy/clubs ---');
         this.goals = 0; this.assists = 0; this.CS = 0; this.ownGoals = 0;
     };
     const sentLocal = [];
-    const roomMock = { sendAnnouncement: (msg, id, color, style) => sentLocal.push({ msg, id, style }) };
+    const kickCallsLocal = [];
+    const roomMock = {
+        sendAnnouncement: (msg, id, color, style) => sentLocal.push({ msg, id, style }),
+        kickPlayer: (id, reason, ban) => kickCallsLocal.push({ id, reason, ban }),
+    };
     const authArrayLocal = { 1: ['AUTH_1'], 2: ['AUTH_NEW'] };
     const printAllRankingsCalls = [];
     const printRankingsCalls = [];
@@ -9357,14 +9501,16 @@ console.log('--- core/bff/commands.js: !me/!tops/!help, no economy/clubs ---');
         printRankings: async (key, id) => printRankingsCalls.push({ key, id }),
     };
     const { computeOrdinal } = require(path.join(CORE, 'bff', 'rating'));
+    const hiddenVipSetLocal = new Set();
 
     const bffCommands = require(path.join(CORE, 'bff', 'commands'))({
         room: roomMock, state: {}, authArray: authArrayLocal, db, HaxStatistics: HaxStatisticsLocal,
         HaxNotification: HaxNotificationMock, Role: RoleLocal,
         infoColor: 1, errorColor: 2, successColor: 3, getTimeStats: (s) => `${Math.floor(s / 60)}m`,
-        getRole: (p) => (p.auth === 'AUTH_MASTER' ? RoleLocal.MASTER : p.auth === 'AUTH_ADMIN' ? RoleLocal.ADMIN_PERM : RoleLocal.PLAYER),
+        getRole: (p) => (p.auth === 'AUTH_MASTER' ? RoleLocal.MASTER : p.auth === 'AUTH_ADMIN' ? RoleLocal.ADMIN_PERM : p.auth === 'AUTH_VIP' ? RoleLocal.VIP : RoleLocal.PLAYER),
         computeOrdinal,
         bffRoomStats: bffRoomStatsMock,
+        hiddenVipSet: hiddenVipSetLocal,
     });
 
     // --- !me: existing stats + rating ---
@@ -9411,12 +9557,44 @@ console.log('--- core/bff/commands.js: !me/!tops/!help, no economy/clubs ---');
     await bffCommands.renameCommand({ id: 2, name: 'Newbie', auth: 'AUTH_NEW' }, '!rename Whoami');
     check('!rename for a player with no stats row yet is refused, not a crash', sentLocal[0].msg.includes('еще не играли'), true);
 
+    // --- !bb: instant self-kick, same message as the main room's own ---
+    kickCallsLocal.length = 0;
+    bffCommands.leaveCommand({ id: 1, name: 'Player1', auth: 'AUTH_1' });
+    check('!bb kicks the calling player specifically', kickCallsLocal, [{ id: 1, reason: 'Пока !', ban: false }]);
+
+    // --- !viphide: same shape as the main room's own, VIP-only, no native
+    // badge to also toggle ---
+    check('AUTH_VIP starts visible (not in hiddenVipSet)', hiddenVipSetLocal.has(1), false);
+    sentLocal.length = 0;
+    bffCommands.vipHideCommand({ id: 1, name: 'Donor', auth: 'AUTH_VIP' });
+    check('vipHideCommand confirms hiding', sentLocal[0].msg.includes('Скрытность включена'), true);
+    check('the player is recorded as hidden', hiddenVipSetLocal.has(1), true);
+
+    sentLocal.length = 0;
+    bffCommands.vipHideCommand({ id: 1, name: 'Donor', auth: 'AUTH_VIP' });
+    check('vipHideCommand again confirms un-hiding', sentLocal[0].msg.includes('Скрытность отключена'), true);
+    check('the hidden flag is cleared', hiddenVipSetLocal.has(1), false);
+
+    // --- !help: the "VIP:" section is Role.VIP-gated ---
+    sentLocal.length = 0;
+    bffCommands.helpCommand({ id: 1, auth: 'AUTH_PLAYER' });
+    check('a plain player does not see the VIP section', sentLocal[0].msg.includes('VIP:'), false);
+
+    sentLocal.length = 0;
+    bffCommands.helpCommand({ id: 1, auth: 'AUTH_VIP' });
+    check('a VIP sees the VIP section, with !viphide listed', sentLocal[0].msg.includes('!viphide'), true);
+
+    sentLocal.length = 0;
+    bffCommands.helpCommand({ id: 1, auth: 'AUTH_MASTER' });
+    check('a master sees the VIP section too (MASTER >= VIP)', sentLocal[0].msg.includes('VIP:'), true);
+
     // --- !help: moderation section is Role.MASTER-gated only, same as the
     // main room's own commands.js (regular admins get the native HaxBall
     // badge/powers, not these bot commands) ---
     sentLocal.length = 0;
     bffCommands.helpCommand({ id: 1, auth: 'AUTH_PLAYER' });
     check('a plain player never sees the owner/moderation section', sentLocal[0].msg.includes('Владелец:'), false);
+    check('...but does see !bb listed', sentLocal[0].msg.includes('!bb'), true);
 
     sentLocal.length = 0;
     bffCommands.helpCommand({ id: 1, auth: 'AUTH_ADMIN' });
@@ -9597,11 +9775,13 @@ console.log('--- core/bff/events.js: room.onXxx handlers, trimmed of economy/pok
     check('onGameStart constructs a real state.game (needed by onTeamGoal/checkTime downstream)', stateLocal.game instanceof GameLocal, true);
     check('...which started a real recording', stateLocal.game.rec, 'REC');
     check('onGameStart sets playSituation to KICKOFF', stateLocal.playSituation, SituationLocal.KICKOFF);
-    // Real gap found comparing against the main room's own onGameStart —
-    // see events.js's own comment on why this matters (events/misc.js's
-    // onKickRateLimitSet slams it to (6,0,0) on tampering; nothing else
-    // ever restored it without this).
-    check('onGameStart re-applies the real kick rate limit (6,12,4), undoing any onKickRateLimitSet lockdown', roomCallsLocal.includes('setKickRateLimit:6:12:4'), true);
+    // Real design change (requested live 2026-08-14: "убери кикрейт у
+    // BFF") — onGameStart used to re-apply a fixed (6,12,4) kick rate limit
+    // every match, undoing any native tampering; BFF no longer wants any
+    // fixed rate at all, so this re-apply was removed entirely (misc.js's
+    // own onKickRateLimitSet, which used to fight tampering, is overridden
+    // to a no-op in bffEntry.js instead — see its own comment there).
+    check('onGameStart no longer touches the kick rate limit at all', roomCallsLocal.some((c) => c.startsWith('setKickRateLimit')), false);
     await new Promise((resolve) => setTimeout(resolve, 40));
     check('onGameStart cleared the stale scheduled state.stopTimeout — it never fires', staleStopTimeoutFired, []);
 
@@ -9802,7 +9982,7 @@ console.log('--- core/bff/afk.js: voluntary !afk toggle / "jj" exit / !afks, mat
     const AFKCooldownSetLocal = new Set();
 
     const afk = require(path.join(CORE, 'bff', 'afk'))({
-        room: roomLocal, state: stateLocal, Team: TeamLocal, State: StateLocal, Role: RoleLocal,
+        room: roomLocal, state: stateLocal, Team: TeamLocal, Role: RoleLocal,
         AFKSet: AFKSetLocal, AFKMinSet: AFKMinSetLocal, AFKCooldownSet: AFKCooldownSetLocal,
         // Tiny real durations (not mocked away) so the min-duration lock is
         // actually exercised, same trade-off the main room's own AFK tests
@@ -9856,18 +10036,26 @@ console.log('--- core/bff/afk.js: voluntary !afk toggle / "jj" exit / !afks, mat
     check('...and does not add them to AFKSet', AFKSetLocal.has(103), false);
     AFKSetLocal.clear();
 
-    // --- a player still on a team (mid-match) cannot go AFK ---
-    sentLocal.length = 0;
-    await afk.afkCommand({ id: 1, name: 'OnATeam', team: TeamLocal.RED, admin: false });
-    check('a player on a team, mid-match, cannot go AFK', sentLocal[0].msg.includes('пока находитесь в команде'), true);
-
-    // --- but the SAME on-a-team player CAN go AFK between rounds (State.STOP) ---
-    stateLocal.gameState = StateLocal.STOP;
+    // --- real design change here (reported live 2026-08-14: "человек не
+    // смог сесть в афк, однако в комнате было 8 человек игравших") — a
+    // player actively on a team, mid-match (state.gameState === PLAY), can
+    // now go AFK too, unlike the main room's own afkCommand (which still
+    // refuses this — see commands/player.js's own comment) or BFF's
+    // earlier, since-superseded copy of that same restriction. BFF's own
+    // matchFlow.js already backfills a mid-match departure from a waiting
+    // spectator (or leaves the match uneven if none are waiting) — the
+    // exact same machinery a genuine leave already goes through — so there
+    // is no longer a real reason for BFF specifically to block this. ---
+    stateLocal.gameState = StateLocal.PLAY;
     roomCallsLocal.length = 0;
     matchFlowCalls.length = 0;
-    await afk.afkCommand({ id: 1, name: 'BetweenRounds', team: TeamLocal.RED, admin: false });
-    check('between rounds, a still-on-a-team player CAN bench themselves into AFK', AFKSetLocal.has(1), true);
-    check('...and actually gets moved to spectators', roomCallsLocal, ['setPlayerTeam:1:0']);
+    sentLocal.length = 0;
+    await afk.afkCommand({ id: 1, name: 'OnATeam', team: TeamLocal.RED, admin: false });
+    check('a player on a team, mid-match, CAN now go AFK', AFKSetLocal.has(1), true);
+    check('...gets benched to spectators immediately', roomCallsLocal, ['setPlayerTeam:1:0']);
+    check('...and matchFlow.handlePlayersLeave is told, same as any other mid-match departure', matchFlowCalls, ['leave']);
+    check('...no refusal message sent', sentLocal.some((s) => s.msg.includes('пока находитесь в команде')), false);
+    AFKSetLocal.clear();
 
     // --- !afks listing ---
     AFKSetLocal.clear();

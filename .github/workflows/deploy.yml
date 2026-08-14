@@ -24,6 +24,19 @@ jobs:
           # in either exclusive bucket, so any file not recognized below
           # (including new files added later and forgotten here) falls
           # through to the safe default: restart both.
+          #
+          # A third bucket (tools/**, scripts/**, this workflow file itself)
+          # restarts NEITHER: none of those are ever require()'d by
+          # index.js/bffIndex.js or the two browser entry points at
+          # runtime — both build their bundle fresh, in-memory, from
+          # entry.js/bffEntry.js's own graph on every startup (see
+          # haxchill-vps-deployment project memory), so tools/scripts are
+          # structurally unreachable from either running process no matter
+          # what they contain. Editing this workflow file doesn't need a
+          # restart either — GitHub Actions already read the version at the
+          # trigger commit before this script started running, so by the
+          # time this line executes, this run IS that new version; there's
+          # no stale copy left running anywhere to restart.
           script: |
             set -e
             cd /opt/haxlab
@@ -50,6 +63,10 @@ jobs:
                   src/bffIndex.js|HaxBotBFF_public.js|src/browser/bffEntry.js|src/core/bff/adminCall.js|src/core/bff/afk.js|src/core/bff/chatGuard.js|src/core/bff/commands.js|src/core/bff/config.js|src/core/bff/dbBridge.js|src/core/bff/events.js|src/core/bff/matchFlow.js|src/core/bff/rating.js|src/core/bff/report.js|src/core/bff/roomSetup.js|src/core/bff/roomStats.js|src/core/bff/stadiums.js|src/core/bff/threeDefLine.js)
                     RESTART_BFF=true
                     ;;
+                  tools/*|scripts/*|.github/workflows/deploy.yml)
+                    # No-op — neither restart flag is set. See this step's
+                    # own top comment for why these are structurally inert.
+                    ;;
                   *)
                     RESTART_MAIN=true
                     RESTART_BFF=true
@@ -66,6 +83,8 @@ jobs:
               elif [ "$RESTART_BFF" = true ]; then
                 echo "Restarting BFF room only (haxlab-bff)."
                 pm2 startOrReload ecosystem.config.js --only haxlab-bff
+              else
+                echo "Only dev-only/tooling files changed — nothing to restart."
               fi
               pm2 save
             fi

@@ -30,9 +30,14 @@ module.exports = function createClubCommands({
     const CLUB_BASE_SLOTS = 5;
     const CLUB_SLOT_BASE_COST = 500;
     const CLUB_SLOT_COST_STEP = 100;
+    // Hard cap, confirmed 2026-08-14 — !club slots buy refuses past this
+    // regardless of balance. Clubs that had already bought past 10 before
+    // this existed were clamped down and refunded by a one-off migration
+    // (see scripts/cap-club-slots.js), not silently left over the limit.
+    const CLUB_MAX_SLOTS = 10;
     const CLUB_INVITE_DURATION_SECONDS = 60;
     const CLUB_COLOR_UNLOCK_COST = 10000;
-    const CLUB_RENAME_COST = 100;
+    const CLUB_RENAME_COST = 500;
 
     // The displayed prefix is capped at "1 emoji + 4 letters/digits" — the
     // emoji is set separately (!club emoji), so what !club create/rename
@@ -485,6 +490,10 @@ module.exports = function createClubCommands({
             announceError(player, `Только владелец клуба может покупать слоты !`);
             return;
         }
+        if (club.slots >= CLUB_MAX_SLOTS) {
+            announceError(player, `Достигнут максимум слотов (${CLUB_MAX_SLOTS}) !`);
+            return;
+        }
         const cost = nextSlotCost(club);
         const bought = await db.buyClubSlot(auth, club.id, cost);
         if (!bought) {
@@ -565,7 +574,7 @@ module.exports = function createClubCommands({
             `!club color buy — разблокировать кастомный цвет клуба (${formatCoins(CLUB_COLOR_UNLOCK_COST)}, только владелец, разовая покупка).`,
             '!club color <hex> — изменить цвет префикса клуба в чате (только владелец, требует "!club color buy"). Пример: !club color ff8800.',
             '!club emoji <эмодзи> — добавить эмодзи к префиксу клуба, или без аргумента чтобы убрать его (только владелец). Пример: !club emoji 🔥.',
-            '!club slots buy - купить слот (500 монеток, +100 за каждый следующий) (только владелец).',
+            `!club slots buy - купить слот (500 монеток, +100 за каждый следующий, максимум ${CLUB_MAX_SLOTS}) (только владелец).`,
             '!cc <сообщение> — клубный чат: отправляет сообщение всем участникам вашего клуба, которые сейчас на сервере. Пример: !cc привет!',
             '!club help — эта команда.',
         ].join('\n');

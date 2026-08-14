@@ -175,6 +175,9 @@ function createDatabaseApi(options = {}) {
         getAllClubMembers() {
             return sqlite.getAllClubMembers();
         },
+        getClubMembers(clubId) {
+            return sqlite.getClubMembers(clubId);
+        },
         getClubMembership(auth) {
             return sqlite.getClubMembership(auth);
         },
@@ -204,6 +207,9 @@ function createDatabaseApi(options = {}) {
         },
         setClubEmoji(clubId, emoji) {
             return sqlite.setClubEmoji(clubId, emoji);
+        },
+        setClubSlots(clubId, slots) {
+            return sqlite.setClubSlots(clubId, slots);
         },
         renameClub(auth, clubId, name, prefix, cost) {
             return sqlite.renameClub(auth, clubId, name, prefix, cost);

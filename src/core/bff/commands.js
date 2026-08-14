@@ -22,6 +22,7 @@ module.exports = function createBffCommands({
     getRole,
     computeOrdinal,
     bffRoomStats,
+    hiddenVipSet,
 }) {
     const { printPlayerStats } = createPrintStats({ getTimeStats, db });
 
@@ -53,6 +54,12 @@ module.exports = function createBffCommands({
         }
     }
 
+    // !bb (bye/gn/cya/ии) — same instant self-kick as the main room's own
+    // commands/player.js leaveCommand, same message.
+    function leaveCommand(player) {
+        room.kickPlayer(player.id, 'Пока !', false);
+    }
+
     const TOPS_STAT_KEYS = ['games', 'wins', 'goals', 'assists', 'cs', 'playtime', 'rating'];
 
     // !tops [category] — no 'clubs' option at all (BFF has none), 'rating'
@@ -73,6 +80,21 @@ module.exports = function createBffCommands({
         await bffRoomStats.printRankings(key === 'cs' ? 'CS' : key === 'pt' ? 'playtime' : key, player.id);
     }
 
+    // !viphide — same shape as the main room's commands/admin.js hideCommand
+    // (and its own core/bff/chatGuard.js !hide for BFF admins), but
+    // VIP-specific and simpler: VIP has no native room badge to also
+    // toggle, just the one Set bffEntry.js's own onPlayerChat prefix logic
+    // already checks (see its own comment there).
+    function vipHideCommand(player) {
+        if (hiddenVipSet.has(player.id)) {
+            hiddenVipSet.delete(player.id);
+            room.sendAnnouncement(`👁️ Скрытность отключена — VIP-префикс снова виден.`, player.id, successColor, 'bold', HaxNotification.CHAT);
+        } else {
+            hiddenVipSet.add(player.id);
+            room.sendAnnouncement(`🕶️ Скрытность включена — VIP-префикс скрыт.`, player.id, successColor, 'bold', HaxNotification.CHAT);
+        }
+    }
+
     // Moderation (bans/admins/VIPs/password) is Role.MASTER-gated, mute/
     // unmute/mutes/hide are Role.ADMIN_TEMP-gated — same split as the main
     // room's own commands.js (regular admins get the native HaxBall admin
@@ -84,7 +106,12 @@ module.exports = function createBffCommands({
             `!rename [имя] - переименовать себя для таблицы лидеров\n` +
             `!voteban #<id> - начать голосование за временный бан игрока\n` +
             `!report - позвать администрацию\n` +
-            `!afk, !afks - AFK-режим и список AFK ("jj" в чате тоже выводит из AFK)`;
+            `!afk, !afks - AFK-режим и список AFK ("jj" в чате тоже выводит из AFK)\n` +
+            `!bb - мгновенно выйти из комнаты`;
+        if (getRole(player) >= Role.VIP) {
+            text += `\n\nVIP:\n` +
+                `!viphide - скрыть/показать VIP-префикс в чате`;
+        }
         if (getRole(player) >= Role.ADMIN_TEMP) {
             text += `\n\nАдмин:\n` +
                 `!mute #<id> [минуты], !unmute #<id>, !mutes - муты\n` +
@@ -106,5 +133,7 @@ module.exports = function createBffCommands({
         topsCommand,
         renameCommand,
         helpCommand,
+        leaveCommand,
+        vipHideCommand,
     };
 };

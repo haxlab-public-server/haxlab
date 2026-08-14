@@ -20,6 +20,7 @@ module.exports = function createActivityEvents({
     discordBot,
     errorColor,
     hiddenAdminsSet,
+    hiddenVipSet,
     masterChatColor,
     mentionWatchName,
     MutePlayer,
@@ -213,8 +214,10 @@ module.exports = function createActivityEvents({
         // !hide (commands/admin.js) suppresses just the MASTER/ADMIN prefix
         // — role/permissions are untouched, so a hidden VIP-flagged admin
         // would still fall through to the VIP prefix rather than none at all.
+        // !viphide (commands/player.js) is the same idea for VIP specifically.
         const role = getRole(player);
         const showAdminPrefix = !hiddenAdminsSet.has(player.id);
+        const showVipPrefix = !hiddenVipSet.has(player.id);
         const auth = authArray[player.id][0];
         let rolePrefix = null;
         let prefixColor = null;
@@ -224,7 +227,7 @@ module.exports = function createActivityEvents({
         } else if (showAdminPrefix && role >= Role.ADMIN_TEMP) {
             rolePrefix = '[🛡️АДМ]';
             prefixColor = adminChatColor;
-        } else if (role == Role.VIP) {
+        } else if (showVipPrefix && role == Role.VIP) {
             rolePrefix = '[⭐ВИП]';
             // !vipcolor (see commands/player.js) — a VIP's own override for
             // this, falling back to the shared default when they haven't

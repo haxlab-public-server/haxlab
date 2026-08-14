@@ -995,6 +995,17 @@ function createSqliteDatabase(filePath = path.join(__dirname, 'haxlab.sqlite')) 
             .all();
     }
 
+    // Oldest-first (join order) — used by scripts/cap-club-slots.js to
+    // decide who to keep vs. remove when a club's real membership exceeds
+    // the new cap: getAllClubMembers() above has no join-order info at all
+    // (it exists for the in-memory cache, which never needed it), so this
+    // is a separate, single-club query rather than extending that one.
+    function getClubMembers(clubId) {
+        return database
+            .prepare('SELECT auth, player_name AS playerName, joined_at AS joinedAt FROM club_members WHERE club_id = ? ORDER BY joined_at ASC')
+            .all(clubId);
+    }
+
     function getClubMembership(auth) {
         const row = database.prepare('SELECT club_id AS clubId FROM club_members WHERE auth = ?').get(auth);
         return row ? row.clubId : null;
@@ -1121,6 +1132,14 @@ function createSqliteDatabase(filePath = path.join(__dirname, 'haxlab.sqlite')) 
             .run({ auth, cost });
         database.prepare('UPDATE clubs SET color_unlocked = 1 WHERE id = ?').run(clubId);
         return true;
+    }
+
+    // Direct write, no purchase logic — used by scripts/cap-club-slots.js
+    // (a one-off migration clamping every club to the new CLUB_MAX_SLOTS,
+    // refunding whatever was paid for slots above it via addCoins first)
+    // and available for any future admin-side slot adjustment.
+    function setClubSlots(clubId, slots) {
+        database.prepare('UPDATE clubs SET slots = ? WHERE id = ?').run(slots, clubId);
     }
 
     function setClubEmoji(clubId, emoji) {
@@ -1281,6 +1300,7 @@ function createSqliteDatabase(filePath = path.join(__dirname, 'haxlab.sqlite')) 
         getClub,
         getAllClubs,
         getAllClubMembers,
+        getClubMembers,
         getClubMembership,
         createClub,
         inviteToClub,
@@ -1290,6 +1310,7 @@ function createSqliteDatabase(filePath = path.join(__dirname, 'haxlab.sqlite')) 
         disbandClub,
         setClubColor,
         unlockClubColor,
+        setClubSlots,
         setClubEmoji,
         renameClub,
         setClubAssistant,

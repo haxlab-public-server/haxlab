@@ -82,11 +82,37 @@ let discordSocket = null;
 let discordReconnectTimer = null;
 const DISCORD_RECONNECT_DELAY_MS = 5000;
 
+// discordProcess.js -> here: newline-delimited JSON, same framing it uses
+// for the reverse direction (see its own "BFF BRIDGE" section). Only
+// message type so far is 'relay' (!saybff/`/saybff`, discord.js) — the
+// bridge was write-only from this side until now.
+let discordBridgeBuffer = '';
+function handleDiscordBridgeMessage(msg) {
+    if (!msg || typeof msg !== 'object') return;
+    if (msg.type === 'relay') {
+        if (page) page.evaluate((m) => window.__bffRoomBridge.relayToRoom(m.username, m.content), msg).catch((err) => console.error('[BFF] relay bridge failed:', err));
+    }
+}
+
 function connectDiscordBridge() {
     const socket = net.connect(discordBridgePort, '127.0.0.1');
     socket.on('connect', () => {
         console.log('[BFF] Connected to the shared Discord bridge.');
         discordSocket = socket;
+    });
+    socket.on('data', (chunk) => {
+        discordBridgeBuffer += chunk.toString('utf8');
+        let newlineIndex;
+        while ((newlineIndex = discordBridgeBuffer.indexOf('\n')) !== -1) {
+            const line = discordBridgeBuffer.slice(0, newlineIndex);
+            discordBridgeBuffer = discordBridgeBuffer.slice(newlineIndex + 1);
+            if (!line.trim()) continue;
+            try {
+                handleDiscordBridgeMessage(JSON.parse(line));
+            } catch (err) {
+                console.error('[BFF] Failed to parse Discord bridge message:', err);
+            }
+        }
     });
     socket.on('error', () => {
         // Expected/frequent if discordProcess.js hasn't started its bridge
@@ -96,6 +122,7 @@ function connectDiscordBridge() {
     });
     socket.on('close', () => {
         if (discordSocket === socket) discordSocket = null;
+        discordBridgeBuffer = '';
         clearTimeout(discordReconnectTimer);
         discordReconnectTimer = setTimeout(connectDiscordBridge, DISCORD_RECONNECT_DELAY_MS);
     });

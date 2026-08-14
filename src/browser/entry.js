@@ -506,6 +506,11 @@ const maxAFKCount = 4;
 // preference — reconnecting resets it, same as AFK does).
 const hiddenAdminsSet = new Set();
 
+// !viphide toggle (VIP only) — same shape as hiddenAdminsSet above, but
+// simpler: VIP has no native room badge to also suppress, only the chat
+// prefix events/activity.js's onPlayerChat already checks.
+const hiddenVipSet = new Set();
+
 // !silence #<id> — per-VIEWER chat filter: viewerAuth -> Set<targetAuth> of
 // players that viewer no longer sees chat from. Session-only like AFKSet
 // above, not persisted — nobody else's view is affected, enforced in
@@ -1240,6 +1245,7 @@ const {
     renameCommand,
     customColorsCommand,
     vipColorCommand,
+    vipHideCommand,
     vipHelpCommand,
     linkDiscordCommand,
     topsCommand,
@@ -1267,6 +1273,7 @@ const {
     maxAFKCount,
     AFKCooldown,
     silencedAuths,
+    hiddenVipSet,
     announcementColor,
     errorColor,
     infoColor,
@@ -1441,6 +1448,7 @@ const commands = createCommands({
     renameCommand,
     customColorsCommand,
     vipColorCommand,
+    vipHideCommand,
     vipHelpCommand,
     linkDiscordCommand,
     topsCommand,
@@ -1573,6 +1581,7 @@ Object.assign(room, wrapEventHandlers(createActivityEvents({
     discordBot,
     errorColor,
     hiddenAdminsSet,
+    hiddenVipSet,
     masterChatColor,
     mentionWatchName,
     MutePlayer,

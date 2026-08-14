@@ -20,7 +20,6 @@ module.exports = function createBffAfk({
     room,
     state,
     Team,
-    State,
     Role,
     AFKSet,
     AFKMinSet,
@@ -70,61 +69,71 @@ module.exports = function createBffAfk({
         return exitAfk(player);
     }
 
+    // Real design change here (requested live 2026-08-14: "человек не смог
+    // сесть в афк, однако в комнате было 8 человек игравших"): this used to
+    // refuse !afk entirely for anyone actively on a team mid-match (only
+    // allowed as a spectator, alone, or between rounds) — copied verbatim
+    // from the main room's own commands/player.js afkCommand, where that
+    // restriction exists because going AFK mid-match would just leave a
+    // team permanently short with nothing to fix it. BFF is different: it
+    // already has its own live-match backfill machinery (matchFlow.js's
+    // assembleMatch, see haxchill-second-room-plan memory items #11/#17) —
+    // benching an AFK player out of a live match is handled exactly the
+    // same way a genuine mid-match departure already is (backfilled from a
+    // waiting spectator if one exists, otherwise the match just continues
+    // uneven, same established policy either way). So the restriction this
+    // module inherited from the main room no longer matches what BFF can
+    // actually handle — confirmed explicitly, not assumed.
     async function afkCommand(player) {
-        const betweenRandomRounds = state.gameState == State.STOP;
-        if (player.team == Team.SPECTATORS || state.players.length == 1 || betweenRandomRounds) {
-            const afkCapForPlayer = getRole(player) >= Role.ADMIN_TEMP
-                ? null
-                : getRole(player) >= Role.VIP
-                    ? maxAFKCount + 1
-                    : maxAFKCount;
-            if (AFKSet.has(player.id)) {
-                await exitAfk(player);
-            } else if (afkCapForPlayer != null && AFKSet.size >= afkCapForPlayer) {
-                room.sendAnnouncement(`Одновременно AFK может быть не больше ${afkCapForPlayer} игроков. Попробуйте позже.`, player.id, errorColor, 'bold', HaxNotification.CHAT);
-            } else if (AFKCooldownSet.has(player.id)) {
-                room.sendAnnouncement(`Вы можете становиться AFK только каждые ${AFKCooldown} минут. Не злоупотребляйте командой !`, player.id, errorColor, 'bold', HaxNotification.CHAT);
-            } else {
-                AFKSet.set(player.id, Date.now());
-                if (!player.admin) {
-                    const afkSessionStartedAt = AFKSet.get(player.id);
-                    AFKMinSet.add(player.id);
-                    AFKCooldownSet.add(player.id);
-                    setTimeout((id) => {
-                        if (AFKSet.has(id) && AFKSet.get(id) !== afkSessionStartedAt) return;
-                        AFKMinSet.delete(id);
-                    }, minAFKDuration * 60 * 1000, player.id);
-                    const effectiveMaxAFKDuration = getRole(player) >= Role.VIP ? maxAFKDurationVip : maxAFKDuration;
-                    setTimeout((id) => {
-                        if (!AFKSet.has(id) || AFKSet.get(id) !== afkSessionStartedAt) return;
-                        AFKSet.delete(id);
-                        const p = room.getPlayer(id);
-                        if (p != null) {
-                            room.sendAnnouncement(`😴 ${p.name} вышел из AFK !`, null, announcementColor, 'bold', null);
-                            room.sendAnnouncement(`Вы слишком долго находились в AFK.`, id, errorColor, 'bold', HaxNotification.CHAT);
-                        }
-                        updateTeams();
-                        // A bare timer callback, not a command dispatch — no
-                        // outer promise chain to catch a rejection here, so
-                        // it needs its own .catch (unlike the awaited calls
-                        // above/below, which ride afkCommand's own returned
-                        // promise back to the existing onPlayerChat handler).
-                        matchFlow.handlePlayersJoin().catch((err) => console.error('[bff/afk] handlePlayersJoin (AFK auto-return) failed:', err));
-                    }, effectiveMaxAFKDuration * 60 * 1000, player.id);
-                    setTimeout((id) => {
-                        if (AFKSet.has(id) && AFKSet.get(id) !== afkSessionStartedAt) return;
-                        AFKCooldownSet.delete(id);
-                    }, AFKCooldown * 60 * 1000, player.id);
-                }
-                if (player.team != Team.SPECTATORS) {
-                    room.setPlayerTeam(player.id, Team.SPECTATORS);
-                }
-                room.sendAnnouncement(`😴 ${player.name} теперь AFK !`, null, announcementColor, 'bold', null);
-                updateTeams();
-                await matchFlow.handlePlayersLeave();
-            }
+        const afkCapForPlayer = getRole(player) >= Role.ADMIN_TEMP
+            ? null
+            : getRole(player) >= Role.VIP
+                ? maxAFKCount + 1
+                : maxAFKCount;
+        if (AFKSet.has(player.id)) {
+            await exitAfk(player);
+        } else if (afkCapForPlayer != null && AFKSet.size >= afkCapForPlayer) {
+            room.sendAnnouncement(`Одновременно AFK может быть не больше ${afkCapForPlayer} игроков. Попробуйте позже.`, player.id, errorColor, 'bold', HaxNotification.CHAT);
+        } else if (AFKCooldownSet.has(player.id)) {
+            room.sendAnnouncement(`Вы можете становиться AFK только каждые ${AFKCooldown} минут. Не злоупотребляйте командой !`, player.id, errorColor, 'bold', HaxNotification.CHAT);
         } else {
-            room.sendAnnouncement(`Вы не можете стать AFK, пока находитесь в команде !`, player.id, errorColor, 'bold', HaxNotification.CHAT);
+            AFKSet.set(player.id, Date.now());
+            if (!player.admin) {
+                const afkSessionStartedAt = AFKSet.get(player.id);
+                AFKMinSet.add(player.id);
+                AFKCooldownSet.add(player.id);
+                setTimeout((id) => {
+                    if (AFKSet.has(id) && AFKSet.get(id) !== afkSessionStartedAt) return;
+                    AFKMinSet.delete(id);
+                }, minAFKDuration * 60 * 1000, player.id);
+                const effectiveMaxAFKDuration = getRole(player) >= Role.VIP ? maxAFKDurationVip : maxAFKDuration;
+                setTimeout((id) => {
+                    if (!AFKSet.has(id) || AFKSet.get(id) !== afkSessionStartedAt) return;
+                    AFKSet.delete(id);
+                    const p = room.getPlayer(id);
+                    if (p != null) {
+                        room.sendAnnouncement(`😴 ${p.name} вышел из AFK !`, null, announcementColor, 'bold', null);
+                        room.sendAnnouncement(`Вы слишком долго находились в AFK.`, id, errorColor, 'bold', HaxNotification.CHAT);
+                    }
+                    updateTeams();
+                    // A bare timer callback, not a command dispatch — no
+                    // outer promise chain to catch a rejection here, so
+                    // it needs its own .catch (unlike the awaited calls
+                    // above/below, which ride afkCommand's own returned
+                    // promise back to the existing onPlayerChat handler).
+                    matchFlow.handlePlayersJoin().catch((err) => console.error('[bff/afk] handlePlayersJoin (AFK auto-return) failed:', err));
+                }, effectiveMaxAFKDuration * 60 * 1000, player.id);
+                setTimeout((id) => {
+                    if (AFKSet.has(id) && AFKSet.get(id) !== afkSessionStartedAt) return;
+                    AFKCooldownSet.delete(id);
+                }, AFKCooldown * 60 * 1000, player.id);
+            }
+            if (player.team != Team.SPECTATORS) {
+                room.setPlayerTeam(player.id, Team.SPECTATORS);
+            }
+            room.sendAnnouncement(`😴 ${player.name} теперь AFK !`, null, announcementColor, 'bold', null);
+            updateTeams();
+            await matchFlow.handlePlayersLeave();
         }
     }
 
