@@ -547,6 +547,20 @@ room.onGameStop = wrapEventHandlers({
     },
 }).onGameStop;
 
+// "3 defenders" rule (big map only — see core/bff/threeDefLine.js's own
+// doc comment) — layered on top of misc.js's shared onGameTick the same
+// way onPlayerTeamChange/onGameStop are above, since misc.js is reused
+// as-is by the main room, which has no such mechanic.
+const createBffThreeDefLine = require('../core/bff/threeDefLine');
+const { adjustDefenseLine } = createBffThreeDefLine({ room, state, Team });
+const originalGameTick = room.onGameTick;
+room.onGameTick = wrapEventHandlers({
+    onGameTick: () => {
+        adjustDefenseLine();
+        return originalGameTick();
+    },
+}).onGameTick;
+
 // Nothing else sets room.onPlayerActivity, so no "original" to merge with
 // (unlike onPlayerTeamChange/onGameStop above) — see onPlayerActivity's own
 // doc comment for why this exists.

@@ -6,7 +6,7 @@
  * browser page — see src/browser/bffEntry.js), for the same reason as the
  * main room's file.
  */
-const roomName = '🧪 HaxLab | BFF 🧪';
+const roomName = '🧪 HaxLab | BFF 4x4 3def🧪';
 const maxPlayers = 14;
 const roomPublic = true;
 const geo = { code: 'RU', lat: 55.3, lon: 37.6173 }; // Moscow, same as the main room

@@ -83,27 +83,49 @@ module.exports = function createBffMatchFlow({
             room.stopGame();
             return;
         }
-        // Real bug fixed here (reported live 2026-08-14: "if someone
-        // leaves a 1v1 with 1 spectator waiting, it just continues 1v0
-        // forever, in any team size"): a genuine live match was never
-        // touched at all, even when a departure leaves a side short by
-        // EXACTLY as many players as are sitting in state.teamSpec. The
-        // main room's own team/balance.js already handles this precise
-        // case (see its own balanceTeams() — pulls spectators in to
-        // restore parity WITHOUT restarting/reassembling, only when the
-        // gap and the available pool match exactly; a gap bigger than the
-        // waiting pool is left to "just keep playing uneven" instead,
-        // rather than benching someone on the fuller side to force it).
-        // Simply calling room.setPlayerTeam onto a live match's short side
-        // does not stop or restart the game at all — HaxBall allows
-        // roster changes mid-match — so this never touches ratings, the
-        // stadium, or score/time limits, just adds players.
+        // Real bugs fixed here (both reported live 2026-08-14), covering a
+        // live match's roster WITHOUT restarting/reassembling it — HaxBall
+        // allows roster changes mid-match, so neither step below touches
+        // ratings, the stadium, or score/time limits, just adds players:
+        //
+        // 1. "if someone leaves a 1v1 with 1 spectator waiting, it just
+        //    continues 1v0 forever, in any team size" — a departure
+        //    leaving a side short was never backfilled at all, even when
+        //    the gap exactly equals who's waiting. Same policy as the main
+        //    room's own team/balance.js balanceTeams(): restore exact
+        //    parity only when the gap and the waiting pool match exactly;
+        //    a bigger gap is left "just keep playing uneven" rather than
+        //    benching someone on the fuller side to force it.
+        // 2. "1v1 on the field with 2 spectators doesn't grow to 2v2" —
+        //    once already balanced (or just rebalanced by step 1), extra
+        //    waiting spectators were never pulled in either, even when the
+        //    CURRENT map already supports a bigger even split (classic
+        //    supports up to 2v2, big up to teamSize-v-teamSize) — this is
+        //    NOT the "auto-upgrade to a bigger arena" the main room
+        //    deliberately removed (see haxchill-fixed-match-size memory):
+        //    no stadium change happens here, only filling the SAME map up
+        //    to what it was already sized for.
         if (state.gameState !== State.STOP) {
-            const diff = state.teamRed.length - state.teamBlue.length;
-            if (diff !== 0 && Math.abs(diff) === state.teamSpec.length) {
+            const cap = state.currentStadium === 'classic' ? 2 : teamSize;
+            const fillQueue = [...state.teamSpec].sort((a, b) => (state.specQueueSince.get(a.id) ?? 0) - (state.specQueueSince.get(b.id) ?? 0));
+            let redCount = state.teamRed.length;
+            let blueCount = state.teamBlue.length;
+
+            const diff = redCount - blueCount;
+            if (diff !== 0 && Math.abs(diff) === fillQueue.length) {
                 const shortSide = diff > 0 ? Team.BLUE : Team.RED;
-                const fillQueue = [...state.teamSpec].sort((a, b) => (state.specQueueSince.get(a.id) ?? 0) - (state.specQueueSince.get(b.id) ?? 0));
                 fillQueue.forEach((p) => room.setPlayerTeam(p.id, shortSide));
+                redCount = blueCount = Math.max(redCount, blueCount);
+                fillQueue.length = 0;
+            }
+
+            if (redCount === blueCount) {
+                while (fillQueue.length >= 2 && redCount < cap) {
+                    room.setPlayerTeam(fillQueue.shift().id, Team.RED);
+                    room.setPlayerTeam(fillQueue.shift().id, Team.BLUE);
+                    redCount++;
+                    blueCount++;
+                }
             }
             return;
         }
@@ -123,7 +145,7 @@ module.exports = function createBffMatchFlow({
         // this function's own handlePlayersStop below (re-stamps anyone
         // just benched, sending them to the BACK of the queue).
         const queue = [...state.teamSpec].sort((a, b) => (state.specQueueSince.get(a.id) ?? 0) - (state.specQueueSince.get(b.id) ?? 0));
-        const available = queue.slice(0, 2 * teamSize);
+        let available = queue.slice(0, 2 * teamSize);
         if (available.length === 0) return;
 
         if (available.length === 1) {
@@ -133,6 +155,22 @@ module.exports = function createBffMatchFlow({
                 room.startGame();
             }, 50);
             return;
+        }
+
+        // Real bug fixed here (reported live 2026-08-14: going AFK during
+        // the post-match pause left a match starting as e.g. 2v1) —
+        // confirmed by the room owner as a genuine rule, not a one-off:
+        // an uneven match must never START at all, only ever grow/shrink
+        // into unevenness later via a mid-match departure that couldn't be
+        // exactly restored (see the live-match branch above, an
+        // intentionally separate, unrelated policy). An odd headcount here
+        // drops the SINGLE most-recently-arrived candidate (the tail of
+        // the fairness queue sorted above) rather than starting lopsided —
+        // they're simply left untouched in state.teamSpec with their
+        // existing timestamp, so they're first in line, not last, the
+        // next time assembleMatch() runs.
+        if (available.length % 2 !== 0) {
+            available = available.slice(0, -1);
         }
 
         const withRatings = await Promise.all(available.map(async (player) => ({

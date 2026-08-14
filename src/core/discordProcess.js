@@ -316,12 +316,15 @@ function handleBffBridgeMessage(msg) {
                 `(за: ${msg.votesFor}, против: ${msg.votesAgainst}, воздержались: ${msg.abstained})`
             );
             break;
-        // !report (core/bff/adminCall.js) — same "no dedicated channel yet"
-        // simplification as voteBanNotification above: folded into the log
-        // channel rather than a dedicated @here-ping channel like the main
-        // room's own DISCORD_ADMIN_CALL_CHANNEL_ID.
+        // !report (core/bff/adminCall.js) — corrected 2026-08-14: goes to
+        // the SAME shared DISCORD_ADMIN_CALL_CHANNEL_ID the main room's own
+        // !report already uses (not a separate BFF channel, and not folded
+        // into the log channel like voteBanNotification above) — the
+        // [BFF]/[FUTSAL] tags exist specifically so one shared channel can
+        // tell the two rooms' alerts apart. Also picks up the real @here
+        // ping sendAdminCall already does, which sendBffLog never had.
         case 'adminCall':
-            discordBot.sendBffLog(`🚨 **[BFF] ${msg.playerName} позвал(а) администрацию!**`);
+            discordBot.sendAdminCall(msg.playerName, 'BFF');
             break;
     }
 }

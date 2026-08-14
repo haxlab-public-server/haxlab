@@ -735,15 +735,17 @@ module.exports = function createDiscordBot({
             .catch((err) => console.error('Discord sendPassword failed:', err));
     }
 
-    // !report (player.js) — pings admins in a dedicated channel. The
+    // !report (player.js, and BFF's core/bff/adminCall.js) — pings admins
+    // in ONE shared dedicated channel for BOTH rooms (confirmed 2026-08-14
+    // — not a separate BFF channel), distinguished only by roomTag. The
     // `parse: ['everyone']` allowedMentions flag covers @here too (Discord
     // treats @everyone/@here as the same mention category), and is needed
     // to actually trigger a ping — without it, discord.js still renders the
     // text but suppresses the notification.
-    function sendAdminCall(playerName) {
+    function sendAdminCall(playerName, roomTag = 'FUTSAL') {
         if (!adminCallChannel) return;
         adminCallChannel.send({
-            content: `@here [FUTSAL] **${playerName}** позвал админа!`,
+            content: `@here [${roomTag}] **${playerName}** позвал админа!`,
             allowedMentions: { parse: ['everyone'] },
         }).catch((err) => console.error('Discord sendAdminCall failed:', err));
     }

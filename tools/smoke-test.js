@@ -8788,6 +8788,35 @@ console.log('--- core/bff/matchFlow.js: rating-driven match assembly (no captain
     await new Promise((resolve) => setTimeout(resolve, 80));
     check('startGame fires shortly after assembly', roomCallsLocal.some((c) => c.fn === 'startGame'), true);
 
+    // --- real bug fixed (confirmed as a genuine rule, not a one-off,
+    // 2026-08-14): an uneven match must never START at all. 3 available
+    // (odd) drops the newest-arrived one and starts a real 1v1 from the
+    // other 2, rather than a 2v1. ---
+    roomCallsLocal.length = 0;
+    limitCalls.length = 0;
+    const oddThree = [mkPlayer(1, 'A1', 'Alice'), mkPlayer(2, 'A2', 'Bob'), mkPlayer(3, 'A3', 'Charlie')];
+    stateLocal.specQueueSince.clear();
+    oddThree.forEach((p, i) => stateLocal.specQueueSince.set(p.id, i)); // Alice oldest, Charlie newest
+    stateLocal.teamSpec = oddThree;
+    await matchFlow.assembleMatch();
+    const oddAssignments = roomCallsLocal.filter((c) => c.fn === 'setPlayerTeam');
+    check('3 available (odd) starts a real match with only 2, never a 2v1', oddAssignments.length, 2);
+    check('...the newest arrival (Charlie) is the one left out, not assigned to either side', oddAssignments.some((c) => c.id === 3), false);
+    check('...and the 2 oldest-waiting (Alice, Bob) are the ones who get to play', oddAssignments.map((c) => c.id).sort((a, b) => a - b), [1, 2]);
+
+    // --- 5 available (odd) similarly starts a real 2v2 from 4, not a 3v2 ---
+    roomCallsLocal.length = 0;
+    limitCalls.length = 0;
+    const oddFive = [1, 2, 3, 4, 5].map((n) => mkPlayer(n, 'A' + n, 'P' + n));
+    stateLocal.specQueueSince.clear();
+    oddFive.forEach((p, i) => stateLocal.specQueueSince.set(p.id, i));
+    stateLocal.teamSpec = oddFive;
+    await matchFlow.assembleMatch();
+    const fiveAssignments = roomCallsLocal.filter((c) => c.fn === 'setPlayerTeam');
+    check('5 available (odd) starts a real 2v2 from the 4 oldest, never a 3v2', fiveAssignments.length, 4);
+    check('...player 5 (newest) is left waiting', fiveAssignments.some((c) => c.id === 5), false);
+    check('...applyLimitsForSize gets 2 (a genuine 2v2), not 3', limitCalls[limitCalls.length - 1], 2);
+
     // --- real bug fixed: a 2nd player joining a solo trainee's session
     // must actually promote it to a real match, not sit forever ignored.
     // The lone trainee lives on state.teamRed (not teamSpec — they're
@@ -8832,14 +8861,15 @@ console.log('--- core/bff/matchFlow.js: rating-driven match assembly (no captain
     // into the tests below.
     stateLocal.currentStadium = 'classic';
 
-    // --- live match in progress: joins/leaves don't reassemble mid-game ---
+    // --- live match in progress: a join that can't even form a growth
+    // pair (only 1 waiting) never reassembles/restarts the match ---
     roomCallsLocal.length = 0;
     stateLocal.gameState = StateEnum.PLAY;
-    stateLocal.teamRed = [];
-    stateLocal.teamBlue = [];
-    stateLocal.teamSpec = [mkPlayer(3, 'A3', 'Carol'), mkPlayer(4, 'A4', 'Dave')];
+    stateLocal.teamRed = [mkPlayer(1, 'A1', 'Alice')];
+    stateLocal.teamBlue = [mkPlayer(2, 'A2', 'Bob')];
+    stateLocal.teamSpec = [mkPlayer(3, 'A3', 'Carol')];
     await matchFlow.handlePlayersJoin();
-    check('a join during a live match with BALANCED teams does not touch teams (never interrupts a running game)', roomCallsLocal.length, 0);
+    check('a single join during a live, balanced 1v1 (not enough to grow a pair) does not touch teams', roomCallsLocal.length, 0);
     stateLocal.gameState = StateEnum.STOP;
 
     // --- real bug fixed: a mid-match departure leaving a side short is
@@ -8881,13 +8911,57 @@ console.log('--- core/bff/matchFlow.js: rating-driven match assembly (no captain
     await matchFlow.handlePlayersLeave();
     check('a gap of 2 with only 1 spectator waiting is left alone entirely (no partial fill)', roomCallsLocal.length, 0);
 
-    // --- already balanced mid-match: no-op either way ---
+    // --- already balanced mid-match, only 1 waiting: not enough to grow a pair ---
     roomCallsLocal.length = 0;
     stateLocal.teamRed = [mkPlayer(37, 'A37', 'R8')];
     stateLocal.teamBlue = [mkPlayer(38, 'A38', 'B4')];
     stateLocal.teamSpec = [mkPlayer(39, 'A39', 'JustWatching')];
     await matchFlow.handlePlayersJoin();
-    check('a join with teams already balanced does not pull anyone in', roomCallsLocal.length, 0);
+    check('a join with teams already balanced, only 1 spectator, does not pull anyone in (needs a pair)', roomCallsLocal.length, 0);
+
+    // --- real bug fixed: a live, ALREADY-balanced match doesn't grow when
+    // more spectators show up — e.g. 1v1 on the field, 2 waiting, never
+    // becomes 2v2. NOT the "auto-upgrade to a bigger arena" the main room
+    // deliberately removed (see haxchill-fixed-match-size memory) — classic
+    // already supports up to 2v2, so this never changes the stadium. ---
+    roomCallsLocal.length = 0;
+    stateLocal.teamRed = [mkPlayer(40, 'A40', 'R9')];
+    stateLocal.teamBlue = [mkPlayer(41, 'A41', 'B5')];
+    stateLocal.teamSpec = [mkPlayer(42, 'A42', 'Sub5'), mkPlayer(43, 'A43', 'Sub6')];
+    await matchFlow.handlePlayersJoin();
+    const growthFills = roomCallsLocal.filter((c) => c.fn === 'setPlayerTeam');
+    check('a 1v1 with exactly 2 waiting grows to a real 2v2, live, no stop/restart', growthFills.length, 2);
+    check('...one onto each side', new Set(growthFills.map((c) => c.team)).size, 2);
+
+    // --- growth stops at the current map's own cap (classic = 2v2 max) —
+    // does NOT keep growing past what the map already supports ---
+    roomCallsLocal.length = 0;
+    stateLocal.teamRed = [mkPlayer(44, 'A44', 'R10'), mkPlayer(45, 'A45', 'R11')];
+    stateLocal.teamBlue = [mkPlayer(46, 'A46', 'B6'), mkPlayer(47, 'A47', 'B7')];
+    stateLocal.teamSpec = [mkPlayer(48, 'A48', 'Sub7'), mkPlayer(49, 'A49', 'Sub8')];
+    await matchFlow.handlePlayersJoin();
+    check('an already-full classic 2v2 does not grow further even with 2 more waiting (classic caps at 2v2)', roomCallsLocal.length, 0);
+
+    // --- on the big map, growth can go all the way up to a genuine 4v4 ---
+    roomCallsLocal.length = 0;
+    stateLocal.currentStadium = 'big';
+    stateLocal.teamRed = [mkPlayer(50, 'A50', 'R12'), mkPlayer(51, 'A51', 'R13')];
+    stateLocal.teamBlue = [mkPlayer(52, 'A52', 'B8'), mkPlayer(53, 'A53', 'B9')];
+    stateLocal.teamSpec = [mkPlayer(54, 'A54', 'Sub9'), mkPlayer(55, 'A55', 'Sub10'), mkPlayer(56, 'A56', 'Sub11'), mkPlayer(57, 'A57', 'Sub12')];
+    await matchFlow.handlePlayersJoin();
+    const bigGrowth = roomCallsLocal.filter((c) => c.fn === 'setPlayerTeam');
+    check('a 2v2 on big with 4 waiting grows all the way to a genuine 4v4 (2 pairs pulled)', bigGrowth.length, 4);
+    check('...split evenly, 2 onto each side', bigGrowth.filter((c) => c.team === TeamLocal.RED).length, 2);
+
+    // --- growth stops exactly at teamSize even with MORE than needed waiting ---
+    roomCallsLocal.length = 0;
+    stateLocal.teamRed = [mkPlayer(58, 'A58', 'R14'), mkPlayer(59, 'A59', 'R15'), mkPlayer(60, 'A60', 'R16')];
+    stateLocal.teamBlue = [mkPlayer(61, 'A61', 'B10'), mkPlayer(62, 'A62', 'B11'), mkPlayer(63, 'A63', 'B12')];
+    stateLocal.teamSpec = [mkPlayer(64, 'A64', 'Sub13'), mkPlayer(65, 'A65', 'Sub14'), mkPlayer(66, 'A66', 'Sub15'), mkPlayer(67, 'A67', 'Sub16')];
+    await matchFlow.handlePlayersJoin();
+    const cappedGrowth = roomCallsLocal.filter((c) => c.fn === 'setPlayerTeam');
+    check('3v3 + 4 waiting on big only pulls ONE pair (to reach the teamSize=4 cap), not both', cappedGrowth.length, 2);
+    stateLocal.currentStadium = 'classic';
     stateLocal.gameState = StateEnum.STOP;
 
     // --- a full 8-player house forms a genuine 4v4 ---
@@ -8997,6 +9071,86 @@ console.log('--- core/bff/matchFlow.js: rating-driven match assembly (no captain
     check('all 8 players from the forced-stopped match are benched back to spectators', forcedBench.map((c) => c.id).sort((a, b) => a - b), [1, 2, 3, 4, 5, 6, 7, 8]);
     check('...with fresh fairness-queue timestamps too', [1, 2, 3, 4, 5, 6, 7, 8].every((id) => stateLocal.specQueueSince.has(id)), true);
     check('the room self-heals IMMEDIATELY, no pause — an already-waiting player is pulled onto a team right away', roomCallsLocal.some((c) => c.fn === 'setPlayerTeam' && c.id === 50 && c.team !== TeamLocal.SPECTATORS), true);
+})();
+
+console.log('--- core/bff/threeDefLine.js: "3 defenders" rule (big map only) ---');
+(() => {
+    const TeamLocal = { RED: 1, BLUE: 2, SPECTATORS: 0 };
+    const createBffThreeDefLine = require(path.join(CORE, 'bff', 'threeDefLine'));
+
+    // Real HaxBall CollisionFlags bit values aren't needed for correctness
+    // here (the module only compares/combines whatever room.CollisionFlags
+    // hands it), but using the real ones keeps this test honest about shape.
+    const CF = { red: 2, blue: 4, c0: 268435456, c1: 536870912 };
+    const discProps = new Map();
+    const discCalls = [];
+    const roomMock = {
+        CollisionFlags: CF,
+        getPlayerDiscProperties: (id) => discProps.get(id) ?? null,
+        setPlayerDiscProperties: (id, props) => {
+            discCalls.push({ id, cGroup: props.cGroup });
+            discProps.set(id, { ...discProps.get(id), ...props });
+        },
+    };
+
+    function mkPlayer(id, x) {
+        return { id, position: { x } };
+    }
+
+    const stateLocal = { currentStadium: 'classic', teamRed: [], teamBlue: [] };
+    const { adjustDefenseLine } = createBffThreeDefLine({ room: roomMock, state: stateLocal, Team: TeamLocal });
+
+    // --- not the big map (1v1/2v2 classic): the rule never applies ---
+    stateLocal.teamRed = [mkPlayer(1, 100)];
+    stateLocal.teamBlue = [mkPlayer(2, -100)];
+    discProps.set(1, { cGroup: CF.red });
+    discProps.set(2, { cGroup: CF.blue });
+    discCalls.length = 0;
+    adjustDefenseLine();
+    check('classic map: rule does not touch any disc properties', discCalls.length, 0);
+
+    // --- big map but one side empty (no live match yet): does nothing ---
+    stateLocal.currentStadium = 'big';
+    stateLocal.teamRed = [mkPlayer(1, 100)];
+    stateLocal.teamBlue = [];
+    discCalls.length = 0;
+    adjustDefenseLine();
+    check('big map with an empty side does nothing (no match actually live)', discCalls.length, 0);
+
+    // --- big map, real teams: only the most advanced player per side is restricted ---
+    stateLocal.teamRed = [mkPlayer(10, -200), mkPlayer(11, 300)]; // red attacks +x: 11 is most forward
+    stateLocal.teamBlue = [mkPlayer(20, 200), mkPlayer(21, -300)]; // blue attacks -x: 21 is most forward
+    discProps.clear();
+    discProps.set(10, { cGroup: CF.red });
+    discProps.set(11, { cGroup: CF.red });
+    discProps.set(20, { cGroup: CF.blue });
+    discProps.set(21, { cGroup: CF.blue });
+    discCalls.length = 0;
+    adjustDefenseLine();
+    check("red's most forward player (highest x) is tagged with the c0 defensive-line group", discProps.get(11).cGroup, CF.red | CF.c0);
+    check('...the other red player is left on the plain group, free to defend', discProps.get(10).cGroup, CF.red);
+    check("blue's most forward player (lowest x) is tagged with the c1 defensive-line group", discProps.get(21).cGroup, CF.blue | CF.c1);
+    check('...the other blue player is left on the plain group', discProps.get(20).cGroup, CF.blue);
+    check('exactly 2 disc-property writes happen (one per team), not one per player', discCalls.length, 2);
+
+    // --- idempotent: an unchanged tick makes no redundant writes ---
+    discCalls.length = 0;
+    adjustDefenseLine();
+    check('a second call with unchanged positions writes nothing (already correct)', discCalls.length, 0);
+
+    // --- the most-forward player changes: the old one is released, the new one restricted ---
+    stateLocal.teamRed = [mkPlayer(10, 400), mkPlayer(11, 300)]; // 10 overtakes 11
+    discCalls.length = 0;
+    adjustDefenseLine();
+    check('when a teammate overtakes, the new forward player is restricted', discProps.get(10).cGroup, CF.red | CF.c0);
+    check('...and the previous one is released back to the plain group', discProps.get(11).cGroup, CF.red);
+
+    // --- a player with no disc yet (e.g. mid-transition) does not crash the tick ---
+    stateLocal.teamBlue = [mkPlayer(20, 200), mkPlayer(99, -500)];
+    discProps.delete(99);
+    let threw = false;
+    try { adjustDefenseLine(); } catch (err) { threw = true; }
+    check('a player with no disc properties yet does not crash the tick', threw, false);
 })();
 
 console.log('--- core/bff/roomSetup.js: applyLimitsForSize + applyTrainingMap ---');

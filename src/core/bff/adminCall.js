@@ -5,9 +5,9 @@
  * the DISCORD_LINK_BONUS_COINS reward) BFF doesn't have any use for.
  *
  * discordBot.sendAdminCall is routed by discordProcess.js's BFF bridge to
- * sendBffLog (see haxchill-second-room-plan memory) — no dedicated BFF
- * admin-call channel/@here-ping infrastructure exists yet, unlike the main
- * room's own dedicated ping channel; a known, accepted simplification.
+ * the SAME shared admin-call channel the main room's own !report already
+ * pings (confirmed 2026-08-14 — not a separate BFF channel), tagged
+ * [BFF] there so the one shared channel can tell the two rooms apart.
  */
 module.exports = function createBffAdminCall({
     room,
