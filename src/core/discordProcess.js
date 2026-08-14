@@ -44,7 +44,11 @@ const {
     discordMentionAlertChannelId,
     discordProxyUrl,
     maxPlayers,
+    discordBffLogChannelId,
+    discordBffReportChannelId,
+    discordBridgePort,
 } = require('./config');
+const { maxPlayers: bffMaxPlayers } = require('./bff/roomConstants');
 const { getTimeStats } = require('./utils');
 
 // Routes this process's Discord gateway (WebSocket) traffic through
@@ -181,6 +185,9 @@ const discordBot = createDiscordBot({
     discordMentionAlertChannelId,
     discordProxyUrl,
     maxPlayers,
+    discordBffLogChannelId,
+    discordBffReportChannelId,
+    bffMaxPlayers,
     db,
     state,
     getAuthArray: () => authArray,
@@ -271,6 +278,84 @@ process.on('message', (msg) => {
             break;
         }
     }
+});
+
+/* BFF BRIDGE — local TCP server so the BFF orchestrator (src/bffIndex.js, a
+ * genuinely separate, unrelated OS process — see haxchill-second-room-plan
+ * project memory) can reach this SAME running Discord bot/client instead of
+ * spawning a second one ("one shared bot for both rooms", confirmed). Plain
+ * loopback TCP rather than a Unix socket specifically so this works
+ * identically in local Windows dev and on the Linux VPS with no
+ * platform-specific branching. Newline-delimited JSON, one message per
+ * line — simple enough not to need a real framing protocol at this
+ * message rate (a handful of events per minute, not a firehose). */
+const net = require('node:net');
+
+function handleBffBridgeMessage(msg) {
+    if (!msg || typeof msg !== 'object') return;
+    switch (msg.type) {
+        case 'log':
+            discordBot.sendBffLog(msg.content);
+            break;
+        case 'report':
+            discordBot.sendBffReport(msg.embedData);
+            break;
+        case 'recording':
+            discordBot.sendBffRecording(Buffer.from(msg.bufferBase64, 'base64'), msg.filename);
+            break;
+        case 'status':
+            discordBot.updateBffRoomStatus(msg.playerCount, msg.roomLink);
+            break;
+        // core/voteBan.js (reused as-is by BFF) — no dedicated BFF voteban
+        // channel was ever confirmed in the design, so this is folded into
+        // the existing log channel: it's a genuine moderation-log event,
+        // same category as join/leave/kick already posted there.
+        case 'voteBanNotification':
+            discordBot.sendBffLog(
+                `🔨 **Бан по голосованию**: **${msg.targetName}** забанен(а) на ${msg.durationMinutes} мин. ` +
+                `(за: ${msg.votesFor}, против: ${msg.votesAgainst}, воздержались: ${msg.abstained})`
+            );
+            break;
+        // !report (core/bff/adminCall.js) — same "no dedicated channel yet"
+        // simplification as voteBanNotification above: folded into the log
+        // channel rather than a dedicated @here-ping channel like the main
+        // room's own DISCORD_ADMIN_CALL_CHANNEL_ID.
+        case 'adminCall':
+            discordBot.sendBffLog(`🚨 **[BFF] ${msg.playerName} позвал(а) администрацию!**`);
+            break;
+    }
+}
+
+const bffBridgeServer = net.createServer((socket) => {
+    let buffer = '';
+    socket.on('data', (chunk) => {
+        buffer += chunk.toString('utf8');
+        let newlineIndex;
+        while ((newlineIndex = buffer.indexOf('\n')) !== -1) {
+            const line = buffer.slice(0, newlineIndex);
+            buffer = buffer.slice(newlineIndex + 1);
+            if (!line.trim()) continue;
+            try {
+                handleBffBridgeMessage(JSON.parse(line));
+            } catch (err) {
+                console.error('[BFF bridge] Failed to parse message:', err);
+            }
+        }
+    });
+    socket.on('error', (err) => {
+        console.error('[BFF bridge] Socket error:', err.message);
+    });
+});
+bffBridgeServer.on('error', (err) => {
+    // Non-fatal: the main room's Discord integration must keep working
+    // even if the BFF bridge can't bind (port already in use from a stale
+    // process, etc.) — BFF's own orchestrator already tolerates a failed
+    // connection (see bffIndex.js's Discord client, fire-and-forget with
+    // its own reconnect backoff).
+    console.error('[BFF bridge] Server error (BFF Discord bridging unavailable):', err.message);
+});
+bffBridgeServer.listen(discordBridgePort, '127.0.0.1', () => {
+    console.log(`[BFF bridge] Listening on 127.0.0.1:${discordBridgePort}`);
 });
 
 /* DATABASE BACKUPS */

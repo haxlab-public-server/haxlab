@@ -59,6 +59,22 @@ console.log('--- stats/print.js: !stats shows the full stat block ---');
     check('shows assists rank', output.includes('ассистам: 5/20(12)'), true);
     check('shows clean sheets rank', output.includes('сухим матчам: 2/20(3)'), true);
     check('shows playtime rank', output.includes('времени игры: 7/20(10m)'), true);
+    check('the main room never sets ratingOrdinal, so no rating line appears at all', output.includes('Рейтинг'), false);
+
+    const bffStats = { ...stats, ratingOrdinal: 27.849 };
+    const bffOutput = await printStats.printPlayerStats(bffStats);
+    check('BFF stats (ratingOrdinal set) DO show a rounded rating line', bffOutput.includes('⚔️ Рейтинг: 28'), true);
+
+    const ratingDbFew = { getRatingLeaderboard: async () => [{ playerName: 'A', ordinal: 40 }, { playerName: 'B', ordinal: 30 }] };
+    check('buildRatingRankingString returns null below the 5-player quorum', await require(path.join(CORE, 'stats', 'print')).buildRatingRankingString(ratingDbFew), null);
+
+    const ratingRows = [
+        { playerName: 'Top', ordinal: 40.6 }, { playerName: 'Second', ordinal: 30.2 }, { playerName: 'Third', ordinal: 20.9 },
+        { playerName: 'Fourth', ordinal: 10.1 }, { playerName: 'Fifth', ordinal: 0.4 },
+    ];
+    const ratingDbFull = { getRatingLeaderboard: async () => ratingRows };
+    const ratingRankingText = await require(path.join(CORE, 'stats', 'print')).buildRatingRankingString(ratingDbFull);
+    check('buildRatingRankingString shows all 5 at quorum, rounded', ratingRankingText, 'Рейтинг> #1 Top : 41, #2 Second : 30, #3 Third : 21, #4 Fourth : 10, #5 Fifth : 0');
 })();
 
 console.log('\n--- chat.js: helpers must see state populated AFTER wiring ---');
@@ -1786,7 +1802,7 @@ console.log('\n--- core/pauseVote.js: !votepause — kickoff-only, 7s window, 3/
     check('double-voting is rejected, not re-counted', /уже проголосовали/.test(sent[0].msg), true);
 }
 
-console.log('\n--- core/voteBan.js: !voteban — 61% of ALL eligible voters, top-10/owner immunity ---');
+console.log('\n--- core/voteBan.js: !voteban — 61% of ALL eligible voters, top-3/owner immunity ---');
 (async () => {
     const { createSqliteDatabase } = require(path.join(__dirname, '..', 'db', 'sqlite'));
     const db = createSqliteDatabase(':memory:');
@@ -1868,13 +1884,15 @@ console.log('\n--- core/voteBan.js: !voteban — 61% of ALL eligible voters, top
     check('an initiator with under 10 games cannot start a vote', /Голосовать могут только/.test(sent[0].msg), true);
     check('no session was started for the under-qualified initiator', state.votebanSession, null);
 
-    // Bob has a player_stats row, and this fresh db has under 10 total rows
-    // — so he's trivially top-10 in every category, exactly like a real
-    // small room's leaderboard would read. Proves the protection check
-    // actually queries real leaderboard data, not just a hardcoded id.
+    // Bob (15 games) genuinely ranks top-3 by games among the 5 tracked
+    // players (Alice 20, Bob 15, Dave 12, Eve 11, Carol 5) — proves the
+    // protection check actually queries real leaderboard data, not just a
+    // hardcoded id. PROTECTED_TOP_N lowered from 10 to 3 (confirmed
+    // 2026-08-14) — top-10 was shielding too many regulars from a
+    // legitimate vote.
     sent.length = 0;
     await voteBan.votebanCommand({ id: 1, name: 'Alice' }, '!voteban #2');
-    check('a top-10 player cannot be targeted', /топ-10/.test(sent[0].msg), true);
+    check('a top-3 player cannot be targeted', /топ-3/.test(sent[0].msg), true);
     check('no session was started for a protected target', state.votebanSession, null);
 
     // Troll has NO player_stats row at all — never appears in any
@@ -3582,8 +3600,12 @@ console.log('\n--- team/balance.js: an already-full match never auto-upgrades to
         roomCallsLocal.length = 0;
         calls.length = 0;
         balance.balanceTeams();
-        // Two pairs this time (4 individually-staggered calls) — a longer wait.
-        await wait(40);
+        // Two pairs this time (4 individually-staggered calls) — a longer
+        // wait. Widened from 40ms, then 200ms (still occasionally flaky),
+        // to 500ms once this file's own growing pile of concurrent async
+        // test blocks (bff/rating.js, bff/matchFlow.js) started starving a
+        // tighter window under real machine load.
+        await wait(500);
         check('a running 1v1 on big pulls in BOTH waiting pairs (used to crash/skip past the first)', roomCallsLocal, [
             `setPlayerTeam:3:${Team.RED}`, `setPlayerTeam:4:${Team.BLUE}`,
             `setPlayerTeam:5:${Team.RED}`, `setPlayerTeam:6:${Team.BLUE}`,
@@ -4493,10 +4515,12 @@ console.log('\n--- team/balance.js: a genuine surplus hands off to picking on th
         // been starving tighter windows like that one down to occasional
         // failures despite the underlying logic being correct (confirmed by
         // reproducing this exact scenario standalone, outside the full
-        // suite, where it reliably lands by ~35ms). Widened to 400ms for
-        // the same real-world reason as the overflowPassword/announcements
-        // loop-back margins elsewhere in this file.
-        await new Promise((resolve) => setTimeout(resolve, 400));
+        // suite, where it reliably lands by ~35ms). Widened to 400ms, then
+        // 700ms, then 1000ms as this file's own pile of concurrent bff/*
+        // test blocks kept growing, for the same real-world reason as the
+        // overflowPassword/announcements loop-back margins elsewhere in
+        // this file.
+        await new Promise((resolve) => setTimeout(resolve, 1000));
         check('chooseMode activates for the genuine surplus', state.chooseMode, true);
         check('the stadium is switched to big BEFORE/as picking starts, not left on classic', state.currentStadium, 'big');
         check('the switch actually went through room.stadiumCommand', stadiumCalls, ['!big']);
@@ -5826,10 +5850,12 @@ console.log('\n--- core/overflowPassword.js: activates/rotates/deactivates aroun
     // margin above ordinary event-loop jitter for a >=3 threshold, sized up
     // from 150ms once this file's own growing pile of concurrent async test
     // blocks started contending for the event loop enough to occasionally
-    // starve a 150ms window down to under 3 real ticks.
+    // starve a 150ms window down to under 3 real ticks. Widened again to
+    // 700ms, then 1000ms, as this file's own pile of concurrent bff/* test
+    // blocks kept growing.
     setTimeout(() => {
         check('the password still rotates on its own while the room stays full', passwords.length >= 3, true);
-    }, 400);
+    }, 1000);
 }
 
 console.log('\n--- core/overflowPassword.js: reuses a persisted password across a simulated restart ---');
@@ -5896,15 +5922,16 @@ console.log('\n--- core/announcements.js: cycles through messages in order, on a
     });
     start();
 
-    // 20ms interval, checked at 800ms — well over the 4 ticks needed to
+    // 20ms interval, checked at 1800ms — well over the 4 ticks needed to
     // prove the loop-back, with plenty of margin for event-loop jitter from
     // the other timer-driven checks running in this same process (widened
-    // from 250ms, then 500ms, as this file's own growing pile of concurrent
-    // async test blocks kept contending for the event loop enough to
-    // occasionally starve a tighter window down to fewer than 4 real ticks).
+    // from 250ms, then 500ms, then 800ms, then 1200ms, then 1800ms, as this
+    // file's own growing pile of concurrent async test blocks kept
+    // contending for the event loop enough to occasionally starve a
+    // tighter window down to fewer than 4 real ticks).
     setTimeout(() => {
         check('messages are sent in order and loop back to the start', sentLocal.slice(0, 4), ['one', 'two', 'three', 'one']);
-    }, 800);
+    }, 1800);
 }
 
 console.log('\n--- core/announcements.js: an empty message list never fires (and never throws) ---');
@@ -7532,6 +7559,74 @@ console.log('\n--- events/activity.js: onPlayerChat relays "@<MENTION_WATCH_NAME
     check('an empty mentionWatchName (feature disabled) never fires sendMentionAlert, even on a literal match', mentionAlerts, []);
 }
 
+console.log('\n--- events/activity.js: onPlayerChat gives a mentioned PLAYER (not everyone) the native "mention" sound ---');
+{
+    const TeamLocal = { SPECTATORS: 0 };
+    const StateLocal = { STOP: 2, PLAY: 0 };
+    const HaxNotificationMock = { CHAT: 1, MENTION: 2 };
+    const sentLocal = [];
+    const roomMock = { sendAnnouncement: (msg, id, color, style, sound) => sentLocal.push({ msg, id, color, style, sound }) };
+    const stateLocal = {
+        gameState: StateLocal.STOP, players: [], chooseMode: false, swapMode: false, slowMode: 0,
+        clubMembers: [], clubs: [], equippedTrophies: {}, playersAll: [
+            { id: 1, name: 'Alice' }, { id: 2, name: 'Bob' }, { id: 3, name: 'Charlie' },
+        ], hiddenCustomColorsSet: new Set(),
+    };
+    const authArrayLocal = { 1: ['AUTH_ALICE'], 2: ['AUTH_BOB'], 3: ['AUTH_CHARLIE'] };
+    const activity = require(path.join(CORE, 'events', 'activity'))({
+        room: roomMock, state: stateLocal, authArray: authArrayLocal, HaxNotification: HaxNotificationMock,
+        Role: { PLAYER: 0, VIP: 1, ADMIN_TEMP: 2, ADMIN_PERM: 3, MASTER: 4 }, State: StateLocal, Team: TeamLocal,
+        adminChatColor: 1, commands: {}, discordBot: { sendLog: () => {} }, errorColor: 2,
+        hiddenAdminsSet: new Set(), masterChatColor: 3, mentionWatchName: '', muteArray: { getByAuth: () => null },
+        MutePlayer: class { constructor() {} setDuration() {} },
+        silencedAuths: new Map(), vipChatColor: 4,
+        // Spam-flood auto-mute isn't what this test is about (see the
+        // dedicated checkSpamFlood test elsewhere in this file) — Alice
+        // sends several messages in a row here, which would otherwise trip
+        // the real default threshold (5 messages) and inject an extra
+        // auto-mute announcement into sentLocal, polluting these assertions.
+        spamMessageThreshold: 1000,
+        chooseModeFunction: () => false, swapModeFunction: () => false, slowModeFunction: () => false,
+        getCommand: () => false, getDate: () => 'DATE', getPlayerComp: () => null, getRole: () => 0,
+        handleVoteMessage: () => false, handleVoteBanMessage: () => false, jjCommand: () => false, playerChat: () => {}, teamChat: () => {},
+    });
+
+    // --- a message mentioning a live player's name gives THEM the mention sound, everyone else null ---
+    sentLocal.length = 0;
+    activity.onPlayerChat({ id: 1, name: 'Alice', team: TeamLocal.SPECTATORS }, 'эй @Bob, твой ход');
+    check('exactly 3 announcements went out (one per viewer, real per-viewer targeting)', sentLocal.length, 3);
+    check('Bob (mentioned) gets the MENTION sound', sentLocal.find((s) => s.id === 2).sound, HaxNotificationMock.MENTION);
+    check('Alice (the speaker) gets no special sound', sentLocal.find((s) => s.id === 1).sound, null);
+    check('Charlie (uninvolved) gets no special sound either', sentLocal.find((s) => s.id === 3).sound, null);
+
+    // --- case-insensitive, same convention as MENTION_WATCH_NAME's own check ---
+    sentLocal.length = 0;
+    activity.onPlayerChat({ id: 1, name: 'Alice', team: TeamLocal.SPECTATORS }, 'эй @BOB ты тут?');
+    check('matching is case-insensitive', sentLocal.find((s) => s.id === 2).sound, HaxNotificationMock.MENTION);
+
+    // --- mentioning yourself does not self-notify — excluded before the
+    // per-viewer path is even considered, so this is treated as an
+    // ordinary message with no real mentions and takes the cheap
+    // single-broadcast path, same as any other unmentioned message ---
+    sentLocal.length = 0;
+    activity.onPlayerChat({ id: 1, name: 'Alice', team: TeamLocal.SPECTATORS }, 'я, @Alice, объявляю');
+    check('a self-mention is excluded entirely — single broadcast, not per-viewer', sentLocal.length, 1);
+    check('...id null (everyone at once)', sentLocal[0].id, null);
+    check('...no mention sound for anyone, including the speaker', sentLocal[0].sound, null);
+
+    // --- multiple mentions in one message notify everyone mentioned ---
+    sentLocal.length = 0;
+    activity.onPlayerChat({ id: 1, name: 'Alice', team: TeamLocal.SPECTATORS }, '@Bob @Charlie сюда оба');
+    check('both mentioned players get the mention sound', [2, 3].every((id) => sentLocal.find((s) => s.id === id).sound === HaxNotificationMock.MENTION), true);
+
+    // --- an ordinary message with no mention stays a single cheap broadcast, no sound for anyone ---
+    sentLocal.length = 0;
+    activity.onPlayerChat({ id: 1, name: 'Alice', team: TeamLocal.SPECTATORS }, 'просто привет всем');
+    check('no mention -> the cheap single-broadcast path is used, not the per-viewer loop', sentLocal.length, 1);
+    check('...and id is null (everyone at once)', sentLocal[0].id, null);
+    check('...with no sound', sentLocal[0].sound, null);
+}
+
 console.log('\n--- commands/minigames.js: only the challenge and the final winner are broadcast, the match itself is private ---');
 (async () => {
     const TeamLocal = { RED: 1, BLUE: 2, SPECTATORS: 0 };
@@ -8562,6 +8657,1032 @@ console.log('\n--- core/commands/poker.js: !leavetable — standing up from the 
 
     db.close();
 })();
+
+console.log('--- core/bff/rating.js: openskill-based rating + team balancing ---');
+{
+    const rating = require(path.join(CORE, 'bff', 'rating'));
+
+    const d = rating.defaultRating();
+    check('defaultRating() matches openskill\'s own defaults (mu=25, sigma=25/3)', d, { mu: 25, sigma: 25 / 3 });
+    check('a brand new player\'s ordinal is a conservative 0 (mu - 3*sigma)', rating.computeOrdinal(d), 0);
+
+    // 8 players with clearly separated skill: 4 strong (high mu, low sigma
+    // = well-established) and 4 weak (low mu, low sigma). The MOST balanced
+    // possible split (closest to a coin-flip) mixes them evenly — 2 strong
+    // + 2 weak on each side, so both teams have equal total skill — NOT
+    // segregating all the strong ones onto one side, which would be the
+    // single most lopsided split available, the opposite of balanced.
+    const strong = { mu: 35, sigma: 3 };
+    const weak = { mu: 15, sigma: 3 };
+    const players = [
+        { auth: 'S1', playerName: 'Strong1', rating: strong },
+        { auth: 'W1', playerName: 'Weak1', rating: weak },
+        { auth: 'S2', playerName: 'Strong2', rating: strong },
+        { auth: 'W2', playerName: 'Weak2', rating: weak },
+        { auth: 'S3', playerName: 'Strong3', rating: strong },
+        { auth: 'W3', playerName: 'Weak3', rating: weak },
+        { auth: 'S4', playerName: 'Strong4', rating: strong },
+        { auth: 'W4', playerName: 'Weak4', rating: weak },
+    ];
+    const { teamA, teamB } = rating.assignBalancedTeams(players);
+    check('assignBalancedTeams gives each team exactly 4 players', teamA.length === 4 && teamB.length === 4, true);
+    const countStrong = (team) => team.filter((p) => p.auth.startsWith('S')).length;
+    check('the most balanced split gives team A exactly 2 of the 4 strong players', countStrong(teamA), 2);
+    check('...and team B the other 2', countStrong(teamB), 2);
+
+    try {
+        rating.assignBalancedTeams(players.slice(0, 1));
+        check('assignBalancedTeams rejects fewer than 2 players', 'did not throw', 'threw');
+    } catch (err) {
+        check('assignBalancedTeams rejects fewer than 2 players', /need at least 2/.test(err.message), true);
+    }
+
+    // BFF plays flexible sizes, not just 8 — an odd headcount (7 here: 4
+    // strong + 3 weak) must still split sensibly rather than throwing.
+    // Splitting 4 strong evenly against 3 weak would be the most lopsided
+    // possible; the balanced answer mixes them, same shape as the 8-player
+    // case, just with one team one player bigger.
+    const { teamA: teamA7, teamB: teamB7 } = rating.assignBalancedTeams(players.slice(0, 7));
+    check('an odd headcount (7) still splits into two teams covering everyone', teamA7.length + teamB7.length, 7);
+    check('...with the two team sizes differing by exactly 1 (no one benched)', Math.abs(teamA7.length - teamB7.length), 1);
+    const strongOnTeamA7 = teamA7.filter((p) => p.auth.startsWith('S')).length;
+    const strongOnTeamB7 = teamB7.filter((p) => p.auth.startsWith('S')).length;
+    check('the 4 strong players are split across both teams, not stacked on one', strongOnTeamA7 > 0 && strongOnTeamB7 > 0, true);
+
+    const evenTeamA = [rating.defaultRating(), rating.defaultRating(), rating.defaultRating(), rating.defaultRating()];
+    const evenTeamB = [rating.defaultRating(), rating.defaultRating(), rating.defaultRating(), rating.defaultRating()];
+    const winResult = rating.updateRatingsAfterMatch(evenTeamA, evenTeamB, 'teamA');
+    check('a team that wins gets a higher mu than before', winResult.teamA[0].mu > 25, true);
+    check('the losing team gets a lower mu than before', winResult.teamB[0].mu < 25, true);
+
+    const drawResult = rating.updateRatingsAfterMatch(evenTeamA, evenTeamB, 'draw');
+    check('an evenly-matched draw leaves both teams\' mu essentially unchanged', Math.abs(drawResult.teamA[0].mu - 25) < 0.01 && Math.abs(drawResult.teamB[0].mu - 25) < 0.01, true);
+}
+
+console.log('--- core/bff/matchFlow.js: rating-driven match assembly (no captain-pick ritual) ---');
+(async () => {
+    const StateEnum = { STOP: 0, PLAY: 1 };
+    const TeamLocal = { RED: 1, BLUE: 2, SPECTATORS: 0 };
+    const createBffMatchFlow = require(path.join(CORE, 'bff', 'matchFlow'));
+
+    function mkPlayer(id, auth, name) {
+        return { id, auth, name, team: TeamLocal.SPECTATORS };
+    }
+
+    const roomCallsLocal = [];
+    const roomMock = {
+        setPlayerTeam: (id, team) => roomCallsLocal.push({ fn: 'setPlayerTeam', id, team }),
+        startGame: () => roomCallsLocal.push({ fn: 'startGame' }),
+        stopGame: () => roomCallsLocal.push({ fn: 'stopGame' }),
+    };
+    const ratingsDb = new Map();
+    const limitCalls = [];
+    let trainingMapCalls = 0;
+    const stateLocal = { gameState: StateEnum.STOP, teamSpec: [], teamRed: [], teamBlue: [], specQueueSince: new Map() };
+    const matchFlow = createBffMatchFlow({
+        room: roomMock,
+        state: stateLocal,
+        Team: TeamLocal,
+        State: StateEnum,
+        getAuth: (p) => p.auth,
+        getRating: (auth) => ratingsDb.get(auth) ?? null,
+        saveRating: (auth, name, mu, sigma) => ratingsDb.set(auth, { mu, sigma }),
+        applyLimitsForSize: (maxSide) => limitCalls.push(maxSide),
+        applyTrainingMap: () => { trainingMapCalls++; },
+        teamSize: 4,
+        reassembleDelayMs: 30, // real 10000ms in production; shortened here like every other timing test in this file
+    });
+
+    // --- zero players: genuinely nothing to do ---
+    stateLocal.teamSpec = [];
+    await matchFlow.assembleMatch();
+    check('assembleMatch does nothing with zero players waiting', roomCallsLocal.length, 0);
+
+    // --- exactly 1 player: training map bootstrap, same as the main room ---
+    stateLocal.teamSpec = [mkPlayer(1, 'A1', 'Alice')];
+    await matchFlow.assembleMatch();
+    check('a lone player goes to the training map, not through rating logic', trainingMapCalls, 1);
+    check('...and is placed on red', roomCallsLocal.some((c) => c.fn === 'setPlayerTeam' && c.id === 1 && c.team === TeamLocal.RED), true);
+    check('applyLimitsForSize is NOT called for a solo player (nothing to limit)', limitCalls.length, 0);
+
+    // --- 1v1 forms immediately from just 2 players ---
+    roomCallsLocal.length = 0;
+    limitCalls.length = 0;
+    stateLocal.teamSpec = [mkPlayer(1, 'A1', 'Alice'), mkPlayer(2, 'A2', 'Bob')];
+    await matchFlow.assembleMatch();
+    const teamAssignments = roomCallsLocal.filter((c) => c.fn === 'setPlayerTeam');
+    check('a 1v1 assigns exactly 2 players to teams, no captain-pick step', teamAssignments.length, 2);
+    check('...one to each side', new Set(teamAssignments.map((c) => c.team)).size, 2);
+    check('the size passed to applyLimitsForSize for a 1v1 is 1 (max side size)', limitCalls[limitCalls.length - 1], 1);
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    check('startGame fires shortly after assembly', roomCallsLocal.some((c) => c.fn === 'startGame'), true);
+
+    // --- live match in progress: joins/leaves don't reassemble mid-game ---
+    roomCallsLocal.length = 0;
+    stateLocal.gameState = StateEnum.PLAY;
+    stateLocal.teamSpec = [mkPlayer(3, 'A3', 'Carol'), mkPlayer(4, 'A4', 'Dave')];
+    await matchFlow.handlePlayersJoin();
+    check('a join during a live match does not touch teams (never interrupts a running game)', roomCallsLocal.length, 0);
+    stateLocal.gameState = StateEnum.STOP;
+
+    // --- a full 8-player house forms a genuine 4v4 ---
+    roomCallsLocal.length = 0;
+    limitCalls.length = 0;
+    stateLocal.teamSpec = [1, 2, 3, 4, 5, 6, 7, 8].map((n) => mkPlayer(n, 'A' + n, 'P' + n));
+    await matchFlow.assembleMatch();
+    const fullHouseAssignments = roomCallsLocal.filter((c) => c.fn === 'setPlayerTeam');
+    check('a full 8-player house assigns all 8, no one left spectating', fullHouseAssignments.length, 8);
+    check('applyLimitsForSize gets 4 (a genuine 4v4)', limitCalls[limitCalls.length - 1], 4);
+
+    // --- fairness queue: real bug fixed — array position must NOT decide
+    // who gets picked, wait time must. state.teamSpec's array order tracks
+    // room.getPlayerList() (effectively room-join order), which has
+    // nothing to do with who's actually been waiting the longest to play. ---
+    roomCallsLocal.length = 0;
+    limitCalls.length = 0;
+    const fairnessNow = Date.now();
+    // 8 "regulars" who were JUST benched after playing (fresh timestamps).
+    const regulars = [1, 2, 3, 4, 5, 6, 7, 8].map((n) => mkPlayer(n, 'REG' + n, 'Regular' + n));
+    // 3 "latecomers" who've actually been waiting far longer, but sit AFTER
+    // the regulars in raw array order — the exact shape a room-join-order
+    // array produces when they joined later than the regulars originally did.
+    const latecomers = [9, 10, 11].map((n) => mkPlayer(n, 'WAIT' + n, 'Waiting' + n));
+    stateLocal.specQueueSince.clear();
+    regulars.forEach((p) => stateLocal.specQueueSince.set(p.id, fairnessNow));
+    latecomers.forEach((p, i) => stateLocal.specQueueSince.set(p.id, fairnessNow - 1000000 - i));
+    stateLocal.teamSpec = [...regulars, ...latecomers];
+    await matchFlow.assembleMatch();
+    const fairPicks = new Set(roomCallsLocal.filter((c) => c.fn === 'setPlayerTeam').map((c) => c.id));
+    check('all 3 long-waiting latecomers are picked despite being LAST in raw array order', latecomers.every((p) => fairPicks.has(p.id)), true);
+    check('exactly 8 total are picked (2*teamSize cap)', fairPicks.size, 8);
+    check('...so only 5 of the 8 just-benched regulars get back in immediately, the other 3 wait their turn', regulars.filter((p) => fairPicks.has(p.id)).length, 5);
+
+    // --- match end: full 4v4 with a real winner updates ratings, AND the
+    // just-finished players are moved back to spectators — real bug fixed:
+    // room.stopGame() alone never does this (native HaxBall behavior),
+    // which used to leave the previous 8 frozen on RED/BLUE forever while
+    // assembleMatch() only ever drew from state.teamSpec ---
+    const redPlayers = [1, 2, 3, 4].map((n) => mkPlayer(n, 'RED' + n, 'Red' + n));
+    const bluePlayers = [5, 6, 7, 8].map((n) => mkPlayer(n, 'BLUE' + n, 'Blue' + n));
+    stateLocal.teamRed = redPlayers;
+    stateLocal.teamBlue = bluePlayers;
+    stateLocal.teamSpec = [];
+    roomCallsLocal.length = 0;
+    await matchFlow.handlePlayersStop(null, 'red');
+    check('red winning a full 4v4 raises every red player\'s rating above the default', ['RED1', 'RED2', 'RED3', 'RED4'].every((a) => ratingsDb.get(a).mu > 25), true);
+    check('...and lowers every blue player\'s rating below the default', ['BLUE5', 'BLUE6', 'BLUE7', 'BLUE8'].every((a) => ratingsDb.get(a).mu < 25), true);
+    check('the match is stopped immediately, not left running', roomCallsLocal.some((c) => c.fn === 'stopGame'), true);
+    const benchCalls = roomCallsLocal.filter((c) => c.fn === 'setPlayerTeam' && c.team === TeamLocal.SPECTATORS);
+    check('all 8 just-finished players are benched back to spectators', benchCalls.map((c) => c.id).sort((a, b) => a - b), [1, 2, 3, 4, 5, 6, 7, 8]);
+    check('reassembly (new team assignments) has NOT happened yet — still inside the pause window', roomCallsLocal.filter((c) => c.fn === 'setPlayerTeam' && c.team !== TeamLocal.SPECTATORS).length, 0);
+    check('...and all 8 get a fresh fairness-queue timestamp (sent to the back of the line for next time)', [1, 2, 3, 4, 5, 6, 7, 8].every((id) => stateLocal.specQueueSince.get(id) >= fairnessNow), true);
+
+    // Simulates the real room's own onPlayerTeamChange -> updateTeams() side
+    // effect the setPlayerTeam calls above trigger synchronously in
+    // production (this lightweight mock doesn't wire that automatically) —
+    // everyone who just played is now correctly reflected as available.
+    stateLocal.teamRed = [];
+    stateLocal.teamBlue = [];
+    stateLocal.teamSpec = [...redPlayers, ...bluePlayers];
+
+    // --- a join landing INSIDE the post-match pause must not cut it short ---
+    roomCallsLocal.length = 0;
+    await matchFlow.handlePlayersJoin();
+    check('a join during the post-match pause does not start the next match early', roomCallsLocal.length, 0);
+
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    const reassembly = roomCallsLocal.filter((c) => c.fn === 'setPlayerTeam');
+    check('after the pause elapses, the room reassembles the next match on its own', reassembly.length > 0, true);
+    check('...correctly drawing from the SAME 8 players who just finished (not lost, not left stuck)', reassembly.length, 8);
+
+    // --- match end: a casual (non-4v4) game never touches rating ---
+    ratingsDb.clear();
+    stateLocal.teamRed = [mkPlayer(1, 'CASUAL_R1', 'R1')];
+    stateLocal.teamBlue = [mkPlayer(2, 'CASUAL_B1', 'B1')];
+    stateLocal.teamSpec = [];
+    await matchFlow.handlePlayersStop(null, 'red');
+    check('a casual 1v1 result never writes any rating at all', ratingsDb.size, 0);
+
+    // --- a forced stop (byPlayer set — e.g. admin/native stop) is NOT
+    // ignored: real bug fixed here, same shape as one already reported live
+    // in the main room (see team/balance.js's own handlePlayersStop
+    // comment) — the room now self-heals immediately instead of leaving
+    // the roster stuck on RED/BLUE forever with nothing left to recover it. ---
+    ratingsDb.clear();
+    // The previous (casual 1v1) handlePlayersStop call scheduled its own
+    // reassembleDelayMs pause — in real production that pause can never
+    // overlap a forced stop (there's no live game left TO force-stop until
+    // that pause's own reassembly has already started a new one), but this
+    // test moves fast enough to still be inside that stale window, so it's
+    // cleared explicitly here to match the realistic precondition.
+    stateLocal.reassembling = false;
+    const forcedRed = [1, 2, 3, 4].map((n) => mkPlayer(n, 'FORCED_R' + n, 'FR' + n));
+    const forcedBlue = [5, 6, 7, 8].map((n) => mkPlayer(n, 'FORCED_B' + n, 'FB' + n));
+    stateLocal.teamRed = forcedRed;
+    stateLocal.teamBlue = forcedBlue;
+    // A genuinely different, already-waiting player — proves assembleMatch()
+    // actually ran as part of the forced-stop path itself, immediately, not
+    // deferred behind the natural-end pause.
+    stateLocal.teamSpec = [mkPlayer(50, 'ALREADY_WAITING', 'Waiter')];
+    roomCallsLocal.length = 0;
+    await matchFlow.handlePlayersStop({ id: 99 }, 'red');
+    check('a forced stop does NOT update ratings, even for a full 4v4 (not a real result)', ratingsDb.size, 0);
+    check('the match is still stopped', roomCallsLocal.some((c) => c.fn === 'stopGame'), true);
+    const forcedBench = roomCallsLocal.filter((c) => c.fn === 'setPlayerTeam' && c.team === TeamLocal.SPECTATORS);
+    check('all 8 players from the forced-stopped match are benched back to spectators', forcedBench.map((c) => c.id).sort((a, b) => a - b), [1, 2, 3, 4, 5, 6, 7, 8]);
+    check('...with fresh fairness-queue timestamps too', [1, 2, 3, 4, 5, 6, 7, 8].every((id) => stateLocal.specQueueSince.has(id)), true);
+    check('the room self-heals IMMEDIATELY, no pause — an already-waiting player is pulled onto a team right away', roomCallsLocal.some((c) => c.fn === 'setPlayerTeam' && c.id === 50 && c.team !== TeamLocal.SPECTATORS), true);
+})();
+
+console.log('--- core/bff/roomSetup.js: applyLimitsForSize + applyTrainingMap ---');
+{
+    const createRoomSetup = require(path.join(CORE, 'bff', 'roomSetup'));
+    const roomCallsLocal = [];
+    const roomMock = {
+        setCustomStadium: (map) => roomCallsLocal.push({ fn: 'setCustomStadium', map }),
+        setScoreLimit: (n) => roomCallsLocal.push({ fn: 'setScoreLimit', n }),
+        setTimeLimit: (n) => roomCallsLocal.push({ fn: 'setTimeLimit', n }),
+    };
+    const stateLocal = { currentStadium: null };
+    const { applyLimitsForSize, applyTrainingMap } = createRoomSetup({
+        room: roomMock,
+        state: stateLocal,
+        bffTrainingMap: 'TRAINING_MAP_JSON',
+        bffClassicMap: 'CLASSIC_MAP_JSON',
+        bffBigMap: 'BIG_MAP_JSON',
+        classicScoreLimit: 2,
+        classicTimeLimit: 2,
+        bigScoreLimit: 4,
+        bigTimeLimit: 4,
+    });
+
+    applyLimitsForSize(1);
+    check('maxSide=1 (1v1) loads the classic map', roomCallsLocal.find((c) => c.fn === 'setCustomStadium').map, 'CLASSIC_MAP_JSON');
+    check('...with the 2-goal limit', roomCallsLocal.find((c) => c.fn === 'setScoreLimit').n, 2);
+    check('...and the 2-minute limit', roomCallsLocal.find((c) => c.fn === 'setTimeLimit').n, 2);
+
+    roomCallsLocal.length = 0;
+    applyLimitsForSize(2);
+    check('maxSide=2 (2v2) still uses the classic map, same cutoff as the main room\'s classic', roomCallsLocal.find((c) => c.fn === 'setCustomStadium'), undefined);
+    check('...(no redundant stadium reload — already on \'classic\')', roomCallsLocal.some((c) => c.fn === 'setCustomStadium'), false);
+
+    roomCallsLocal.length = 0;
+    applyLimitsForSize(3);
+    check('maxSide=3 (3v3) switches to the big map', roomCallsLocal.find((c) => c.fn === 'setCustomStadium').map, 'BIG_MAP_JSON');
+    check('...with the 4-goal limit', roomCallsLocal.find((c) => c.fn === 'setScoreLimit').n, 4);
+    check('...and the 4-minute limit', roomCallsLocal.find((c) => c.fn === 'setTimeLimit').n, 4);
+
+    roomCallsLocal.length = 0;
+    applyLimitsForSize(4);
+    check('maxSide=4 (4v4) stays on big, no redundant reload', roomCallsLocal.some((c) => c.fn === 'setCustomStadium'), false);
+    check('...but limits are still (re-)applied every time, unlike the stadium itself', roomCallsLocal.some((c) => c.fn === 'setScoreLimit'), true);
+
+    roomCallsLocal.length = 0;
+    applyTrainingMap();
+    check('applyTrainingMap loads the training map', roomCallsLocal.find((c) => c.fn === 'setCustomStadium').map, 'TRAINING_MAP_JSON');
+    check('...and sets no score/time limit at all (nothing meaningful to limit solo)', roomCallsLocal.some((c) => c.fn === 'setScoreLimit' || c.fn === 'setTimeLimit'), false);
+
+    roomCallsLocal.length = 0;
+    applyTrainingMap();
+    check('calling applyTrainingMap again is a no-op (already on training, no redundant reload)', roomCallsLocal.length, 0);
+}
+
+console.log('--- core/bff/dbBridge.js: BFF talks to two separate DB files, shared vs room-specific ---');
+{
+    const { createDatabaseApi } = require(path.join(__dirname, '..', 'api', 'database'));
+    const createBffDatabaseBridge = require(path.join(CORE, 'bff', 'dbBridge'));
+
+    // Two genuinely independent in-memory DBs — standing in for the BFF
+    // room's own file and the main room's file, exactly as isolated as
+    // they'll be in production (separate physical files).
+    const roomDb = createDatabaseApi({ filePath: ':memory:' });
+    const sharedDb = createDatabaseApi({ filePath: ':memory:' });
+    const bridge = createBffDatabaseBridge({ roomDb, sharedDb });
+    bridge.init();
+
+    // --- room-specific calls go to roomDb, never touch sharedDb ---
+    bridge.saveRating('AUTH_1', 'Player1', 30, 5);
+    check('a rating saved through the bridge lands in roomDb', roomDb.getRating('AUTH_1'), { mu: 30, sigma: 5 });
+    check('...and is completely invisible in sharedDb', sharedDb.getRating('AUTH_1'), null);
+
+    bridge.savePlayerStats('AUTH_1', { playerName: 'Player1', games: 5, wins: 3, goals: 2, assists: 1, ownGoals: 0, CS: 1, playtime: 300 });
+    check('stats saved through the bridge land in roomDb', roomDb.getPlayerStats('AUTH_1').games, 5);
+    check('...and are invisible in sharedDb', sharedDb.getPlayerStats('AUTH_1'), null);
+
+    // --- bans are explicitly per-room, not shared (confirmed 2026-08-14) ---
+    bridge.banAuth('AUTH_GRIEFER', 'Griefer', 'toxic', 60);
+    check('a ban issued through the bridge lands in roomDb', roomDb.getAuthBan('AUTH_GRIEFER') !== null, true);
+    check('...and does NOT carry over to sharedDb (the main room stays unaffected)', sharedDb.getAuthBan('AUTH_GRIEFER'), null);
+
+    // --- masters/admins/vips go to sharedDb, never touch roomDb ---
+    bridge.addMaster('AUTH_OWNER');
+    check('a master added through the bridge lands in sharedDb', sharedDb.getMasters(), ['AUTH_OWNER']);
+    check('...and is invisible in roomDb (roomDb never even sees a masters write)', roomDb.getMasters(), []);
+
+    bridge.addVip('AUTH_VIP', 'VipPlayer', null);
+    check('a VIP added through the bridge is visible via the bridge itself', bridge.getVips().some((v) => v.auth === 'AUTH_VIP'), true);
+    check('...lands in sharedDb specifically', sharedDb.getVips().some((v) => v.auth === 'AUTH_VIP'), true);
+    check('...not in roomDb', roomDb.getVips().length, 0);
+
+    bridge.addAdmin('AUTH_ADMIN', 'AdminPlayer');
+    bridge.removeAdmin('AUTH_ADMIN');
+    check('addAdmin/removeAdmin round-trip through the bridge against sharedDb', sharedDb.getAdmins().length, 0);
+
+    // --- a genuine cross-room scenario: same auth, different standing in each room ---
+    bridge.saveRating('AUTH_MULTI', 'MultiRoom', 28, 4);
+    roomDb.savePlayerStats('AUTH_MULTI', { playerName: 'MultiRoom', games: 10, wins: 8, goals: 0, assists: 0, ownGoals: 0, CS: 0, playtime: 0 });
+    check('the same auth can have BFF-only data (rating) with zero footprint in the shared file', sharedDb.getPlayerStats('AUTH_MULTI'), null);
+}
+
+console.log('--- core/bff/roomStats.js: stats persistence, trimmed (no clubs, no VIP lottery) ---');
+(async () => {
+    const { createSqliteDatabase } = require(path.join(__dirname, '..', 'db', 'sqlite'));
+    const db = createSqliteDatabase(':memory:');
+    db.init();
+
+    const sentLocal = [];
+    const roomMock = { sendAnnouncement: (msg, id, color, style) => sentLocal.push({ msg, id, style }) };
+    const HaxStatisticsLocal = function (playerName = '') {
+        this.playerName = playerName;
+        this.games = 0; this.wins = 0; this.winrate = '0.00%'; this.playtime = 0;
+        this.goals = 0; this.assists = 0; this.CS = 0; this.ownGoals = 0;
+    };
+    const TeamLocal = { RED: 1, BLUE: 2, SPECTATORS: 0 };
+    const authArrayLocal = { 1: ['AUTH_ALICE'], 2: ['AUTH_BOB'] };
+    const stateLocal = {
+        lastWinner: TeamLocal.RED,
+        teamRedStats: [{ id: 1, name: 'Alice' }],
+        teamBlueStats: [{ id: 2, name: 'Bob' }],
+        players: [1, 2, 3, 4, 5, 6, 7, 8],
+        game: { scores: { time: 240, timeLimit: 240, red: 4, blue: 1, scoreLimit: 4 } },
+    };
+    const perPlayerStat = { 1: { goals: 3, assists: 1, CS: 1, playtime: 240 }, 2: { goals: 1, assists: 0, CS: 0, playtime: 240 } };
+
+    const bffRoomStats = require(path.join(CORE, 'bff', 'roomStats'))({
+        room: roomMock, state: stateLocal, Team: TeamLocal, authArray: authArrayLocal, db,
+        HaxStatistics: HaxStatisticsLocal, HaxNotification, errorColor: 2, teamSize: 4,
+        getAssistsPlayer: (p) => perPlayerStat[p.id].assists,
+        getCSPlayer: (p) => perPlayerStat[p.id].CS,
+        getGametimePlayer: (p) => perPlayerStat[p.id].playtime,
+        getGoalsPlayer: (p) => perPlayerStat[p.id].goals,
+        getOwnGoalsPlayer: () => 0,
+        getPlayerComp: (player) => player,
+        getTimeStats: (seconds) => `${Math.floor(seconds / 60)}m`,
+    });
+
+    await bffRoomStats.updatePlayerStats({ id: 1, name: 'Alice' }, TeamLocal.RED);
+    await bffRoomStats.updatePlayerStats({ id: 2, name: 'Bob' }, TeamLocal.BLUE);
+    check('goals persisted for the winner', db.getPlayerStats('AUTH_ALICE').goals, 3);
+    check('wins only counted for the winning team', db.getPlayerStats('AUTH_BOB').wins, 0);
+    check('wins counted for the winning side', db.getPlayerStats('AUTH_ALICE').wins, 1);
+    check('no club stat crediting happens at all (BFF has no clubs) — confirmed via db.getAllClubs staying empty', db.getAllClubs(), []);
+
+    // updateStats() needs a genuine full 4v4 (teamSize=4 per side) to fire.
+    stateLocal.teamRedStats = [1, 2, 3, 4].map((id) => ({ id, name: 'R' + id }));
+    stateLocal.teamBlueStats = [5, 6, 7, 8].map((id) => ({ id, name: 'B' + id }));
+    authArrayLocal[3] = ['AUTH_R3']; authArrayLocal[4] = ['AUTH_R4'];
+    authArrayLocal[5] = ['AUTH_B5']; authArrayLocal[6] = ['AUTH_B6']; authArrayLocal[7] = ['AUTH_B7']; authArrayLocal[8] = ['AUTH_B8'];
+    perPlayerStat[3] = { goals: 0, assists: 0, CS: 0, playtime: 240 };
+    perPlayerStat[4] = { goals: 0, assists: 0, CS: 0, playtime: 240 };
+    [5, 6, 7, 8].forEach((id) => { perPlayerStat[id] = { goals: 0, assists: 0, CS: 0, playtime: 240 }; });
+    await bffRoomStats.updateStats();
+    check('updateStats() on a genuine full 4v4 saves every player, not just RED/BLUE\'s first entry', db.getPlayerStats('AUTH_R4').games, 1);
+    check('...including the losing side', db.getPlayerStats('AUTH_B8').games, 1);
+
+    sentLocal.length = 0;
+    await bffRoomStats.printRankings('goals', 0);
+    check('printRankings works standalone for a single stat category', sentLocal.length, 1);
+
+    sentLocal.length = 0;
+    await bffRoomStats.printRankings('rating', 5);
+    check('printRankings(\'rating\') with too few rated players tells the ASKING player, not broadcasts', sentLocal[0].id, 5);
+
+    db.saveRating('AUTH_ALICE', 'Alice', 35, 3);
+    db.saveRating('AUTH_BOB', 'Bob', 30, 3);
+    db.saveRating('AUTH_R3', 'R3', 25, 3);
+    db.saveRating('AUTH_R4', 'R4', 20, 3);
+    db.saveRating('AUTH_B5', 'B5', 15, 3);
+    sentLocal.length = 0;
+    await bffRoomStats.printRankings('rating', 0);
+    check('printRankings(\'rating\') shows the rating leaderboard once 5 players are rated', /^Рейтинг>/.test(sentLocal[0].msg), true);
+
+    sentLocal.length = 0;
+    await bffRoomStats.printAllRankings(0);
+    check('printAllRankings includes a rating line', sentLocal[0].msg.includes('Рейтинг>'), true);
+    check('...but never a clubs line (BFF has no clubs at all, unlike the main room\'s buildAllRankingsText)', sentLocal[0].msg.includes('Клубы>'), false);
+
+    db.close();
+})();
+
+console.log('--- core/bff/commands.js: !me/!tops/!help, no economy/clubs ---');
+(async () => {
+    const { createSqliteDatabase } = require(path.join(__dirname, '..', 'db', 'sqlite'));
+    const db = createSqliteDatabase(':memory:');
+    db.init();
+    db.savePlayerStats('AUTH_1', { playerName: 'Player1', games: 5, wins: 3, goals: 4, assists: 1, ownGoals: 0, CS: 1, playtime: 300 });
+    db.saveRating('AUTH_1', 'Player1', 30, 4);
+
+    const RoleLocal = { PLAYER: 0, VIP: 1, ADMIN_TEMP: 2, ADMIN_PERM: 3, MASTER: 4 };
+    const HaxNotificationMock = { NONE: 0, CHAT: 1, MENTION: 2 };
+    const HaxStatisticsLocal = function (playerName = '') {
+        this.playerName = playerName; this.games = 0; this.wins = 0; this.winrate = '0.00%'; this.playtime = 0;
+        this.goals = 0; this.assists = 0; this.CS = 0; this.ownGoals = 0;
+    };
+    const sentLocal = [];
+    const roomMock = { sendAnnouncement: (msg, id, color, style) => sentLocal.push({ msg, id, style }) };
+    const authArrayLocal = { 1: ['AUTH_1'], 2: ['AUTH_NEW'] };
+    const printAllRankingsCalls = [];
+    const printRankingsCalls = [];
+    const bffRoomStatsMock = {
+        printAllRankings: async (id) => printAllRankingsCalls.push(id),
+        printRankings: async (key, id) => printRankingsCalls.push({ key, id }),
+    };
+    const { computeOrdinal } = require(path.join(CORE, 'bff', 'rating'));
+
+    const bffCommands = require(path.join(CORE, 'bff', 'commands'))({
+        room: roomMock, state: {}, authArray: authArrayLocal, db, HaxStatistics: HaxStatisticsLocal,
+        HaxNotification: HaxNotificationMock, Role: RoleLocal,
+        infoColor: 1, errorColor: 2, successColor: 3, getTimeStats: (s) => `${Math.floor(s / 60)}m`,
+        getRole: (p) => (p.auth === 'AUTH_MASTER' ? RoleLocal.MASTER : p.auth === 'AUTH_ADMIN' ? RoleLocal.ADMIN_PERM : RoleLocal.PLAYER),
+        computeOrdinal,
+        bffRoomStats: bffRoomStatsMock,
+    });
+
+    // --- !me: existing stats + rating ---
+    sentLocal.length = 0;
+    await bffCommands.meCommand({ id: 1, name: 'Player1', auth: 'AUTH_1' });
+    check('!me shows existing stats', sentLocal[0].msg.includes('🕹️ 5 игр'), true);
+    check('!me shows a rating line when the player has one', sentLocal[0].msg.includes('⚔️ Рейтинг:'), true);
+    check('...matching computeOrdinal for the saved 30/4 rating', sentLocal[0].msg.includes(`${Math.round(computeOrdinal({ mu: 30, sigma: 4 }))}`), true);
+
+    // --- !me: a player with no stats/rating yet gets a fresh blank block, not an error ---
+    sentLocal.length = 0;
+    await bffCommands.meCommand({ id: 2, name: 'Newbie', auth: 'AUTH_NEW' });
+    check('!me for a brand new player shows 0 games rather than erroring', sentLocal[0].msg.includes('🕹️ 0 игр'), true);
+    check('...and no rating line at all (never played a ranked match)', sentLocal[0].msg.includes('Рейтинг'), false);
+
+    // --- !tops: dispatch ---
+    printAllRankingsCalls.length = 0;
+    await bffCommands.topsCommand({ id: 1 }, '!tops');
+    check('!tops with no argument shows the combined view', printAllRankingsCalls, [1]);
+
+    printRankingsCalls.length = 0;
+    await bffCommands.topsCommand({ id: 1 }, '!tops rating');
+    check('!tops rating dispatches to the rating leaderboard specifically', printRankingsCalls, [{ key: 'rating', id: 1 }]);
+
+    printRankingsCalls.length = 0;
+    await bffCommands.topsCommand({ id: 1 }, '!tops cs');
+    check('!tops cs maps to the CS column (case-corrected)', printRankingsCalls, [{ key: 'CS', id: 1 }]);
+
+    sentLocal.length = 0;
+    await bffCommands.topsCommand({ id: 1 }, '!tops clubs');
+    check('!tops clubs is rejected — BFF has no clubs at all, unlike the main room', sentLocal.some((s) => /Использование/.test(s.msg)), true);
+
+    // --- !rename ---
+    sentLocal.length = 0;
+    await bffCommands.renameCommand({ id: 1, name: 'Player1', auth: 'AUTH_1' }, '!rename New Name');
+    check('!rename with an argument updates playerName', sentLocal[0].msg.includes('New Name'), true);
+    check('...and it actually persists', (await db.getPlayerStats('AUTH_1')).playerName, 'New Name');
+
+    sentLocal.length = 0;
+    await bffCommands.renameCommand({ id: 1, name: 'Player1', auth: 'AUTH_1' }, '!rename');
+    check('!rename with no argument resets to the current in-room name', (await db.getPlayerStats('AUTH_1')).playerName, 'Player1');
+
+    sentLocal.length = 0;
+    await bffCommands.renameCommand({ id: 2, name: 'Newbie', auth: 'AUTH_NEW' }, '!rename Whoami');
+    check('!rename for a player with no stats row yet is refused, not a crash', sentLocal[0].msg.includes('еще не играли'), true);
+
+    // --- !help: moderation section is Role.MASTER-gated only, same as the
+    // main room's own commands.js (regular admins get the native HaxBall
+    // badge/powers, not these bot commands) ---
+    sentLocal.length = 0;
+    bffCommands.helpCommand({ id: 1, auth: 'AUTH_PLAYER' });
+    check('a plain player never sees the owner/moderation section', sentLocal[0].msg.includes('Владелец:'), false);
+
+    sentLocal.length = 0;
+    bffCommands.helpCommand({ id: 1, auth: 'AUTH_ADMIN' });
+    check('a regular admin does NOT see it either — moderation commands are master-only', sentLocal[0].msg.includes('Владелец:'), false);
+
+    sentLocal.length = 0;
+    bffCommands.helpCommand({ id: 1, auth: 'AUTH_MASTER' });
+    check('a master sees the owner/moderation section', sentLocal[0].msg.includes('Владелец:'), true);
+
+    // --- !help: the "Админ:" section (mute/hide) is Role.ADMIN_TEMP-gated
+    // — a lower bar than the owner-only section above ---
+    sentLocal.length = 0;
+    bffCommands.helpCommand({ id: 1, auth: 'AUTH_PLAYER' });
+    check('a plain player does not see the admin (mute/hide) section either', sentLocal[0].msg.includes('Админ:'), false);
+
+    sentLocal.length = 0;
+    bffCommands.helpCommand({ id: 1, auth: 'AUTH_ADMIN' });
+    check('a regular admin DOES see the admin section — mute/hide are ADMIN_TEMP+, not master-only', sentLocal[0].msg.includes('Админ:'), true);
+
+    sentLocal.length = 0;
+    bffCommands.helpCommand({ id: 1, auth: 'AUTH_MASTER' });
+    check('a master sees the admin section too (MASTER >= ADMIN_TEMP)', sentLocal[0].msg.includes('Админ:'), true);
+
+    db.close();
+})();
+
+console.log('--- core/bff/events.js: room.onXxx handlers, trimmed of economy/poker/club hooks ---');
+(async () => {
+    const { createSqliteDatabase } = require(path.join(__dirname, '..', 'db', 'sqlite'));
+    const db = createSqliteDatabase(':memory:');
+    db.init();
+    db.banAuth('AUTH_BANNED', 'Banned', 'aimbot', 60);
+
+    const TeamLocal = { RED: 1, BLUE: 2, SPECTATORS: 0 };
+    const StateLocal = { STOP: 0, PLAY: 1 };
+    const SituationLocal = { STOP: 0, KICKOFF: 1, PLAY: 2, GOAL: 3 };
+    const RoleLocal = { PLAYER: 0, VIP: 1, ADMIN_TEMP: 2, ADMIN_PERM: 3, MASTER: 4 };
+    const HaxNotificationMock = { NONE: 0, CHAT: 1, MENTION: 2 };
+    const GameLocal = class { constructor(r, getLineups) { this.scores = r.getScores(); this.playerComp = getLineups(); this.goals = []; this.rec = r.startRecording(); } };
+
+    const sentLocal = [];
+    const roomCallsLocal = [];
+    let currentScores = { red: 2, blue: 1, scoreLimit: 4, time: 100 };
+    const roomMock = {
+        sendAnnouncement: (msg, id, color, style) => sentLocal.push({ msg, id, style }),
+        kickPlayer: (id, reason, ban) => roomCallsLocal.push(`kickPlayer:${id}:${reason}:${ban}`),
+        setPlayerAdmin: (id, v) => roomCallsLocal.push(`setPlayerAdmin:${id}:${v}`),
+        clearBan: (id) => roomCallsLocal.push(`clearBan:${id}`),
+        stopGame: () => roomCallsLocal.push('stopGame'),
+        startRecording: () => 'REC',
+        stopRecording: () => 'STOPPED_REC',
+        getScores: () => currentScores,
+        setKickRateLimit: (min, rate, burst) => roomCallsLocal.push(`setKickRateLimit:${min}:${rate}:${burst}`),
+    };
+    const discordLogs = [];
+    const discordBot = { sendLog: (msg) => discordLogs.push(msg), updateRoomStatus: () => {} };
+    const matchFlowCalls = [];
+    const matchFlowMock = {
+        handlePlayersJoin: () => matchFlowCalls.push('join'),
+        handlePlayersLeave: () => matchFlowCalls.push('leave'),
+        handlePlayersStop: (byPlayer, outcome) => matchFlowCalls.push({ fn: 'stop', byPlayer, outcome }),
+    };
+    const updateStatsCalls = [];
+    const bffRoomStatsMock = { updateStats: async () => { updateStatsCalls.push(1); } };
+    const fetchSummaryEmbedCalls = [];
+    const fetchRecordingCalls = [];
+    const authArrayLocal = [];
+    const stateLocal = {
+        playersAll: [], adminList: [], gameState: StateLocal.PLAY, endGameVariable: false, playSituation: SituationLocal.PLAY,
+        lastWinner: TeamLocal.SPECTATORS, teamRed: [], teamBlue: [], teamRedStats: [], teamBlueStats: [], banList: [],
+        lastTouches: [null, null], lastTeamTouched: undefined, game: { scores: {} }, specQueueSince: new Map(),
+    };
+    const ghostKicks = [];
+    const lineupCalls = [];
+    let goalStringCalls = 0;
+
+    const events = require(path.join(CORE, 'bff', 'events'))({
+        room: roomMock, state: stateLocal, authArray: authArrayLocal, db, Team: TeamLocal, State: StateLocal, Situation: SituationLocal, Game: GameLocal,
+        HaxNotification: HaxNotificationMock, Role: RoleLocal,
+        announcementColor: 1, errorColor: 2, infoColor: 3, welcomeColor: 4, redColor: 5, blueColor: 6,
+        masterList: ['AUTH_MASTER'], maxPlayers: 14, discordBot,
+        getDate: () => 'DATE', getRole: (p) => (p.auth === 'AUTH_MASTER' ? RoleLocal.MASTER : RoleLocal.PLAYER),
+        getGoalString: (team) => { goalStringCalls++; return `GOAL:${team}`; }, getPlayerComp: () => null,
+        getStartingLineups: () => [[], []],
+        handleLineupChangeLeave: (p) => lineupCalls.push({ fn: 'leave', id: p.id }),
+        handleLineupChangeTeamChange: (p) => lineupCalls.push({ fn: 'teamChange', id: p.id }),
+        ghostKickHandle: (oldP, newP) => ghostKicks.push({ oldId: oldP.id, newId: newP.id }),
+        updateTeams: () => { stateLocal.playersAll = stateLocal.playersAll; },
+        calculateStadiumVariables: () => {},
+        checkOverflowPassword: () => {},
+        endGame: (winner) => { stateLocal.lastWinner = winner; stateLocal.endGameVariable = true; },
+        matchFlow: matchFlowMock,
+        bffRoomStats: bffRoomStatsMock,
+        teamSize: 4,
+        fetchSummaryEmbed: (game) => fetchSummaryEmbedCalls.push(game),
+        fetchRecording: (game, bot) => fetchRecordingCalls.push({ game, bot }),
+    });
+
+    // --- join: banned auth is kicked, never joins ---
+    await events.onPlayerJoin({ id: 1, name: 'Banned', auth: 'AUTH_BANNED', conn: 'C1' });
+    check('a banned auth is kicked immediately on join', roomCallsLocal, ['kickPlayer:1:Вы забанены: aimbot:false']);
+    check('a banned auth never triggers matchFlow.handlePlayersJoin', matchFlowCalls, []);
+
+    // --- join: clean auth joins normally ---
+    roomCallsLocal.length = 0; sentLocal.length = 0; matchFlowCalls.length = 0;
+    stateLocal.playersAll = [{ id: 2, name: 'Newbie' }];
+    await events.onPlayerJoin({ id: 2, name: 'Newbie', auth: 'AUTH_NEW', conn: 'C2' });
+    check('a clean auth is not kicked', roomCallsLocal.some((c) => c.startsWith('kickPlayer')), false);
+    check('matchFlow.handlePlayersJoin fires for a real join', matchFlowCalls, ['join']);
+    check('a fresh join is stamped into the fairness queue (see matchFlow.js)', stateLocal.specQueueSince.has(2), true);
+
+    // --- join: master gets the admin badge + owner announcement ---
+    roomCallsLocal.length = 0; sentLocal.length = 0;
+    stateLocal.playersAll = [{ id: 3, name: 'Boss' }];
+    await events.onPlayerJoin({ id: 3, name: 'Boss', auth: 'AUTH_MASTER', conn: 'C3' });
+    check('a master gets the room admin badge on join', roomCallsLocal.includes('setPlayerAdmin:3:true'), true);
+    check('...and a distinct owner-joined announcement', sentLocal.some((s) => /Владелец Boss/.test(s.msg)), true);
+
+    // --- join: duplicate auth already present triggers ghost-kick ---
+    authArrayLocal[9] = ['AUTH_DUP', 'CONN_OLD'];
+    stateLocal.playersAll = [{ id: 9, name: 'Existing' }];
+    ghostKicks.length = 0;
+    await events.onPlayerJoin({ id: 10, name: 'Existing', auth: 'AUTH_DUP', conn: 'CONN_NEW' });
+    check('a duplicate auth already in the room triggers a ghost-kick of the OLD connection', ghostKicks, [{ oldId: 9, newId: 10 }]);
+
+    // --- leave ---
+    matchFlowCalls.length = 0; lineupCalls.length = 0;
+    events.onPlayerLeave({ id: 2, name: 'Newbie' });
+    check('matchFlow.handlePlayersLeave fires synchronously on leave', matchFlowCalls, ['leave']);
+    check('...and their fairness-queue entry is cleaned up', stateLocal.specQueueSince.has(2), false);
+    check('handleLineupChangeLeave fires too, keeping playerComp accurate for stats', lineupCalls, [{ fn: 'leave', id: 2 }]);
+
+    // --- team change: just bookkeeping, no captain-pick complexity ---
+    lineupCalls.length = 0;
+    events.onPlayerTeamChange({ id: 4, name: 'Mover' });
+    check('onPlayerTeamChange calls handleLineupChangeTeamChange', lineupCalls, [{ fn: 'teamChange', id: 4 }]);
+
+    // --- kicked: master is immune, ban is reversed ---
+    authArrayLocal[5] = ['AUTH_ADMIN', 'CONN5'];
+    roomCallsLocal.length = 0;
+    events.onPlayerKicked({ id: 3, name: 'Boss', auth: 'AUTH_MASTER' }, 'test', true, { id: 5, name: 'Admin', auth: 'AUTH_ADMIN' });
+    check('banning a master gets reversed (clearBan), the ban never sticks', roomCallsLocal, ['clearBan:3']);
+
+    // --- kicked: any non-master issuing a real BAN gets it silently
+    // downgraded to just a kick (clearBan) — only a MASTER's ban actually
+    // sticks. Matches the main room's movement.js exactly.
+    authArrayLocal[5] = ['AUTH_ADMIN', 'CONN5'];
+    authArrayLocal[6] = ['AUTH_VICTIM', 'CONN6'];
+    roomCallsLocal.length = 0; sentLocal.length = 0;
+    events.onPlayerKicked({ id: 6, name: 'Victim', auth: 'AUTH_VICTIM' }, 'test', true, { id: 5, name: 'Admin', auth: 'AUTH_ADMIN' });
+    check('a ban issued by anyone below MASTER is silently reversed (clearBan), not left standing', roomCallsLocal, ['clearBan:6']);
+
+    // --- kicked: a non-admin issuing a plain KICK (not a ban) gets refused and de-adminned ---
+    authArrayLocal[7] = ['AUTH_RANDO', 'CONN7'];
+    roomCallsLocal.length = 0; sentLocal.length = 0;
+    events.onPlayerKicked({ id: 6, name: 'Victim', auth: 'AUTH_VICTIM' }, 'test', false, { id: 7, name: 'Rando', auth: 'AUTH_RANDO' });
+    check('a non-admin issuing a plain kick is refused', sentLocal.some((s) => /не разрешено/.test(s.msg)), true);
+    check('...and has their own (illegitimately-held) admin badge revoked', roomCallsLocal.includes('setPlayerAdmin:7:false'), true);
+
+    // --- kicked: a MASTER's real ban actually sticks and is recorded ---
+    authArrayLocal[8] = ['AUTH_GRIEFER', 'CONN8'];
+    stateLocal.banList = [];
+    roomCallsLocal.length = 0;
+    events.onPlayerKicked({ id: 8, name: 'Griefer', auth: 'AUTH_GRIEFER' }, 'test', true, { id: 3, name: 'Boss', auth: 'AUTH_MASTER' });
+    check('a master\'s ban is NOT reversed (no clearBan call)', roomCallsLocal.some((c) => c.startsWith('clearBan')), false);
+    check('...and is recorded in state.banList for !banlist/!clearbans', stateLocal.banList, [['Griefer', 8]]);
+
+    // --- game start: populates teamRedStats/teamBlueStats only on a genuine full 4v4 ---
+    stateLocal.teamRed = [1, 2, 3, 4].map((id) => ({ id }));
+    stateLocal.teamBlue = [5, 6, 7, 8].map((id) => ({ id }));
+    const staleStopTimeoutFired = [];
+    stateLocal.stopTimeout = setTimeout(() => staleStopTimeoutFired.push(true), 5);
+    roomCallsLocal.length = 0;
+    events.onGameStart();
+    check('onGameStart snapshots all 4 red players for stats eligibility on a genuine 4v4', stateLocal.teamRedStats.length, 4);
+    check('...and all 4 blue', stateLocal.teamBlueStats.length, 4);
+    check('onGameStart resets endGameVariable', stateLocal.endGameVariable, false);
+    check('onGameStart constructs a real state.game (needed by onTeamGoal/checkTime downstream)', stateLocal.game instanceof GameLocal, true);
+    check('...which started a real recording', stateLocal.game.rec, 'REC');
+    check('onGameStart sets playSituation to KICKOFF', stateLocal.playSituation, SituationLocal.KICKOFF);
+    // Real gap found comparing against the main room's own onGameStart —
+    // see events.js's own comment on why this matters (events/misc.js's
+    // onKickRateLimitSet slams it to (6,0,0) on tampering; nothing else
+    // ever restored it without this).
+    check('onGameStart re-applies the real kick rate limit (6,12,4), undoing any onKickRateLimitSet lockdown', roomCallsLocal.includes('setKickRateLimit:6:12:4'), true);
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    check('onGameStart cleared the stale scheduled state.stopTimeout — it never fires', staleStopTimeoutFired, []);
+
+    // --- game stop: a natural end (byPlayer null + endGameVariable true) persists stats + rating ---
+    stateLocal.lastWinner = TeamLocal.RED;
+    stateLocal.endGameVariable = true;
+    updateStatsCalls.length = 0; matchFlowCalls.length = 0; fetchSummaryEmbedCalls.length = 0; fetchRecordingCalls.length = 0;
+    await events.onGameStop(null);
+    check('a natural game-stop persists stats via bffRoomStats.updateStats', updateStatsCalls.length, 1);
+    check('...and hands matchFlow the correct outcome derived from state.lastWinner', matchFlowCalls, [{ fn: 'stop', byPlayer: null, outcome: 'red' }]);
+    check('onGameStop sets playSituation back to STOP', stateLocal.playSituation, SituationLocal.STOP);
+    check('onGameStop stops the recording (state.game.rec updated)', stateLocal.game.rec, 'STOPPED_REC');
+    check('...and posts a match-report embed to Discord', fetchSummaryEmbedCalls.length, 1);
+    await new Promise((resolve) => setTimeout(resolve, 700)); // fetchRecording is scheduled 500ms out, same as the main room's own onGameStop
+    check('...and, shortly after, uploads the recording too', fetchRecordingCalls.length, 1);
+
+    // --- game stop: a forced stop (admin/native, byPlayer set) skips stats AND the report/recording upload, but still tells matchFlow ---
+    updateStatsCalls.length = 0; matchFlowCalls.length = 0; fetchSummaryEmbedCalls.length = 0; fetchRecordingCalls.length = 0;
+    await events.onGameStop({ id: 99, name: 'Admin' });
+    check('a forced stop does NOT persist stats', updateStatsCalls.length, 0);
+    check('...and does NOT post a match report either', fetchSummaryEmbedCalls.length, 0);
+    check('...but matchFlow still gets told, with a null outcome', matchFlowCalls, [{ fn: 'stop', byPlayer: { id: 99, name: 'Admin' }, outcome: null }]);
+
+    // --- team goal: reaching the score limit ends the match ---
+    stateLocal.game = { scores: {} };
+    stateLocal.lastWinner = TeamLocal.SPECTATORS;
+    stateLocal.endGameVariable = false;
+    currentScores = { red: 4, blue: 1, scoreLimit: 4, time: 200 };
+    roomCallsLocal.length = 0;
+    goalStringCalls = 0;
+    events.onTeamGoal(TeamLocal.RED);
+    check('reaching the score limit calls endGame for the scoring team', stateLocal.lastWinner, TeamLocal.RED);
+    check('...and endGameVariable is set', stateLocal.endGameVariable, true);
+    check('playSituation is set to GOAL', stateLocal.playSituation, SituationLocal.GOAL);
+    check('getGoalString is called exactly once, not twice (it has a side effect — double-calling would double-record the goal)', goalStringCalls, 1);
+
+    // --- team goal: golden goal ends the match on ANY goal, well below the
+    // score limit — draws are not possible, same as the main room ---
+    stateLocal.game = { scores: {} };
+    stateLocal.lastWinner = TeamLocal.SPECTATORS;
+    stateLocal.endGameVariable = false;
+    stateLocal.goldenGoal = true;
+    currentScores = { red: 2, blue: 1, scoreLimit: 4, time: 300 }; // nowhere near the 4-goal limit
+    events.onTeamGoal(TeamLocal.RED);
+    check('a golden-goal goal ends the match despite being far below the score limit', stateLocal.lastWinner, TeamLocal.RED);
+    check('...and endGameVariable is set', stateLocal.endGameVariable, true);
+    check('...and goldenGoal is cleared for the next match', stateLocal.goldenGoal, false);
+
+    // --- team goal: NOT golden goal and below the score limit does nothing ---
+    stateLocal.lastWinner = TeamLocal.SPECTATORS;
+    stateLocal.endGameVariable = false;
+    stateLocal.goldenGoal = false;
+    currentScores = { red: 2, blue: 1, scoreLimit: 4, time: 300 };
+    events.onTeamGoal(TeamLocal.RED);
+    check('an ordinary goal below the score limit, no golden goal, does not end the match', stateLocal.endGameVariable, false);
+
+    // --- game start resets goldenGoal for the next match ---
+    stateLocal.goldenGoal = true;
+    stateLocal.teamRed = []; stateLocal.teamBlue = [];
+    events.onGameStart();
+    check('onGameStart resets goldenGoal', stateLocal.goldenGoal, false);
+
+    db.close();
+})();
+
+console.log('--- core/bff/chatGuard.js: spam-flood auto-mute + !mute/!unmute/!mutes/!hide ---');
+{
+    const { MuteList, createMutePlayerClass } = require(path.join(CORE, 'models'));
+    const HaxNotificationMock = { CHAT: 1 };
+    const sentLocal = [];
+    const roomCallsLocal = [];
+    const players = [
+        { id: 1, name: 'Spammer', admin: false },
+        { id: 2, name: 'Boss', admin: true },
+        { id: 3, name: 'Target', admin: false },
+    ];
+    const roomLocal = {
+        sendAnnouncement: (msg, id, color, style) => sentLocal.push({ msg, id, style }),
+        setPlayerAdmin: (id, v) => roomCallsLocal.push(`setPlayerAdmin:${id}:${v}`),
+        getPlayer: (id) => players.find((p) => p.id === id) ?? null,
+    };
+    const authArrayLocal = [];
+    authArrayLocal[1] = ['AUTH_SPAMMER'];
+    authArrayLocal[2] = ['AUTH_BOSS'];
+    authArrayLocal[3] = ['AUTH_TARGET'];
+    const hiddenAdminsSetLocal = new Set();
+    const muteArrayReal = new MuteList();
+    const MutePlayerReal = createMutePlayerClass({ room: roomLocal, announcementColor: 1, HaxNotification: HaxNotificationMock, muteArray: muteArrayReal });
+
+    const chatGuard = require(path.join(CORE, 'bff', 'chatGuard'))({
+        room: roomLocal, authArray: authArrayLocal, MutePlayer: MutePlayerReal, muteArray: muteArrayReal,
+        hiddenAdminsSet: hiddenAdminsSetLocal, announcementColor: 1, errorColor: 2, HaxNotification: HaxNotificationMock,
+        muteDuration: 5, spamWindowMs: 80, spamMessageThreshold: 3, spamMuteMinutes: 5,
+    });
+
+    // --- checkSpamFlood: real threshold behavior (own isolated block, not
+    // interleaved with the mute-command tests below, since it auto-mutes
+    // real entries into the same muteArray) ---
+    {
+        const floodSpammer = { id: 1, name: 'Spammer', admin: false };
+        chatGuard.checkSpamFlood(floodSpammer);
+        chatGuard.checkSpamFlood(floodSpammer);
+        check('not muted yet after 2 messages (threshold is 3)', chatGuard.isMuted(floodSpammer), false);
+        sentLocal.length = 0;
+        chatGuard.checkSpamFlood(floodSpammer);
+        check('auto-muted on the 3rd message inside the window', chatGuard.isMuted(floodSpammer), true);
+        check('...and announced to the whole room', sentLocal.some((s) => /автоматически замучен/.test(s.msg)), true);
+
+        chatGuard.announceMuted(floodSpammer);
+        check('announceMuted tells the muted player specifically', sentLocal[sentLocal.length - 1].id, 1);
+
+        const adminFlooder = { id: 2, name: 'Boss', admin: true };
+        for (let i = 0; i < 5; i++) chatGuard.checkSpamFlood(adminFlooder);
+        check('an admin is exempt from spam-flood muting', chatGuard.isMuted(adminFlooder), false);
+
+        // Clean up for the mute-command tests below.
+        const spammerMute = muteArrayReal.getByAuth('AUTH_SPAMMER');
+        if (spammerMute) spammerMute.remove();
+    }
+
+    // --- !mute #<id> [минуты] ---
+    sentLocal.length = 0;
+    chatGuard.muteCommand({ id: 2 }, '!mute #3');
+    check('!mute with no duration arg mutes the target', muteArrayReal.getByAuth('AUTH_TARGET') != null, true);
+    check('...for the default duration (5 min)', sentLocal[0].msg.includes('5 минут'), true);
+
+    const targetMute = muteArrayReal.getByAuth('AUTH_TARGET');
+    if (targetMute) targetMute.remove();
+
+    sentLocal.length = 0;
+    chatGuard.muteCommand({ id: 2 }, '!mute #3 20');
+    check('!mute with an explicit duration uses it', sentLocal[0].msg.includes('20 минут'), true);
+
+    sentLocal.length = 0;
+    chatGuard.muteCommand({ id: 1 }, '!mute #2');
+    check('an admin target cannot be muted', sentLocal[0].msg.includes('не можете замутить администратора'), true);
+    check('...and no mute was actually recorded for them', muteArrayReal.getByAuth('AUTH_BOSS'), null);
+
+    sentLocal.length = 0;
+    chatGuard.muteCommand({ id: 1 }, '!mute #999');
+    check('!mute on an unknown id shows an error, not a crash', sentLocal[0].msg.includes('нет в комнате'), true);
+
+    // --- !unmute ---
+    sentLocal.length = 0;
+    chatGuard.unmuteCommand({ id: 2 }, '!unmute #3');
+    check('!unmute #<id> lifts an active mute', muteArrayReal.getByAuth('AUTH_TARGET'), null);
+    check('...and confirms it', sentLocal[0].msg.includes('размучен'), true);
+
+    sentLocal.length = 0;
+    chatGuard.unmuteCommand({ id: 2 }, '!unmute #3');
+    check('!unmute on a player who is NOT muted reports that instead of erroring', sentLocal[0].msg.includes('не замучен'), true);
+
+    // --- !mutes ---
+    chatGuard.muteCommand({ id: 2 }, '!mute #3 5');
+    sentLocal.length = 0;
+    chatGuard.muteListCommand({ id: 2 });
+    check('!mutes lists the currently-muted player', sentLocal[0].msg.includes('Target'), true);
+    muteArrayReal.getByAuth('AUTH_TARGET')?.remove();
+
+    sentLocal.length = 0;
+    chatGuard.muteListCommand({ id: 2 });
+    check('!mutes with an empty list says so, not an empty string', sentLocal[0].msg.includes('никого нет'), true);
+
+    // --- !hide ---
+    roomCallsLocal.length = 0;
+    chatGuard.hideCommand({ id: 2 });
+    check('!hide removes the admin badge', roomCallsLocal, ['setPlayerAdmin:2:false']);
+    check('!hide records the player as hidden', hiddenAdminsSetLocal.has(2), true);
+
+    roomCallsLocal.length = 0;
+    chatGuard.hideCommand({ id: 2 });
+    check('!hide again restores the admin badge', roomCallsLocal, ['setPlayerAdmin:2:true']);
+    check('!hide again clears the hidden flag', hiddenAdminsSetLocal.has(2), false);
+}
+
+console.log('--- core/bff/afk.js: voluntary !afk toggle / "jj" exit / !afks, matchFlow-driven ---');
+(async () => {
+    const HaxNotificationMock = { CHAT: 1, MENTION: 2 };
+    const TeamLocal = { RED: 1, BLUE: 2, SPECTATORS: 0 };
+    const StateLocal = { STOP: 0, PLAY: 1 };
+    const RoleLocal = { PLAYER: 0, VIP: 1, ADMIN_TEMP: 2, ADMIN_PERM: 3, MASTER: 4 };
+    const sentLocal = [];
+    const roomCallsLocal = [];
+    const players = [{ id: 1, name: 'Casual', team: TeamLocal.SPECTATORS, admin: false }];
+    const roomLocal = {
+        sendAnnouncement: (msg, id, color, style) => sentLocal.push({ msg, id, style }),
+        setPlayerTeam: (id, team) => roomCallsLocal.push(`setPlayerTeam:${id}:${team}`),
+        getPlayer: (id) => players.find((p) => p.id === id) ?? null,
+    };
+    const stateLocal = { gameState: StateLocal.PLAY, players: [], specQueueSince: new Map() };
+    const matchFlowCalls = [];
+    const matchFlowMock = {
+        handlePlayersJoin: async () => { matchFlowCalls.push('join'); },
+        handlePlayersLeave: async () => { matchFlowCalls.push('leave'); },
+    };
+    const AFKSetLocal = new Map();
+    const AFKMinSetLocal = new Set();
+    const AFKCooldownSetLocal = new Set();
+
+    const afk = require(path.join(CORE, 'bff', 'afk'))({
+        room: roomLocal, state: stateLocal, Team: TeamLocal, State: StateLocal, Role: RoleLocal,
+        AFKSet: AFKSetLocal, AFKMinSet: AFKMinSetLocal, AFKCooldownSet: AFKCooldownSetLocal,
+        // Tiny real durations (not mocked away) so the min-duration lock is
+        // actually exercised, same trade-off the main room's own AFK tests
+        // make elsewhere in this file — maxAFKDuration deliberately huge
+        // (5s) so its own auto-return timer never fires mid-test and races
+        // the manual "jj" exit below.
+        minAFKDuration: 20 / 60000, maxAFKDuration: 5000 / 60000, maxAFKDurationVip: 5000 / 60000, AFKCooldown: 5 / 60000, maxAFKCount: 2,
+        announcementColor: 1, errorColor: 2, HaxNotification: HaxNotificationMock,
+        getRole: () => RoleLocal.PLAYER, updateTeams: () => {}, matchFlow: matchFlowMock,
+    });
+
+    const player = { id: 1, name: 'Casual', team: TeamLocal.SPECTATORS, admin: false };
+
+    // --- going AFK ---
+    matchFlowCalls.length = 0;
+    await afk.afkCommand(player);
+    check('going AFK from spectators records the session', AFKSetLocal.has(1), true);
+    check('...and hands the roster change to matchFlow.handlePlayersLeave', matchFlowCalls, ['leave']);
+
+    // --- "jj" swallowed while genuinely AFK, but locked by the min-duration timer ---
+    sentLocal.length = 0;
+    await afk.exitAfk(player);
+    check('exiting immediately (within minAFKDuration) is refused, not silently allowed', sentLocal[0].msg.includes('Минимальное время'), true);
+    check('...but the player is STILL AFK (the min-duration lock actually holds)', AFKSetLocal.has(1), true);
+
+    // --- once the min-duration lock has lifted, exit succeeds ---
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    matchFlowCalls.length = 0;
+    sentLocal.length = 0;
+    const exited = await afk.jjCommand(player);
+    check('"jj" actually exits AFK once the min-duration lock has lifted', exited, true);
+    check('...and the player is no longer in AFKSet', AFKSetLocal.has(1), false);
+    check('...and matchFlow.handlePlayersJoin is told', matchFlowCalls, ['join']);
+    // Fairness-queue fix found alongside this feature: without a fresh
+    // timestamp on exit, time spent AFK (deliberately opted OUT of
+    // playing) would silently count as queue wait time, unfairly
+    // outranking spectators who were genuinely present the whole time.
+    check('exiting AFK gets a fresh fairness-queue timestamp, not whatever stale one they had before going AFK', (Date.now() - stateLocal.specQueueSince.get(1)) < 1000, true);
+
+    // --- "jj" on someone who was never AFK is a no-op, not an error ---
+    const neverAfk = { id: 9, name: 'NeverAfk', team: TeamLocal.SPECTATORS, admin: false };
+    check('exitAfk on a non-AFK player returns false (falls through to ordinary chat)', await afk.exitAfk(neverAfk), false);
+
+    // --- AFK cap ---
+    AFKSetLocal.clear();
+    AFKSetLocal.set(101, Date.now());
+    AFKSetLocal.set(102, Date.now());
+    sentLocal.length = 0;
+    await afk.afkCommand({ id: 103, name: 'OneTooMany', team: TeamLocal.SPECTATORS, admin: false });
+    check('the AFK cap (2 here) refuses a 3rd concurrent AFK', sentLocal[0].msg.includes('не больше 2'), true);
+    check('...and does not add them to AFKSet', AFKSetLocal.has(103), false);
+    AFKSetLocal.clear();
+
+    // --- a player still on a team (mid-match) cannot go AFK ---
+    sentLocal.length = 0;
+    await afk.afkCommand({ id: 1, name: 'OnATeam', team: TeamLocal.RED, admin: false });
+    check('a player on a team, mid-match, cannot go AFK', sentLocal[0].msg.includes('пока находитесь в команде'), true);
+
+    // --- but the SAME on-a-team player CAN go AFK between rounds (State.STOP) ---
+    stateLocal.gameState = StateLocal.STOP;
+    roomCallsLocal.length = 0;
+    matchFlowCalls.length = 0;
+    await afk.afkCommand({ id: 1, name: 'BetweenRounds', team: TeamLocal.RED, admin: false });
+    check('between rounds, a still-on-a-team player CAN bench themselves into AFK', AFKSetLocal.has(1), true);
+    check('...and actually gets moved to spectators', roomCallsLocal, ['setPlayerTeam:1:0']);
+
+    // --- !afks listing ---
+    AFKSetLocal.clear();
+    check('!afks with nobody AFK says so', (() => { afk.afksCommand({ id: 1 }); return sentLocal[sentLocal.length - 1].msg; })().includes('никого нет'), true);
+    AFKSetLocal.set(1, Date.now());
+    sentLocal.length = 0;
+    afk.afksCommand({ id: 1 });
+    check('!afks lists a currently-AFK player by name', sentLocal[0].msg.includes('Casual'), true);
+})();
+
+console.log('--- core/bff/adminCall.js: !report (cooldown + restriction-aware admin call) ---');
+(async () => {
+    const HaxNotificationMock = { CHAT: 1, MENTION: 2 };
+    const sentLocal = [];
+    const roomLocal = { sendAnnouncement: (msg, id, color, style) => sentLocal.push({ msg, id, style }) };
+    const authArrayLocal = [];
+    authArrayLocal[1] = ['AUTH_1'];
+    authArrayLocal[2] = ['AUTH_RESTRICTED'];
+    let restriction = null;
+    const dbMock = { getCommandRestriction: async (auth) => (auth === 'AUTH_RESTRICTED' ? restriction : null) };
+    const adminCallsSent = [];
+    const discordBotMock = { sendAdminCall: (name) => adminCallsSent.push(name) };
+
+    const adminCall = require(path.join(CORE, 'bff', 'adminCall'))({
+        room: roomLocal, authArray: authArrayLocal, db: dbMock, errorColor: 2, HaxNotification: HaxNotificationMock,
+        discordBot: discordBotMock, formatBanRemaining: () => '5м', reportCooldownMs: 60,
+    });
+
+    await adminCall.reportCommand({ id: 1, name: 'Caller' });
+    check('a real !report announces to the room', sentLocal.some((s) => /позвал\(а\) администрацию/.test(s.msg)), true);
+    check('...and pings the Discord bridge', adminCallsSent, ['Caller']);
+
+    sentLocal.length = 0; adminCallsSent.length = 0;
+    await adminCall.reportCommand({ id: 1, name: 'Caller' });
+    check('a 2nd immediate !report is refused by the per-player cooldown', sentLocal[0].msg.includes('раз в минуту'), true);
+    check('...and does NOT ping Discord again', adminCallsSent, []);
+
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    sentLocal.length = 0; adminCallsSent.length = 0;
+    await adminCall.reportCommand({ id: 1, name: 'Caller' });
+    check('once the cooldown has elapsed, !report works again', adminCallsSent, ['Caller']);
+
+    restriction = { expiresAt: Date.now() + 300000, reason: 'спам-репорты' };
+    sentLocal.length = 0; adminCallsSent.length = 0;
+    await adminCall.reportCommand({ id: 2, name: 'Restricted' });
+    check('a restricted auth is refused before ever reaching the cooldown/announcement', sentLocal[0].msg.includes('запрещено использовать !report'), true);
+    check('...and the reason is included', sentLocal[0].msg.includes('спам-репорты'), true);
+    check('...and Discord is never pinged for a refused report', adminCallsSent, []);
+})();
+
+console.log('--- db/sqlite.js: rating persistence (getRating/saveRating/getRatingLeaderboard) ---');
+{
+    const { createSqliteDatabase } = require(path.join(__dirname, '..', 'db', 'sqlite'));
+    const db = createSqliteDatabase(':memory:');
+    db.init();
+
+    check('an auth with no ranked history has no rating yet', db.getRating('AUTH_NEW'), null);
+
+    db.saveRating('AUTH_NEW', 'Newbie', 27.5, 7.2);
+    check('a saved rating round-trips exactly', db.getRating('AUTH_NEW'), { mu: 27.5, sigma: 7.2 });
+
+    db.saveRating('AUTH_NEW', 'Newbie', 30.1, 6.8);
+    check('saving again for the same auth overwrites rather than duplicating', db.getRating('AUTH_NEW'), { mu: 30.1, sigma: 6.8 });
+
+    db.saveRating('AUTH_TOP', 'TopPlayer', 40, 2);
+    db.saveRating('AUTH_MID', 'MidPlayer', 27, 4);
+    const leaderboard = db.getRatingLeaderboard(10);
+    check('rating leaderboard only includes players who have actually been rated', leaderboard.length, 3);
+    // Ordinals: AUTH_TOP = 40-3*2 = 34, AUTH_MID = 27-3*4 = 15, AUTH_NEW = 30.1-3*6.8 = 9.7.
+    check('rating leaderboard is ordered by ordinal (mu - 3*sigma) descending, best first', leaderboard[0].auth, 'AUTH_TOP');
+    check('...worst last', leaderboard[leaderboard.length - 1].auth, 'AUTH_NEW');
+
+    db.close();
+}
 
 // The movement.js leave broadcast fires from inside a 10ms setTimeout, the
 // overflowPassword rotation check above waits 150ms for real interval

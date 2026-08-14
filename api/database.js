@@ -22,6 +22,15 @@ function createDatabaseApi(options = {}) {
         getLeaderboard(statKey, limit) {
             return sqlite.getLeaderboard(statKey, limit);
         },
+        getRating(auth) {
+            return sqlite.getRating(auth);
+        },
+        saveRating(auth, playerName, mu, sigma) {
+            return sqlite.saveRating(auth, playerName, mu, sigma);
+        },
+        getRatingLeaderboard(limit) {
+            return sqlite.getRatingLeaderboard(limit);
+        },
         getMasters() {
             return sqlite.getMasters();
         },

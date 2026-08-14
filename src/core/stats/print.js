@@ -9,7 +9,9 @@
 const STAT_LABELS = { games: 'Игры', wins: 'Победы', goals: 'Голы', assists: 'Ассисты', CS: 'Сухие матчи', playtime: 'Время игры' };
 const CLUB_STAT_LABEL = 'Клубы';
 
-// Every category !tops/`/tops` can show, in display order.
+// Every category !tops/`/tops` can show, in display order. Exported (not
+// just a local const) so core/bff/roomStats.js can build its own combined
+// view (player stats + rating, no clubs) without duplicating this list.
 const RANKING_STAT_KEYS = ['games', 'wins', 'goals', 'assists', 'CS', 'playtime'];
 
 // One leaderboard's formatted line, or null if fewer than 5 players have any
@@ -27,6 +29,22 @@ async function buildRankingString(db, getTimeStats, statKey) {
         let playerStat = leaderboard[i].value;
         if (key == 'playtime') playerStat = getTimeStats(playerStat);
         rankingString += `#${i + 1} ${playerName} : ${playerStat}, `;
+    }
+    return rankingString.substring(0, rankingString.length - 2);
+}
+
+// BFF-only leaderboard (see core/bff/rating.js/dbBridge.js) — the main
+// room's db never has any rows in rating_mu/rating_sigma, so
+// db.getRatingLeaderboard always comes back empty there and this always
+// returns null; harmless, just never shows up in the main room's !tops.
+// Same 5-player quorum as buildRankingString, for the same reason (an
+// early leaderboard with 1-2 entries looks artificially prestigious).
+async function buildRatingRankingString(db) {
+    const leaderboard = await db.getRatingLeaderboard(5);
+    if (leaderboard.length < 5) return null;
+    let rankingString = `Рейтинг> `;
+    for (let i = 0; i < 5; i++) {
+        rankingString += `#${i + 1} ${leaderboard[i].playerName} : ${Math.round(leaderboard[i].ordinal)}, `;
     }
     return rankingString.substring(0, rankingString.length - 2);
 }
@@ -66,12 +84,20 @@ module.exports = function createPrintStats({
         const assistsRank = await db.getStatRank('assists', stats.assists);
         const csRank = await db.getStatRank('CS', stats.CS);
         const playtimeRank = await db.getStatRank('playtime', stats.playtime);
-        return `${stats.playerName} ` +
+        let text = `${stats.playerName} ` +
             `[🏆 ${stats.winrate} побед, 🕹️ ${stats.games} игр] ` +
             `[🏅 Ранг по голам: ${goalsRank.rank}/${goalsRank.total}(${stats.goals}), ` +
             `ассистам: ${assistsRank.rank}/${assistsRank.total}(${stats.assists}), ` +
             `сухим матчам: ${csRank.rank}/${csRank.total}(${stats.CS}), ` +
             `времени игры: ${playtimeRank.rank}/${playtimeRank.total}(${getTimeStats(stats.playtime)})]`;
+        // BFF-only (see core/bff/rating.js) — the main room never sets this
+        // field on the stats object it passes in, so this stays 100%
+        // unchanged there. Rounded for display; the DB keeps the real
+        // precision for actual balancing.
+        if (stats.ratingOrdinal != null) {
+            text += ` [⚔️ Рейтинг: ${Math.round(stats.ratingOrdinal)}]`;
+        }
+        return text;
     }
 
     return {
@@ -82,3 +108,5 @@ module.exports = function createPrintStats({
 module.exports.buildRankingString = buildRankingString;
 module.exports.buildAllRankingsText = buildAllRankingsText;
 module.exports.buildClubRankingString = buildClubRankingString;
+module.exports.buildRatingRankingString = buildRatingRankingString;
+module.exports.RANKING_STAT_KEYS = RANKING_STAT_KEYS;

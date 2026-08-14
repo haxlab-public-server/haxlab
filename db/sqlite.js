@@ -256,6 +256,14 @@ function createSqliteDatabase(filePath = path.join(__dirname, 'haxlab.sqlite')) 
         addColumnIfMissing('player_stats', 'daily_streak INTEGER NOT NULL DEFAULT 0');
         addColumnIfMissing('player_stats', 'last_daily_at TEXT');
         addColumnIfMissing('player_items', 'level INTEGER NOT NULL DEFAULT 1');
+        // openskill/BFF rating (see core/bff/rating.js) — only meaningfully
+        // populated in a BFF-room DB file; the main room's player_stats
+        // simply never touches these columns. NULL (not a default 25/8.333
+        // row) means "never played a ranked BFF match yet" — the caller
+        // falls back to rating.js's defaultRating() rather than the DB
+        // layer inventing openskill-specific defaults itself.
+        addColumnIfMissing('player_stats', 'rating_mu REAL');
+        addColumnIfMissing('player_stats', 'rating_sigma REAL');
         clubsStatement.run();
         clubMembersStatement.run();
         clubInvitesStatement.run();
@@ -399,6 +407,47 @@ function createSqliteDatabase(filePath = path.join(__dirname, 'haxlab.sqlite')) 
         const total = database.prepare('SELECT COUNT(*) AS total FROM player_stats').get().total;
 
         return { rank, total };
+    }
+
+    // Returns null if `auth` has never played a ranked BFF match — the
+    // caller (core/bff/rating.js consumers) is the one that knows to fall
+    // back to defaultRating() in that case, not this layer.
+    function getRating(auth) {
+        const row = database.prepare('SELECT rating_mu AS mu, rating_sigma AS sigma FROM player_stats WHERE auth = ?').get(auth);
+        if (!row || row.mu == null || row.sigma == null) return null;
+        return { mu: row.mu, sigma: row.sigma };
+    }
+
+    // Upserts like addCoins — a player's first-ever ranked BFF match may
+    // not have a player_stats row at all yet.
+    function saveRating(auth, playerName, mu, sigma) {
+        database
+            .prepare(
+                `INSERT INTO player_stats (auth, player_name, rating_mu, rating_sigma)
+                 VALUES (@auth, @playerName, @mu, @sigma)
+                 ON CONFLICT(auth) DO UPDATE SET rating_mu = @mu, rating_sigma = @sigma`
+            )
+            .run({ auth, playerName: playerName ?? '', mu, sigma });
+    }
+
+    // ordinal = mu - 3*sigma, openskill's own default ordinal() formula
+    // (Z=3, ALPHA=1, TARGET=0 — see node_modules/openskill/dist/rating.js)
+    // computed directly in SQL so this can ORDER BY/LIMIT without pulling
+    // every rated player into JS first. Must stay in sync with that
+    // default if core/bff/rating.js's computeOrdinal() options ever change.
+    // Unrated players (NULL mu/sigma) are excluded, same as getTopPlayers'
+    // "hasn't played yet" rows never showing up on a leaderboard.
+    function getRatingLeaderboard(limit) {
+        return database
+            .prepare(
+                `SELECT auth, player_name AS playerName, rating_mu AS mu, rating_sigma AS sigma,
+                    (rating_mu - 3 * rating_sigma) AS ordinal
+                 FROM player_stats
+                 WHERE rating_mu IS NOT NULL AND rating_sigma IS NOT NULL
+                 ORDER BY ordinal DESC
+                 LIMIT ?`
+            )
+            .all(limit);
     }
 
     // Masters are configured out-of-band (see scripts/add-master.js), never by
@@ -1181,6 +1230,9 @@ function createSqliteDatabase(filePath = path.join(__dirname, 'haxlab.sqlite')) 
         getStatRank,
         savePlayerStats,
         getLeaderboard,
+        getRating,
+        saveRating,
+        getRatingLeaderboard,
         getMasters,
         addMaster,
         getAdmins,

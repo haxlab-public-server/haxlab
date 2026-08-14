@@ -40,6 +40,19 @@ const discordAdminCallChannelId = process.env.DISCORD_ADMIN_CALL_CHANNEL_ID ?? '
 const discordVotebanChannelId = process.env.DISCORD_VOTEBAN_CHANNEL_ID ?? ''; // gets a notification whenever a !voteban vote actually bans someone
 const discordMentionAlertChannelId = process.env.DISCORD_MENTION_ALERT_CHANNEL_ID ?? ''; // gets pinged (via DISCORD_OWNER_ID) whenever MENTION_WATCH_NAME is mentioned in chat
 
+// BFF room's own log/report channels (see haxchill-second-room-plan project
+// memory: separate channels per room, except the combined status message).
+// Read here (not a separate bff/config.js) because discordProcess.js is the
+// ONE shared Discord bot process both rooms' orchestrators talk to — it
+// needs both rooms' channel IDs available in the same place.
+const discordBffLogChannelId = process.env.DISCORD_BFF_LOG_CHANNEL_ID ?? '';
+const discordBffReportChannelId = process.env.DISCORD_BFF_REPORT_CHANNEL_ID ?? '';
+
+// Local loopback port discordProcess.js listens on for the BFF orchestrator
+// (a separate, unrelated OS process — see src/bffIndex.js) to reach the
+// SAME running Discord bot/client, instead of spawning a second bot.
+const discordBridgePort = Number(process.env.DISCORD_BRIDGE_PORT ?? 47100);
+
 // SOCKS5 proxy for the Discord process's own outbound traffic only (REST +
 // gateway), e.g. `socks5://user:pass@host:port` — see discordProcess.js's
 // proxy patch. Leave empty to connect directly. Never touches the room
@@ -65,4 +78,7 @@ module.exports = {
     discordVotebanChannelId,
     discordMentionAlertChannelId,
     discordProxyUrl,
+    discordBffLogChannelId,
+    discordBffReportChannelId,
+    discordBridgePort,
 };

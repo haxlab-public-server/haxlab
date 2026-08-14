@@ -30,18 +30,22 @@ const db = createDatabaseApi();
 db.init();
 
 /* CONNECTION-DROP MONITORING */
-// Diagnostic for a live incident (players reporting a ping spike + mass
-// disconnect, no corresponding pm2 restart): correlates the page's own
-// "WebSocket is already in CLOSING or CLOSED state" errors — a symptom of
-// the room's live connection to HaxBall dying and reconnecting — with this
-// host's own CPU load at the time. Working theory: on a single-vCPU box,
-// the browser's networking occasionally can't get serviced promptly enough
-// under load, and HaxBall's server sees that as a dead connection. Just
-// grep pm2 logs for '[MONITOR]' to see every occurrence, with the load
-// trend leading up to it — not just the instant it happened, since a CPU
-// spike could plausibly precede the actual drop by a second or two.
+// Diagnostic for a live incident (players reporting redbars followed by a
+// ping spike + mass disconnect, no corresponding pm2 restart): correlates
+// the page's own "WebSocket is already in CLOSING or CLOSED state" errors
+// — a symptom of the room's live connection to HaxBall dying and
+// reconnecting — with this host's own CPU load in the run-up to it.
+// Working theory: on a single-vCPU box, the browser's networking
+// occasionally can't get serviced promptly enough under load, and
+// HaxBall's server sees that as a dead connection; the redbars players see
+// just before the kick would be the same underlying stall, visible to them
+// slightly earlier. Confirmed by players: this sequence (redbars, then
+// kick) only happens on this VPS, not on other rooms — so the shape of the
+// load trend leading up to each occurrence, not just the peak, is what
+// actually confirms or rules out CPU starvation as the cause. Just grep pm2
+// logs for '[MONITOR]' to see every occurrence.
 const LOAD_SAMPLE_INTERVAL_MS = 2000;
-const LOAD_HISTORY_MS = 60000;
+const LOAD_HISTORY_MS = 120000; // 2 minutes: comfortably covers redbars-then-kick
 const loadHistory = [];
 setInterval(() => {
     loadHistory.push({ t: Date.now(), load: os.loadavg()[0] });
@@ -49,16 +53,30 @@ setInterval(() => {
     while (loadHistory.length && loadHistory[0].t < cutoff) loadHistory.shift();
 }, LOAD_SAMPLE_INTERVAL_MS);
 
+// Compact visual shape of the trend (low->high mapped to increasingly
+// tall block characters) so a human skimming pm2 logs can see AT A GLANCE
+// whether load ramped up gradually or spiked suddenly, without having to
+// mentally parse a list of numbers.
+function loadSparkline(values) {
+    const blocks = '▁▂▃▄▅▆▇█';
+    const max = Math.max(...values, 0.1);
+    return values.map((v) => blocks[Math.min(blocks.length - 1, Math.floor((v / max) * (blocks.length - 1)))]).join('');
+}
+
 function logConnectionDropDiagnostics(trigger) {
     const cpuCount = os.cpus().length;
     const now = Date.now();
     const recent = loadHistory.filter((s) => now - s.t <= LOAD_HISTORY_MS);
-    const peakLoad = recent.length ? Math.max(...recent.map((s) => s.load)) : null;
+    let peak = null;
+    for (const s of recent) {
+        if (!peak || s.load > peak.load) peak = s;
+    }
     console.log(
         `[MONITOR] ${trigger} at ${new Date(now).toISOString()} — ` +
         `load now: ${os.loadavg()[0].toFixed(2)} (of ${cpuCount} core${cpuCount === 1 ? '' : 's'}), ` +
-        `peak over last ${LOAD_HISTORY_MS / 1000}s: ${peakLoad !== null ? peakLoad.toFixed(2) : 'n/a'}, ` +
-        `free mem: ${Math.round(os.freemem() / 1024 / 1024)}MB`
+        `peak ${peak ? peak.load.toFixed(2) : 'n/a'}${peak ? ` (${Math.round((now - peak.t) / 1000)}s before this)` : ''}, ` +
+        `free mem: ${Math.round(os.freemem() / 1024 / 1024)}MB, ` +
+        `trend (last ${LOAD_HISTORY_MS / 1000}s, oldest->newest): ${recent.length ? loadSparkline(recent.map((s) => s.load)) : 'n/a'}`
     );
 }
 

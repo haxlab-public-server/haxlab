@@ -272,6 +272,22 @@ module.exports = function createActivityEvents({
         // prefixes alone don't, same as a plain player with no prefix at all.
         const style = rolePrefix != null ? 'bold' : 'normal';
         const text = `${displayName}: ${message}`;
+        // "@<name>" mentions of any currently-connected player — gives just
+        // THEM the native HaxBall "mention" notification sound (a more
+        // attention-grabbing alert than the ordinary chat pop everyone else
+        // gets), same simple case-insensitive substring match
+        // MENTION_WATCH_NAME's own Discord-relay check already uses, not
+        // just the one hardcoded name. Self-mentions excluded — pinging
+        // your own message back at yourself isn't useful. Confirmed
+        // 2026-08-14: this never actually worked in production before (the
+        // sound argument to sendAnnouncement was always null/CHAT
+        // regardless of the message text).
+        const lowerMessage = message.toLowerCase();
+        const mentionedIds = new Set(
+            state.playersAll
+                .filter((p) => p.id !== player.id && lowerMessage.includes('@' + p.name.toLowerCase()))
+                .map((p) => p.id)
+        );
         // !silence (commands/player.js) is a per-VIEWER filter: whoever
         // silenced this speaker's auth just never gets the message sent to
         // them, while everyone else still sees it normally — same
@@ -279,13 +295,15 @@ module.exports = function createActivityEvents({
         // here a silenced viewer is skipped entirely instead of recolored.
         // silencedAuths starts empty and most rooms never touch it, so the
         // cheap single-broadcast path below stays untouched until someone
-        // actually uses the command.
-        if (usesClubColor || silencedAuths.size > 0) {
+        // actually uses the command (now also taken whenever a message
+        // contains a mention, so the per-viewer sound can differ).
+        if (usesClubColor || silencedAuths.size > 0 || mentionedIds.size > 0) {
             for (const viewer of state.playersAll) {
                 const viewerAuth = authArray[viewer.id][0];
                 if (silencedAuths.get(viewerAuth)?.has(auth)) continue;
                 const viewerColor = usesClubColor && state.hiddenCustomColorsSet.has(viewerAuth) ? null : prefixColor;
-                room.sendAnnouncement(text, viewer.id, viewerColor, style, null);
+                const sound = mentionedIds.has(viewer.id) ? HaxNotification.MENTION : null;
+                room.sendAnnouncement(text, viewer.id, viewerColor, style, sound);
             }
         } else {
             room.sendAnnouncement(text, null, prefixColor, style, null);

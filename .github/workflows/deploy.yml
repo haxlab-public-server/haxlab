@@ -14,8 +14,58 @@ jobs:
           host: ${{ secrets.DEPLOY_HOST }}
           username: ${{ secrets.DEPLOY_USER }}
           key: ${{ secrets.DEPLOY_SSH_KEY }}
+          # Restarting a room's pm2 process drops every player in it, so a
+          # push that only touches one room's own files shouldn't restart
+          # the other. Classification is by exact path, computed by walking
+          # both rooms' actual require() graphs (see the two entry points'
+          # module trees) rather than guessed from directory names — files
+          # shared by both (or read by the fork()-ed discordProcess.js,
+          # which require()-graph traversal alone can't see) are NOT listed
+          # in either exclusive bucket, so any file not recognized below
+          # (including new files added later and forgotten here) falls
+          # through to the safe default: restart both.
           script: |
+            set -e
             cd /opt/haxlab
+            OLD_HEAD=$(git rev-parse HEAD)
             git pull origin main
+            NEW_HEAD=$(git rev-parse HEAD)
             npm ci
-            pm2 restart haxlab
+
+            CHANGED=$(git diff --name-only "$OLD_HEAD" "$NEW_HEAD")
+            echo "Changed files since last deploy:"
+            echo "$CHANGED"
+
+            if [ -z "$CHANGED" ]; then
+              echo "No file changes since last deploy — skipping restart."
+            else
+              RESTART_MAIN=false
+              RESTART_BFF=false
+              while IFS= read -r f; do
+                [ -z "$f" ] && continue
+                case "$f" in
+                  HaxBot_public.js|src/index.js|src/browser/entry.js|src/core/announcementMessages.js|src/core/announcements.js|src/core/betting.js|src/core/blackholeAnimation.js|src/core/cards.js|src/core/commands.js|src/core/commands/admin.js|src/core/commands/blackjack.js|src/core/commands/club.js|src/core/commands/minigames.js|src/core/commands/player.js|src/core/commands/poker.js|src/core/commands/trophies.js|src/core/economy.js|src/core/events/activity.js|src/core/events/gameManagement.js|src/core/events/movement.js|src/core/fireworksAnimation.js|src/core/pauseVote.js|src/core/pokerHandRank.js|src/core/shopItems.js|src/core/smokeAnimation.js|src/core/stadiums.js|src/core/stats/fetch.js|src/core/stats/roomStats.js|src/core/team/balance.js|src/core/team/buttons.js|src/core/team/choosing.js|src/core/team/swap.js)
+                    RESTART_MAIN=true
+                    ;;
+                  src/bffIndex.js|HaxBotBFF_public.js|src/browser/bffEntry.js|src/core/bff/adminCall.js|src/core/bff/afk.js|src/core/bff/chatGuard.js|src/core/bff/commands.js|src/core/bff/config.js|src/core/bff/dbBridge.js|src/core/bff/events.js|src/core/bff/matchFlow.js|src/core/bff/rating.js|src/core/bff/report.js|src/core/bff/roomSetup.js|src/core/bff/roomStats.js|src/core/bff/stadiums.js)
+                    RESTART_BFF=true
+                    ;;
+                  *)
+                    RESTART_MAIN=true
+                    RESTART_BFF=true
+                    ;;
+                esac
+              done <<< "$CHANGED"
+
+              if [ "$RESTART_MAIN" = true ] && [ "$RESTART_BFF" = true ]; then
+                echo "Restarting both rooms."
+                pm2 startOrReload ecosystem.config.js
+              elif [ "$RESTART_MAIN" = true ]; then
+                echo "Restarting main room only (haxlab)."
+                pm2 startOrReload ecosystem.config.js --only haxlab
+              elif [ "$RESTART_BFF" = true ]; then
+                echo "Restarting BFF room only (haxlab-bff)."
+                pm2 startOrReload ecosystem.config.js --only haxlab-bff
+              fi
+              pm2 save
+            fi

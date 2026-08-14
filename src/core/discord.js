@@ -494,6 +494,12 @@ module.exports = function createDiscordBot({
     discordMentionAlertChannelId,
     discordProxyUrl,
     maxPlayers,
+    // BFF room (see haxchill-second-room-plan project memory): own log/
+    // report channels, but folded into the SAME status message as the main
+    // room rather than a separate one — see updateBffRoomStatus below.
+    discordBffLogChannelId,
+    discordBffReportChannelId,
+    bffMaxPlayers,
     db,
     state,
     getAuthArray,
@@ -537,6 +543,14 @@ module.exports = function createDiscordBot({
     let votebanChannel = null;
     let mentionAlertChannel = null;
     let roomLink = null;
+    let bffLogChannel = null;
+    let bffReportChannel = null;
+    // { playerCount, roomLink } | null — set via updateBffRoomStatus(),
+    // called from the BFF orchestrator side (see discordProcess.js's IPC
+    // bridge). null until BFF has reported in at least once, so the status
+    // message shows only the main room until then — same output as before
+    // this feature existed.
+    let bffStatus = null;
 
     // Bug (reported live): a transient Discord API hiccup (503 Service
     // Unavailable, a proxy connect timeout — both seen in production) left
@@ -556,22 +570,43 @@ module.exports = function createDiscordBot({
     // changes. The message ID is persisted (db.setSetting) since `statusMessage`
     // itself is only an in-memory reference — without that, every restart would
     // forget the old message and post a brand new one instead of editing it.
-    function updateRoomStatus(attempt = 0) {
-        if (!statusChannel || !roomLink) return;
-        const playerCount = state.playersAll.length;
-        const payload = {
-            embeds: [
+    // Shared by updateRoomStatus (main room) and updateBffRoomStatus (BFF) —
+    // both rooms' info lives in ONE message (see haxchill-second-room-plan:
+    // "combined exception" to the otherwise-separate-channels rule), so
+    // either side changing has to rebuild the same payload. BFF's block is
+    // only included once it has reported in at least once (bffStatus !=
+    // null) — before that, or if BFF is never running at all, this is
+    // byte-for-byte the same payload as before this feature existed.
+    function buildStatusPayload() {
+        const embeds = [];
+        const buttons = [];
+        if (roomLink) {
+            embeds.push(
                 new EmbedBuilder()
                     .setTitle('HaxLab')
-                    .setDescription(`Игроков в комнате: **${playerCount}/${maxPlayers}**`)
-                    .setColor(0x62cbff),
-            ],
-            components: [
-                new ActionRowBuilder().addComponents(
-                    new ButtonBuilder().setLabel('Присоединиться').setStyle(ButtonStyle.Link).setURL(roomLink)
-                ),
-            ],
-        };
+                    .setDescription(`Игроков в комнате: **${state.playersAll.length}/${maxPlayers}**`)
+                    .setColor(0x62cbff)
+            );
+            buttons.push(new ButtonBuilder().setLabel('Присоединиться').setStyle(ButtonStyle.Link).setURL(roomLink));
+        }
+        if (bffStatus) {
+            embeds.push(
+                new EmbedBuilder()
+                    .setTitle('HaxLab BFF')
+                    .setDescription(`Игроков в комнате: **${bffStatus.playerCount}/${bffMaxPlayers}**`)
+                    .setColor(0xffa500)
+            );
+            buttons.push(new ButtonBuilder().setLabel('Присоединиться (BFF)').setStyle(ButtonStyle.Link).setURL(bffStatus.roomLink));
+        }
+        return { embeds, components: [new ActionRowBuilder().addComponents(...buttons)] };
+    }
+
+    // Guard relaxed to "either room has something to show" — before BFF
+    // existed this was equivalent to the original `!roomLink` check (bffStatus
+    // is always null then), so the main room's behavior is unchanged.
+    function updateRoomStatus(attempt = 0) {
+        if (!statusChannel || (!roomLink && !bffStatus)) return;
+        const payload = buildStatusPayload();
         const retry = (err) => {
             console.error('Discord room status update failed:', err);
             if (attempt < STATUS_UPDATE_RETRY_DELAYS_MS.length) {
@@ -598,6 +633,8 @@ module.exports = function createDiscordBot({
         if (discordAdminCallChannelId) adminCallChannel = await client.channels.fetch(discordAdminCallChannelId).catch(() => null);
         if (discordVotebanChannelId) votebanChannel = await client.channels.fetch(discordVotebanChannelId).catch(() => null);
         if (discordMentionAlertChannelId) mentionAlertChannel = await client.channels.fetch(discordMentionAlertChannelId).catch(() => null);
+        if (discordBffLogChannelId) bffLogChannel = await client.channels.fetch(discordBffLogChannelId).catch(() => null);
+        if (discordBffReportChannelId) bffReportChannel = await client.channels.fetch(discordBffReportChannelId).catch(() => null);
         if (statusChannel) {
             const savedMessageId = db.getSetting(STATUS_MESSAGE_SETTING_KEY);
             if (savedMessageId) statusMessage = await statusChannel.messages.fetch(savedMessageId).catch(() => null);
@@ -662,6 +699,36 @@ module.exports = function createDiscordBot({
         updateRoomStatus();
     }
 
+    /* BFF — see haxchill-second-room-plan project memory: own log/report
+     * channels, folded into the ONE shared status message above. */
+    function sendBffLog(content) {
+        if (!bffLogChannel) return;
+        bffLogChannel.send(content).catch((err) => console.error('Discord sendBffLog failed:', err));
+    }
+
+    function sendBffReport(embedData) {
+        if (!bffReportChannel) return;
+        const embed = new EmbedBuilder()
+            .setTitle(embedData.title)
+            .setDescription(embedData.description)
+            .setColor(embedData.color)
+            .addFields(embedData.fields)
+            .setFooter({ text: embedData.footer.text })
+            .setTimestamp(new Date(embedData.timestamp));
+        bffReportChannel.send({ embeds: [embed] }).catch((err) => console.error('Discord sendBffReport failed:', err));
+    }
+
+    function sendBffRecording(buffer, filename) {
+        if (!bffReportChannel) return;
+        const attachment = new AttachmentBuilder(Buffer.from(buffer), { name: filename });
+        bffReportChannel.send({ files: [attachment] }).catch((err) => console.error('Discord sendBffRecording failed:', err));
+    }
+
+    function updateBffRoomStatus(playerCount, url) {
+        bffStatus = { playerCount, roomLink: url };
+        updateRoomStatus();
+    }
+
     function sendPassword(password) {
         if (!passwordChannel) return;
         passwordChannel.send(`🔒 Комната заполнена! Пароль на оставшиеся места: **${password}** (обновляется каждый час)`)
@@ -676,7 +743,7 @@ module.exports = function createDiscordBot({
     function sendAdminCall(playerName) {
         if (!adminCallChannel) return;
         adminCallChannel.send({
-            content: `@here **${playerName}** позвал админа!`,
+            content: `@here [FUTSAL] **${playerName}** позвал админа!`,
             allowedMentions: { parse: ['everyone'] },
         }).catch((err) => console.error('Discord sendAdminCall failed:', err));
     }
@@ -746,6 +813,10 @@ module.exports = function createDiscordBot({
         checkVipRoleOnLink: checkVipRoleOnLinkForGuild,
         grantVipRole: grantVipRoleForGuild,
         revokeVipRole: revokeVipRoleForGuild,
+        sendBffLog,
+        sendBffReport,
+        sendBffRecording,
+        updateBffRoomStatus,
     };
 };
 

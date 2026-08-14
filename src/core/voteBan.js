@@ -48,7 +48,7 @@ module.exports = function createVoteBan({
     const BAN_DURATION_MINUTES = 60;
     const MIN_GAMES_TO_VOTE = 10;
     const VOTE_THRESHOLD_RATIO = 0.61;
-    const PROTECTED_TOP_N = 10;
+    const PROTECTED_TOP_N = 3; // lowered from 10 (confirmed 2026-08-14) — top-10 was shielding too many regulars from a legitimate vote
 
     // The same 6 columns !tops itself supports (see db/sqlite.js's
     // LEADERBOARD_COLUMNS) — 'clubs' is deliberately excluded, it ranks

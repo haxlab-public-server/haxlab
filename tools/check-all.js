@@ -47,6 +47,9 @@ step('runtime smoke tests', () =>
 step('full initialisation (browser globals stubbed)', () =>
     execFileSync(node, [path.join(__dirname, 'load-check.js')], { encoding: 'utf8' })
 );
+step('full initialisation — BFF room (browser globals stubbed)', () =>
+    execFileSync(node, [path.join(__dirname, 'load-check-bff.js')], { encoding: 'utf8' })
+);
 step('parity with upstream monolith', () => {
     try {
         return execFileSync(node, [path.join(__dirname, 'audit-parity.js')], { encoding: 'utf8' });

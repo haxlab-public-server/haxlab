@@ -6,6 +6,7 @@
   "main": "HaxBot_public.js",
   "scripts": {
     "start": "node HaxBot_public.js",
+    "start:bff": "node HaxBotBFF_public.js",
     "test": "node HaxBot_test.js",
     "check": "node tools/check-all.js",
     "check:deps": "node tools/check-module-deps.js",
@@ -16,6 +17,7 @@
   "dependencies": {
     "discord.js": "^14.27.0",
     "esbuild": "^0.28.1",
+    "openskill": "^5.0.1",
     "puppeteer": "^25.3.0",
     "socks": "^2.8.9",
     "socks-proxy-agent": "^10.1.0",
