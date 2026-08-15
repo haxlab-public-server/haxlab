@@ -578,12 +578,16 @@ module.exports = function createEconomy({
         const msgArray = message.split(/ +/).slice(1);
         const auth = getAuth(player);
 
+        // No argument at all: just the category list (requested 2026-08-15
+        // — the wall-of-text fix from earlier today added !shop <category>
+        // as an OPTIONAL filter on top of the full dump, but the actual ask
+        // was for the bare command to be the compact view by default, with
+        // the full per-category listing only one category name away).
         if (msgArray.length === 0) {
-            const [balance, owned, equipped] = await Promise.all([db.getBalance(auth), db.getOwnedItemIds(auth), db.getEquipped(auth)]);
-            const levels = await getUpgradeableLevels(auth, items);
-            const sections = ['form', 'size', 'avatar', 'goalAnimation'].map((key) => formatCatalogSection(key, owned, equipped, levels, balance)).join('\n');
+            const balance = await db.getBalance(auth);
+            const categoryList = SHOP_CATEGORY_KEYS.map((key) => `${key} (${CATEGORY_LABELS[key]})`).join(', ');
             room.sendAnnouncement(
-                `🛒 Магазин (баланс: ${formatCoins(balance)})\n${sections}\nКупить/улучшить: !shop <id>. Надеть: !equip <id>. Список одной категории: !shop <${SHOP_CATEGORY_KEYS.join('|')}>.`,
+                `🛒 Магазин (баланс: ${formatCoins(balance)})\nКатегории: ${categoryList}\nСмотреть категорию: !shop <категория>. Купить/улучшить: !shop <id>. Надеть: !equip <id>.`,
                 player.id,
                 announcementColor,
                 'bold',

@@ -6596,10 +6596,16 @@ console.log('\n--- core/economy.js: coin awards, playtime ticker, shop/inventory
     await db.addCoins('AUTH_BLUE1', 'Blue1', 89);
     check('balance topped up for the shop tests', await db.getBalance('AUTH_BLUE1'), 100);
 
+    // !shop with no args (requested 2026-08-15: expected the BARE command
+    // to be the compact category list, not the full catalog dump — the
+    // earlier "!shop <category>" filter was meant to be the way to drill
+    // into one, not an add-on to an otherwise still-full default view).
     sentLocal.length = 0;
     await economy.shopCommand({ id: 2, name: 'Blue1' }, '!shop');
-    check('!shop with no args lists the catalog and balance', /Магазин \(баланс: 100 монеток\)/.test(sentLocal[0].msg), true);
-    check('a price:0 item is listed as "бесплатно", not "0 монеток"', /freebie — Халявная \(бесплатно\)/.test(sentLocal[0].msg), true);
+    check('!shop with no args shows the balance', /Магазин \(баланс: 100 монеток\)/.test(sentLocal[0].msg), true);
+    check('...and just the category list', /Категории: form \(Формы\), size \(.*\), avatar \(.*\), goalAnimation \(.*\)/.test(sentLocal[0].msg), true);
+    check('...pointing at !shop <категория> for the actual items', /Смотреть категорию: !shop <категория>/.test(sentLocal[0].msg), true);
+    check('...no actual item ids/prices leak into the bare no-arg view', /freebie/.test(sentLocal[0].msg), false);
 
     sentLocal.length = 0;
     await economy.shopCommand({ id: 2, name: 'Blue1' }, '!shop freebie');
@@ -6713,9 +6719,9 @@ console.log('\n--- core/economy.js: coin awards, playtime ticker, shop/inventory
     check('the rejection never touches the balance', await db.getBalance('AUTH_BLUE1'), 50);
 
     sentLocal.length = 0;
-    await economy.shopCommand({ id: 2, name: 'Blue1' }, '!shop');
-    check('!shop lists the merged smoke bundle entry', /smoke — Дым/.test(sentLocal[0].msg), true);
-    check('!shop does not list the individual hidden smoke colors', /smoke-red/.test(sentLocal[0].msg), false);
+    await economy.shopCommand({ id: 2, name: 'Blue1' }, '!shop goalAnimation'); // 'smoke' lives in this category
+    check('!shop <category> lists the merged smoke bundle entry', /smoke — Дым/.test(sentLocal[0].msg), true);
+    check('!shop <category> does not list the individual hidden smoke colors', /smoke-red/.test(sentLocal[0].msg), false);
 
     roomCallsLocal.length = 0;
     sentLocal.length = 0;
@@ -7320,8 +7326,8 @@ console.log('\n--- core/economy.js: coin awards, playtime ticker, shop/inventory
     check('buying past the max level is rejected', /максимального уровня/.test(sentLocal[0].msg), true);
 
     sentLocal.length = 0;
-    await economy.shopCommand({ id: 8, name: 'Upgrader' }, '!shop');
-    check('!shop shows a maxed-out item as "максимум", not a price to pay', /small.*уровень 5\/5, максимум/.test(sentLocal[0].msg), true);
+    await economy.shopCommand({ id: 8, name: 'Upgrader' }, '!shop size'); // 'small' lives in this category
+    check('!shop <category> shows a maxed-out item as "максимум", not a price to pay', /small.*уровень 5\/5, максимум/.test(sentLocal[0].msg), true);
 
     roomCallsLocal.length = 0;
     await economy.equipCommand({ id: 8, name: 'Upgrader' }, '!equip small');
