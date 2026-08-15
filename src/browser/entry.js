@@ -420,6 +420,22 @@ state.equippedTrophies = (await db.getAllEquippedTrophies()).reduce((acc, row) =
 state.currentSeason = await db.getCurrentSeason();
 state.seasonTrophies = await db.getSeasonTrophies();
 
+// In-room season-close notice (item #22) — scripts/close-season.js runs
+// completely offline (its own docs: "Restart the bot for it to take
+// effect"), so there's no live moment to announce FROM; instead, detect
+// the change here at boot by comparing against the last season this
+// process ever confirmed announcing, and if it moved, tell every player
+// who joins for the rest of THIS boot (see movement.js's onPlayerJoin) —
+// not just whoever happens to be first. The persisted marker is bumped
+// immediately so a crash-and-restart mid-boot doesn't re-trigger it on
+// the very next start, but state.newSeasonAnnounceNeeded stays true in
+// memory for this process's whole lifetime regardless.
+const lastAnnouncedSeason = Number((await db.getSetting('lastAnnouncedSeason')) ?? state.currentSeason);
+state.newSeasonAnnounceNeeded = lastAnnouncedSeason !== state.currentSeason;
+if (state.newSeasonAnnounceNeeded) {
+    await db.setSetting('lastAnnouncedSeason', String(state.currentSeason));
+}
+
 // !customcolors (see core/commands/player.js) — auths who've opted out of
 // SEEING other players' club custom colors (events/activity.js sends them
 // the default color instead, per-viewer, on messages that would otherwise
@@ -685,6 +701,7 @@ const {
     masterList,
     announcementColor,
     errorColor,
+    successColor,
     HaxNotification,
     formatBanRemaining,
     formatVipRemaining,
@@ -1591,6 +1608,7 @@ Object.assign(room, wrapEventHandlers(createActivityEvents({
     checkGoalKickTouch,
     chooseModeFunction,
     swapModeFunction,
+    formatBanRemaining,
     formatTrophyLabel,
     resolveTrophyRank,
     getCommand,

@@ -193,7 +193,7 @@ console.log('\n--- commands/master.js: writes must land in shared state ---');
     };
     const master = require(path.join(CORE, 'commands', 'master'))({
         room, state, authArray, db, masterList: ['AUTH_CALLER'],
-        announcementColor: 1, errorColor: 2, HaxNotification,
+        announcementColor: 1, errorColor: 2, successColor: 4, HaxNotification,
         formatBanRemaining, formatVipRemaining,
         discordBot: discordBotMock,
     });
@@ -275,7 +275,12 @@ console.log('\n--- commands/master.js: writes must land in shared state ---');
 
     sent.length = 0;
     await master.setVipCommand(caller, '!setvip #5 30');
-    check('setVipCommand confirms a time-limited grant', /VIP на 30 дн\./.test(sent[0].msg), true);
+    check('setVipCommand confirms a time-limited grant', sent.some((s) => /VIP на 30 дн\./.test(s.msg)), true);
+    // item #23: the online target (state.playersAll still has #5 from
+    // above) also gets a private perks explanation, not just the public
+    // "теперь VIP" broadcast.
+    check('...and the target gets a private VIP-perks explanation', sent.some((s) => s.id === 5 && /Вам открыт VIP/.test(s.msg)), true);
+    check('...mentioning !up, a main-room-only command', sent.some((s) => s.id === 5 && /!up/.test(s.msg)), true);
     check('the expiry lands ~30 days out', Math.round((new Date(state.vipList[0][2]).getTime() - Date.now()) / (24 * 60 * 60000)), 30);
     check('the expiry is persisted to the db too', new Date(db.getVips()[0].expiresAt).getTime(), new Date(state.vipList[0][2]).getTime());
 
@@ -440,6 +445,24 @@ console.log('\n--- commands/master.js: writes must land in shared state ---');
     master.playersListCommand(caller, '!players');
     check('playersListCommand reports an empty room', /никого нет/.test(sent[0].msg), true);
 
+    // Item #23 room-awareness: this factory is shared as-is by BFF
+    // (bffEntry.js), which has none of the main room's !up/!vipcolor/!shop —
+    // BFF passes its OWN vipPerksText rather than relying on the default
+    // (main-room) one, so the perks explanation stays accurate there too.
+    state.playersAll = [{ id: 6, name: 'BffVip' }];
+    authArray[6] = ['AUTH_BFF_VIP'];
+    const bffMaster = require(path.join(CORE, 'commands', 'master'))({
+        room, state, authArray, db, masterList: ['AUTH_CALLER'],
+        announcementColor: 1, errorColor: 2, successColor: 4, HaxNotification,
+        formatBanRemaining, formatVipRemaining,
+        discordBot: discordBotMock,
+        vipPerksText: 'увеличенный лимит AFK, свой VIP-префикс в чате (!viphide — скрыть/показать). Все команды — !help',
+    });
+    sent.length = 0;
+    await bffMaster.setVipCommand(caller, '!setvip #6');
+    check('BFF\'s own vipPerksText is used instead of the main-room default', sent.some((s) => s.id === 6 && /!viphide/.test(s.msg)), true);
+    check('...and never mentions main-room-only commands like !up', sent.some((s) => s.id === 6 && /!up/.test(s.msg)), false);
+
     db.close();
 })();
 
@@ -514,7 +537,7 @@ console.log('\n--- db + roomStats.js/player.js: player data actually round-trips
 
     const roomStats = require(path.join(CORE, 'stats', 'roomStats'))({
         room, state, Team, authArray, db, HaxStatistics, HaxNotification,
-        errorColor: 3, infoColor: 5, teamSize: 4,
+        errorColor: 3, infoColor: 5, announcementColor: 1, teamSize: 4,
         getAssistsPlayer: (p) => perPlayerStat[p.id].assists,
         getCSPlayer: (p) => perPlayerStat[p.id].CS,
         getGametimePlayer: (p) => perPlayerStat[p.id].playtime,
@@ -550,11 +573,16 @@ console.log('\n--- db + roomStats.js/player.js: player data actually round-trips
 
     // !tops with no argument (roomStats.printAllRankings) — every category
     // in one message now that all 5 rows exist, not six separate commands.
+    // Leader-only per category since 2026-08-15 (real wall-of-text bug fix,
+    // see buildAllRankingsText's own comment) — 6 categories + 1 trailing
+    // "!tops <category>" hint line, no club line yet (no club has scored
+    // anything at this point in the test).
     sent.length = 0;
     await roomStats.printAllRankings(0);
-    check('printAllRankings combines every category into one message', sent[0].msg.split('\n').length, 6);
-    check('printAllRankings includes the goals leaderboard', /Голы> #1 Filler2 : 100/.test(sent[0].msg), true);
-    check('printAllRankings includes the playtime leaderboard too', /Время игры>/.test(sent[0].msg), true);
+    check('printAllRankings combines every category into one message', sent[0].msg.split('\n').length, 7);
+    check('printAllRankings includes the goals leader', /Голы: Filler2 \(100\)/.test(sent[0].msg), true);
+    check('printAllRankings includes the playtime leader too', /Время игры:/.test(sent[0].msg), true);
+    check('...and points at !tops <category> for the full top-5', /Полная таблица по категории: !tops <games\|wins\|goals\|assists\|cs\|playtime\|clubs>/.test(sent[0].msg), true);
 
     const printRankingsCalls = [];
     const printAllRankingsCalls = [];
@@ -562,9 +590,10 @@ console.log('\n--- db + roomStats.js/player.js: player data actually round-trips
     const { formatCoins, formatBanRemaining } = require(path.join(CORE, 'utils'));
     const discordBotCalls = [];
     const hiddenVipSetForPlayerTest = new Set();
+    const AFKSetForPlayerTest = new Set();
     const player = require(path.join(CORE, 'commands', 'player'))({
         room, state, Team, Role: { PLAYER: 0 }, HaxStatistics, authArray, db,
-        AFKSet: new Set(), AFKMinSet: new Set(), AFKCooldownSet: new Set(),
+        AFKSet: AFKSetForPlayerTest, AFKMinSet: new Set(), AFKCooldownSet: new Set(),
         hiddenVipSet: hiddenVipSetForPlayerTest,
         minAFKDuration: 0, maxAFKDuration: 0, AFKCooldown: 0,
         announcementColor: 1, errorColor: 3, infoColor: 5, successColor: 6, HaxNotification,
@@ -700,24 +729,210 @@ console.log('\n--- db + roomStats.js/player.js: player data actually round-trips
     player.upCommand({ id: 1, name: 'Alice', team: Team.SPECTATORS }, '!up');
     check('a valid claim is confirmed to the whole room', sent.some((s) => s.id === null && /Alice.*капитаном/.test(s.msg)), true);
     check('...and actually recorded in state.priorityCaptainId', state.priorityCaptainId, 1);
+    // UI/UX parity with !mute's own remaining-time line (requested
+    // 2026-08-15) — a private follow-up on every successful claim, not
+    // just on rejection, so the daily count is never a surprise.
+    check('...plus a private confirmation of how many uses are left today', sent.some((s) => s.id === 1 && /Использований !up сегодня: 1\/3/.test(s.msg)), true);
+
+    // Requested 2026-08-15: the claim-holder re-issuing !up on their OWN
+    // already-live claim used to get the exact same "someone else already
+    // claimed it" wording as a genuinely different VIP being blocked —
+    // confusing/alarming to read as if their claim had just been stolen.
+    // Now distinguished from the other-VIP case tested right below.
+    sent.length = 0;
+    player.upCommand({ id: 1, name: 'Alice', team: Team.SPECTATORS }, '!up');
+    check('the claim-holder calling !up again on their own live claim gets a self-specific message', /Вы уже в очереди на капитанство/.test(sent[0].msg), true);
+    check('...not the "someone ELSE already has it" wording', /Уже есть VIP в очереди/.test(sent[0].msg), false);
+    check('...and the claim is untouched either way', state.priorityCaptainId, 1);
 
     sent.length = 0;
     player.upCommand({ id: 2, name: 'Bob', team: Team.SPECTATORS }, '!up');
-    check('a second VIP cannot claim the slot while one is already live', /Уже есть VIP в очереди/.test(sent[0].msg), true);
+    check('a second, DIFFERENT VIP cannot claim the slot while one is already live', /Уже есть VIP в очереди/.test(sent[0].msg), true);
     check('the original claim is untouched', state.priorityCaptainId, 1);
 
     state.priorityCaptainId = null; // simulate resolveNextCaptainId having consumed Alice's claim
     sent.length = 0;
     player.upCommand({ id: 1, name: 'Alice', team: Team.SPECTATORS }, '!up');
-    check('the SAME VIP is still rate-limited by their own 30-minute cooldown, even after their claim was consumed', /раз в 30 минут/.test(sent[0].msg), true);
+    check('the SAME VIP is still rate-limited by their own 1-hour cooldown, even after their claim was consumed', /раз в час/.test(sent[0].msg), true);
     // The claim above was JUST made (a moment ago, in this same test), so
-    // the full ~30 minutes should still be showing — confirms the rejection
+    // the full ~60 minutes should still be showing — confirms the rejection
     // reports an actual remaining time, not just a generic "try later".
-    check('...and it reports how much of the cooldown is actually left, not just that one exists', /осталось 30 мин\./.test(sent[0].msg), true);
+    check('...and it reports how much of the cooldown is actually left, not just that one exists', /осталось 60 мин\./.test(sent[0].msg), true);
+
+    // Reconnect resistance (real gap fixed while reworking this, requested
+    // 2026-08-15): both the cooldown and the daily cap are keyed by AUTH,
+    // not player.id — a fresh id (simulating a rejoin) for the SAME auth
+    // must still be blocked, not get a clean slate.
+    authArray[99] = ['AUTH_ALICE'];
+    sent.length = 0;
+    player.upCommand({ id: 99, name: 'Alice', team: Team.SPECTATORS }, '!up');
+    check('the same AUTH is still cooled down even under a brand new player.id (reconnect)', /раз в час/.test(sent[0].msg), true);
 
     sent.length = 0;
     player.upCommand({ id: 2, name: 'Bob', team: Team.SPECTATORS }, '!up');
     check('...but a DIFFERENT VIP (no cooldown of their own) can claim the now-free slot', state.priorityCaptainId, 2);
+    check('...and their own daily count starts fresh at 1/3', sent.some((s) => s.id === 2 && /Использований !up сегодня: 1\/3/.test(s.msg)), true);
+
+    // AFK auto-exit on a successful claim (requested 2026-08-15) — a fresh
+    // auth/id, unrelated to Alice/Bob's own cooldowns above, spectating and
+    // currently AFK.
+    authArray[50] = ['AUTH_UP_AFK'];
+    state.teamSpec = [{ id: 1, name: 'Alice' }, { id: 2, name: 'Bob' }, { id: 50, name: 'Dozer' }];
+    state.priorityCaptainId = null;
+    AFKSetForPlayerTest.add(50);
+    sent.length = 0;
+    player.upCommand({ id: 50, name: 'Dozer', team: Team.SPECTATORS }, '!up');
+    check('claiming priority while AFK actually exits AFK', AFKSetForPlayerTest.has(50), false);
+    check('...and announces leaving AFK the same way exitAfk always does', sent.some((s) => s.id === null && /Dozer больше не AFK/.test(s.msg)), true);
+    check('...on top of (not instead of) the normal claim confirmation', sent.some((s) => s.id === null && /Dozer.*капитаном/.test(s.msg)), true);
+    check('the claim itself still goes through normally', state.priorityCaptainId, 50);
+
+    // Root-cause regression test for the ACTUAL reported bug (2026-08-15:
+    // "человек делал !up и я через 5 секунд тоже делал !up и перебивал его
+    // вип") — real updateTeams() (see entry.js) excludes AFK players from
+    // state.players/state.teamSpec entirely; !up used to have no AFK check
+    // at all, so a claim made while AFK was invisible to teamSpec from the
+    // instant it was made, and even a follow-up !up SECONDS later would see
+    // it as stale and steal it. Uses a REAL updateTeams (not a no-op mock
+    // like the rest of this file's player.js tests) specifically to prove
+    // the fix holds through the actual mechanism, not just that AFKSet gets
+    // cleared in isolation.
+    {
+        const playersAllForRootCause = [
+            { id: 60, name: 'Eve', team: Team.SPECTATORS },
+            { id: 61, name: 'Frank', team: Team.SPECTATORS },
+        ];
+        const AFKSetRootCause = new Set();
+        const stateRootCause = { chooseMode: false, priorityCaptainId: null, playersAll: playersAllForRootCause, players: [], teamSpec: [] };
+        function updateTeamsRootCause() {
+            stateRootCause.players = playersAllForRootCause.filter((p) => !AFKSetRootCause.has(p.id));
+            stateRootCause.teamSpec = stateRootCause.players.filter((p) => p.team === Team.SPECTATORS);
+        }
+        updateTeamsRootCause();
+
+        const sentRootCause = [];
+        const roomRootCause = { sendAnnouncement: (msg, id, color, style) => sentRootCause.push({ msg, id, style }) };
+        const playerRootCause = require(path.join(CORE, 'commands', 'player'))({
+            room: roomRootCause, state: stateRootCause, Team, Role: { PLAYER: 0 }, HaxStatistics,
+            authArray: { 60: ['AUTH_EVE'], 61: ['AUTH_FRANK'] }, db,
+            AFKSet: AFKSetRootCause, AFKMinSet: new Set(), AFKCooldownSet: new Set(),
+            hiddenVipSet: new Set(),
+            minAFKDuration: 0, maxAFKDuration: 0, AFKCooldown: 0,
+            announcementColor: 1, errorColor: 3, infoColor: 5, successColor: 6, HaxNotification,
+            getCommand: () => false, getRole: () => 0, handlePlayersJoin: () => {}, handlePlayersLeave: () => {},
+            printPlayerStats: () => '', printRankings: async () => {}, printAllRankings: async () => {}, printClubRankings: async () => {},
+            updateTeams: updateTeamsRootCause, getCommands: () => ({}), formatCoins, formatBanRemaining,
+            discordBot: { sendAdminCall: () => {}, checkVipRoleOnLink: () => {} },
+        });
+
+        // Eve is AFK BEFORE ever calling !up — the exact reported scenario.
+        AFKSetRootCause.add(60);
+        updateTeamsRootCause();
+        sentRootCause.length = 0;
+        playerRootCause.upCommand({ id: 60, name: 'Eve', team: Team.SPECTATORS }, '!up');
+        check('claiming while AFK succeeds and exits AFK as part of it', AFKSetRootCause.has(60), false);
+        check('...so the real (non-mocked) updateTeams now DOES include the claimant in teamSpec', stateRootCause.teamSpec.some((p) => p.id === 60), true);
+
+        sentRootCause.length = 0;
+        playerRootCause.upCommand({ id: 61, name: 'Frank', team: Team.SPECTATORS }, '!up');
+        check('a DIFFERENT player\'s !up no longer overrides a claim made while AFK (the actual reported bug)', /Уже есть VIP в очереди/.test(sentRootCause[0].msg), true);
+        check('...the original AFK claimant\'s slot survives', stateRootCause.priorityCaptainId, 60);
+    }
+
+    // exitAfk must only fire on an ACTUAL successful claim, not on every
+    // attempt — Bob is still on his own 1-hour cooldown from earlier in
+    // this test, so this call is rejected; confirm AFK is untouched by a
+    // rejected attempt rather than being exited as a side effect regardless.
+    sent.length = 0;
+    AFKSetForPlayerTest.add(2);
+    state.priorityCaptainId = null;
+    player.upCommand({ id: 2, name: 'Bob', team: Team.SPECTATORS }, '!up');
+    check('a REJECTED attempt (still on cooldown) does not exit AFK as a side effect', AFKSetForPlayerTest.has(2), true);
+    check('...no stray "больше не AFK" message either', sent.some((s) => /больше не AFK/.test(s.msg)), false);
+    AFKSetForPlayerTest.delete(2);
+
+    // Daily cap (3/day, requested 2026-08-15 — was cooldown-only before),
+    // isolated in its own instance/state so draining it doesn't disturb
+    // Alice/Bob's own claims above — upCooldownMs shrunk to near-zero so
+    // the hourly cooldown never masks the daily cap while draining all 3
+    // uses back to back (real production value is untouched; only this
+    // test's own instance overrides it).
+    {
+        const stateFastUp = { chooseMode: false, teamSpec: [{ id: 1, name: 'Carol' }], priorityCaptainId: null };
+        const sentFastUp = [];
+        const roomFastUp = { sendAnnouncement: (msg, id, color, style) => sentFastUp.push({ msg, id, style }) };
+        const authArrayFastUp = { 1: ['AUTH_CAROL'] };
+        const playerFastUp = require(path.join(CORE, 'commands', 'player'))({
+            room: roomFastUp, state: stateFastUp, Team, Role: { PLAYER: 0 }, HaxStatistics, authArray: authArrayFastUp, db,
+            AFKSet: new Set(), AFKMinSet: new Set(), AFKCooldownSet: new Set(),
+            hiddenVipSet: new Set(),
+            minAFKDuration: 0, maxAFKDuration: 0, AFKCooldown: 0,
+            announcementColor: 1, errorColor: 3, infoColor: 5, successColor: 6, HaxNotification,
+            getCommand: () => false, getRole: () => 0, handlePlayersJoin: () => {}, handlePlayersLeave: () => {},
+            printPlayerStats: () => '', printRankings: async () => {}, printAllRankings: async () => {}, printClubRankings: async () => {},
+            updateTeams: () => {}, getCommands: () => ({}), formatCoins, formatBanRemaining,
+            discordBot: { sendAdminCall: () => {}, checkVipRoleOnLink: () => {} },
+            upCooldownMs: 1, // effectively no hourly cooldown for this test
+            upDailyMaxUses: 3,
+            upDailyWindowMs: 24 * 60 * 60 * 1000,
+        });
+
+        for (let i = 1; i <= 3; i++) {
+            stateFastUp.priorityCaptainId = null; // simulate resolveNextCaptainId consuming each claim
+            sentFastUp.length = 0;
+            playerFastUp.upCommand({ id: 1, name: 'Carol', team: Team.SPECTATORS }, '!up');
+            check(`use ${i}/3 succeeds`, sentFastUp.some((s) => s.id === null && /Carol.*капитаном/.test(s.msg)), true);
+            // upCooldownMs: 1 above still needs its own setTimeout tick to
+            // actually clear upCooldownMap — back-to-back synchronous calls
+            // would otherwise still see the previous use's (nearly-expired
+            // but not-yet-deleted) cooldown entry and get blocked by THAT
+            // instead of ever reaching the daily-cap logic this test is for.
+            await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+
+        stateFastUp.priorityCaptainId = null;
+        sentFastUp.length = 0;
+        playerFastUp.upCommand({ id: 1, name: 'Carol', team: Team.SPECTATORS }, '!up');
+        check('the 4th use in the same rolling day is refused', sentFastUp.some((s) => s.id === null && /капитаном/.test(s.msg)), false);
+        check('...with a clear "not more than 3 a day" message, distinct from the hourly-cooldown one', /не больше 3 раз в день/.test(sentFastUp[0].msg), true);
+        check('...reporting exactly how many were used', /использовано 3\/3/.test(sentFastUp[0].msg), true);
+        check('...and never claims the slot', stateFastUp.priorityCaptainId, null);
+    }
+
+    // The cap is a ROLLING window, not a calendar-day reset — confirms a
+    // used-up slot actually frees itself again once upDailyWindowMs elapses,
+    // rather than staying capped forever or only resetting at some fixed
+    // clock boundary.
+    {
+        const stateRollingUp = { chooseMode: false, teamSpec: [{ id: 1, name: 'Dave' }], priorityCaptainId: null };
+        const sentRollingUp = [];
+        const roomRollingUp = { sendAnnouncement: (msg, id, color, style) => sentRollingUp.push({ msg, id, style }) };
+        const playerRollingUp = require(path.join(CORE, 'commands', 'player'))({
+            room: roomRollingUp, state: stateRollingUp, Team, Role: { PLAYER: 0 }, HaxStatistics, authArray: { 1: ['AUTH_DAVE'] }, db,
+            AFKSet: new Set(), AFKMinSet: new Set(), AFKCooldownSet: new Set(),
+            hiddenVipSet: new Set(),
+            minAFKDuration: 0, maxAFKDuration: 0, AFKCooldown: 0,
+            announcementColor: 1, errorColor: 3, infoColor: 5, successColor: 6, HaxNotification,
+            getCommand: () => false, getRole: () => 0, handlePlayersJoin: () => {}, handlePlayersLeave: () => {},
+            printPlayerStats: () => '', printRankings: async () => {}, printAllRankings: async () => {}, printClubRankings: async () => {},
+            updateTeams: () => {}, getCommands: () => ({}), formatCoins, formatBanRemaining,
+            discordBot: { sendAdminCall: () => {}, checkVipRoleOnLink: () => {} },
+            upCooldownMs: 1,
+            upDailyMaxUses: 1,
+            upDailyWindowMs: 60, // 60ms rolling window — just enough to observe expiry without a slow test
+        });
+
+        playerRollingUp.upCommand({ id: 1, name: 'Dave', team: Team.SPECTATORS }, '!up');
+        stateRollingUp.priorityCaptainId = null;
+        sentRollingUp.length = 0;
+        playerRollingUp.upCommand({ id: 1, name: 'Dave', team: Team.SPECTATORS }, '!up');
+        check('immediately after using the single daily slot, a 2nd attempt is capped', /не больше 1 раз/.test(sentRollingUp[0].msg), true);
+
+        await new Promise((resolve) => setTimeout(resolve, 90));
+        sentRollingUp.length = 0;
+        playerRollingUp.upCommand({ id: 1, name: 'Dave', team: Team.SPECTATORS }, '!up');
+        check('once the rolling window elapses, the same auth can use it again', sentRollingUp.some((s) => s.id === null && /Dave.*капитаном/.test(s.msg)), true);
+    }
 
     // printClubRankings (!tops clubs) — real formatted chat output, not
     // mocked, for the exact "5г/1а/1с" breakdown format.
@@ -941,6 +1156,23 @@ console.log('\n--- db + roomStats.js/player.js: player data actually round-trips
     check('setSetting/getSetting round-trips a value', db.getSetting('statusMessageId'), '111222333');
     db.setSetting('statusMessageId', '999888777');
     check('setSetting upserts rather than duplicating', db.getSetting('statusMessageId'), '999888777');
+
+    // Round-number games-played milestone (item #24) — placed last in this
+    // block (not earlier, alongside the other updatePlayerStats calls
+    // above) specifically so seeding this extra player_stats row doesn't
+    // perturb the exact row-count-based leaderboard-quorum assertions made
+    // earlier in this same test. A dedicated fresh player, seeded one game
+    // short of 50, so the very next match crosses it.
+    authArray[9] = ['AUTH_MILESTONE'];
+    perPlayerStat[9] = { goals: 0, assists: 0, CS: 0, playtime: 60 };
+    db.savePlayerStats('AUTH_MILESTONE', Object.assign(new HaxStatistics('Grinder'), { games: 49 }));
+    sent.length = 0;
+    await roomStats.updatePlayerStats({ id: 9, name: 'Grinder' }, Team.BLUE);
+    check('crossing a milestone (49 -> 50) announces it publicly', sent.some((s) => s.id === null && /Grinder сыграл\(а\) 50-й матч/.test(s.msg)), true);
+
+    sent.length = 0;
+    await roomStats.updatePlayerStats({ id: 9, name: 'Grinder' }, Team.BLUE);
+    check('the very next (non-milestone) game, 51, announces nothing', sent.some((s) => /сыграл\(а\)/.test(s.msg)), false);
 
     db.close();
 })();
@@ -1970,6 +2202,9 @@ console.log('\n--- core/voteBan.js: !voteban — 61% of ALL eligible voters, top
     check('a valid "2" (против) from an eligible voter IS consumed', consumed, true);
     check('the vote is recorded', state.votebanSession.votes.get(2), 2);
     check('...and confirmed privately', /против/.test(sent[0].msg), true);
+    // item #18: a live tally is also broadcast room-wide right after, so
+    // everyone watching sees the count update as votes come in.
+    check('...plus a live room-wide tally (id: null)', sent.some((s) => s.id == null && /📊.*1 за, 1 против.*нужно 3/.test(s.msg)), true);
 
     sent.length = 0;
     voteBan.handleVoteBanMessage({ id: 2, name: 'Bob' }, '1');
@@ -2283,7 +2518,9 @@ console.log('\n--- discord.js: message/interaction-handling logic (no live Disco
     check('!tops pt resolves the "pt" alias to "playtime"', await handleIncomingMessage(msg('U1', '!tops pt'), deps), await handleIncomingMessage(msg('U1', '!tops playtime'), deps));
     const topsSlashReply = await handleSlashCommand(interaction('U1', 'tops', { stat: 'goals' }), deps);
     check('/tops <stat> matches !tops <stat> exactly', topsSlashReply, { content: 'Голы> #1 Xara : 7, #2 Filler4 : 4, #3 Filler3 : 3, #4 Filler2 : 2, #5 Filler1 : 1', ephemeral: true });
-    check('!tops with no argument now shows every category combined', (await handleIncomingMessage(msg('U1', '!tops'), deps)).split('\n').length, 6);
+    // Leader-only per category since 2026-08-15 (real wall-of-text fix) —
+    // 6 categories + 1 trailing "!tops <category>" hint line.
+    check('!tops with no argument now shows every category combined (leader-only)', (await handleIncomingMessage(msg('U1', '!tops'), deps)).split('\n').length, 7);
 
     // Auto-role on join: every new Discord member gets the configured role,
     // regardless of whether they've ever linked a HaxBall account.
@@ -2498,6 +2735,7 @@ console.log('\n--- events/activity.js: every chat message goes through room.send
         // needs a real constructor even though it should never run.
         spamMessageThreshold: Infinity,
         MutePlayer: class { constructor() {} setDuration() {} },
+        formatBanRemaining: () => '5 мин.',
         checkGoalKickTouch: () => null, chooseModeFunction: () => false, formatTrophyLabel, resolveTrophyRank,
         getCommand: () => false, getDate: () => 'DATE', getGoalGame: () => null,
         getPlayerComp: () => null, getRole: (p) => roles[p.id],
@@ -2720,6 +2958,7 @@ console.log('\n--- events/activity.js: choose-mode picking beats a stale vote fo
         commands: {}, discordBot: { sendLog: () => {} }, errorColor: 2,
         hiddenAdminsSet: new Set(), hiddenVipSet: new Set(), silencedAuths: new Map(), muteArray: { getByAuth: () => null },
         MutePlayer: class { constructor() {} setDuration() {} },
+        formatBanRemaining: () => '5 мин.',
         checkGoalKickTouch: () => null,
         // Only red (id 1) is entitled to pick right now (teamRed no longer
         // than teamBlue), matching choosing.js's own turn condition — this
@@ -2795,6 +3034,7 @@ console.log('\n--- events/activity.js: checkSpamFlood auto-mutes a player who fl
             constructor(name, id, auth) { mutesCreated.push({ name, id, auth }); }
             setDuration(minutes) { mutesCreated[mutesCreated.length - 1].minutes = minutes; }
         },
+        formatBanRemaining: () => '5 мин.',
         checkGoalKickTouch: () => null, chooseModeFunction: () => false, formatTrophyLabel: () => '', resolveTrophyRank: () => null,
         getCommand: () => false, getDate: () => 'DATE', getGoalGame: () => null,
         getPlayerComp: () => null, getRole: () => 0,
@@ -2848,6 +3088,7 @@ console.log('\n--- events/activity.js: bare "т"/"ч" also trigger team chat, sa
         commands: {}, discordBot: { sendLog: () => {} }, errorColor: 2,
         hiddenAdminsSet: new Set(), hiddenVipSet: new Set(), silencedAuths: new Map(), muteArray: { getByAuth: () => null },
         MutePlayer: class { constructor() {} setDuration() {} },
+        formatBanRemaining: () => '5 мин.',
         checkGoalKickTouch: () => null, chooseModeFunction: () => false, formatTrophyLabel: () => '', resolveTrophyRank: () => null,
         getCommand: () => false, getDate: () => 'DATE', getGoalGame: () => null,
         getPlayerComp: () => null, getRole: () => 0,
@@ -2902,6 +3143,7 @@ console.log('\n--- events/activity.js: a muted player can\'t route around it thr
         // exemption still applies even to a muteArray entry) are muted.
         muteArray: { getByAuth: (auth) => (auth === 'AUTH_MUTED' || auth === 'AUTH_MUTED_ADMIN' ? { auth } : null) },
         MutePlayer: class { constructor() {} setDuration() {} },
+        formatBanRemaining: () => '5 мин.',
         checkGoalKickTouch: () => null, chooseModeFunction: () => false, formatTrophyLabel: () => '', resolveTrophyRank: () => null,
         getCommand: () => false, getDate: () => 'DATE', getGoalGame: () => null,
         getPlayerComp: () => null, getRole: () => 0,
@@ -2977,6 +3219,7 @@ console.log('\n--- events/activity.js + commands/player.js: bare "jj" exits AFK 
         commands: {}, discordBot: { sendLog: () => {} }, errorColor: 2,
         hiddenAdminsSet: new Set(), hiddenVipSet: new Set(), silencedAuths: new Map(), muteArray: { getByAuth: () => null },
         MutePlayer: class { constructor() {} setDuration() {} },
+        formatBanRemaining: () => '5 мин.',
         checkGoalKickTouch: () => null, chooseModeFunction: () => false, formatTrophyLabel: () => '', resolveTrophyRank: () => null,
         getCommand: () => false, getDate: () => 'DATE', getGoalGame: () => null,
         getPlayerComp: () => null, getRole: () => 0,
@@ -3076,6 +3319,27 @@ console.log('\n--- events/movement.js: auth-bans block a join regardless of conn
     await movement.onPlayerJoin({ id: 8, name: 'Newbie', auth: 'AUTH_NEW', conn: 'CONN2' });
     check('a clean auth is not kicked on join', roomCalls.some((c) => c.startsWith('kickPlayer')), false);
     check('join broadcasts the player\'s auth in small font', sent[0], { msg: 'Newbie [AUTH_NEW]', id: null, style: 'small' });
+    // Onboarding nudge (requested 2026-08-15): a brand new player has no
+    // other signal !help even exists.
+    check('the welcome message points a new player at !help', sent.some((s) => s.msg.includes('!help')), true);
+
+    // Season-close notice (item #22) — entry.js sets these two together at
+    // boot when the persisted lastAnnouncedSeason differs from the freshly-
+    // loaded state.currentSeason; movement.js's onPlayerJoin only needs to
+    // read them, not compute the comparison itself.
+    state.currentSeason = 2;
+    state.newSeasonAnnounceNeeded = true;
+    sent.length = 0;
+    state.playersAll = [{ id: 13, name: 'PostSeason' }];
+    await movement.onPlayerJoin({ id: 13, name: 'PostSeason', auth: 'AUTH_POSTSEASON', conn: 'CONN_POSTSEASON' });
+    check('when a season just closed, the welcome message also explains it', sent.some((s) => /Сезон S1 завершён/.test(s.msg)), true);
+    check('...and names the NEW season players are now on', sent.some((s) => /начался сезон S2/.test(s.msg)), true);
+
+    state.newSeasonAnnounceNeeded = false;
+    sent.length = 0;
+    state.playersAll = [{ id: 14, name: 'NoSeasonNews' }];
+    await movement.onPlayerJoin({ id: 14, name: 'NoSeasonNews', auth: 'AUTH_NOSEASONNEWS', conn: 'CONN_NOSEASONNEWS' });
+    check('once the flag is off (no change since boot), the welcome message stays plain', sent.some((s) => /Сезон/.test(s.msg)), false);
 
     // Duplicate detection — auth-only. Briefly matched on EITHER auth or
     // conn (conn being a fingerprint of the actual network connection, much
@@ -6362,6 +6626,42 @@ console.log('\n--- core/economy.js: coin awards, playtime ticker, shop/inventory
     await economy.shopCommand({ id: 15, name: 'RelicOwner' }, '!shop relic');
     check('an existing owner trying to re-"buy" a retired item is still rejected the same way', /больше не продаётся/.test(sentLocal[0].msg), true);
 
+    // --- !shop <category>: filter, requested 2026-08-15 ("!shop вываливает
+    // всё одним полотном текста") ---
+    sentLocal.length = 0;
+    await economy.shopCommand({ id: 2, name: 'Blue1' }, '!shop form');
+    check('!shop form shows only the form section header', /^🛒 Магазин — Формы/.test(sentLocal[0].msg), true);
+    check('...includes a real form item', /gold/.test(sentLocal[0].msg), true);
+    check('...but not a goalAnimation item', /smoke/.test(sentLocal[0].msg), false);
+
+    sentLocal.length = 0;
+    await economy.shopCommand({ id: 2, name: 'Blue1' }, '!shop FORM');
+    check('the category filter is case-insensitive', /^🛒 Магазин — Формы/.test(sentLocal[0].msg), true);
+
+    sentLocal.length = 0;
+    await economy.shopCommand({ id: 2, name: 'Blue1' }, '!shop goalanimation');
+    check('!shop goalanimation shows only that section', /^🛒 Магазин — Анимации после гола/.test(sentLocal[0].msg), true);
+    check('...includes smoke', /smoke —/.test(sentLocal[0].msg), true);
+    check('...but not a form item', /gold —/.test(sentLocal[0].msg), false);
+
+    // A word that's neither a category nor a real item id still falls
+    // through to the ordinary "no such item" rejection, unchanged.
+    sentLocal.length = 0;
+    await economy.shopCommand({ id: 2, name: 'Blue1' }, '!shop nonsense');
+    check('an unrecognized argument (not a category, not an item) still shows "no such item"', /Нет такого товара/.test(sentLocal[0].msg), true);
+
+    // --- affordability marker, requested 2026-08-15 ("не видно, что по
+    // карману, а что нет") — Blue1's balance is 100 at this point.
+    // 'crimson' (form, 150) costs more than that; 'star' (avatar, 50)
+    // costs less.
+    sentLocal.length = 0;
+    await economy.shopCommand({ id: 2, name: 'Blue1' }, '!shop form');
+    check('an item costing more than the current balance is marked unaffordable', /crimson — Багровый \(150 монеток ❌ не хватает\)/.test(sentLocal[0].msg), true);
+
+    sentLocal.length = 0;
+    await economy.shopCommand({ id: 2, name: 'Blue1' }, '!shop avatar');
+    check('an item the player CAN afford has no such marker', /star — Звезда \(50 монеток\)/.test(sentLocal[0].msg), true);
+
     sentLocal.length = 0;
     await economy.equipCommand({ id: 15, name: 'RelicOwner' }, '!equip relic');
     check('an existing owner CAN still equip a retired item', /Надето: Реликвия/.test(sentLocal[0].msg), true);
@@ -7618,6 +7918,7 @@ console.log('\n--- events/activity.js: onPlayerChat relays "@<MENTION_WATCH_NAME
             adminChatColor: 1, commands: {}, discordBot: discordBotMock, errorColor: 2,
             hiddenAdminsSet: new Set(), hiddenVipSet: new Set(), masterChatColor: 3, mentionWatchName, muteArray: { getByAuth: () => null },
             MutePlayer: class { constructor() {} setDuration() {} },
+            formatBanRemaining: () => '5 мин.',
             silencedAuths: new Map(), vipChatColor: 4,
             chooseModeFunction: () => false, swapModeFunction: () => false, slowModeFunction: () => false,
             getCommand: () => false, getDate: () => 'DATE', getPlayerComp: () => null, getRole: () => 0,
@@ -7669,6 +7970,7 @@ console.log('\n--- events/activity.js: onPlayerChat gives a mentioned PLAYER (no
         adminChatColor: 1, commands: {}, discordBot: { sendLog: () => {} }, errorColor: 2,
         hiddenAdminsSet: new Set(), hiddenVipSet: new Set(), masterChatColor: 3, mentionWatchName: '', muteArray: { getByAuth: () => null },
         MutePlayer: class { constructor() {} setDuration() {} },
+        formatBanRemaining: () => '5 мин.',
         silencedAuths: new Map(), vipChatColor: 4,
         // Spam-flood auto-mute isn't what this test is about (see the
         // dedicated checkSpamFlood test elsewhere in this file) — Alice
@@ -8820,10 +9122,13 @@ console.log('--- core/bff/matchFlow.js: rating-driven match assembly (no captain
     }
 
     const roomCallsLocal = [];
+    const announcementsLocal = [];
+    const HaxNotificationMock = { CHAT: 1 };
     const roomMock = {
         setPlayerTeam: (id, team) => roomCallsLocal.push({ fn: 'setPlayerTeam', id, team }),
         startGame: () => roomCallsLocal.push({ fn: 'startGame' }),
         stopGame: () => roomCallsLocal.push({ fn: 'stopGame' }),
+        sendAnnouncement: (msg, id, color, style, sound) => announcementsLocal.push({ msg, id, color, style, sound }),
     };
     const ratingsDb = new Map();
     const limitCalls = [];
@@ -8841,6 +9146,9 @@ console.log('--- core/bff/matchFlow.js: rating-driven match assembly (no captain
         applyTrainingMap: () => { trainingMapCalls++; },
         teamSize: 4,
         reassembleDelayMs: 30, // real 10000ms in production; shortened here like every other timing test in this file
+        HaxNotification: HaxNotificationMock,
+        announcementColor: 1,
+        infoColor: 3,
     });
 
     // --- zero players: genuinely nothing to do ---
@@ -9108,6 +9416,7 @@ console.log('--- core/bff/matchFlow.js: rating-driven match assembly (no captain
     stateLocal.teamBlue = bluePlayers;
     stateLocal.teamSpec = [];
     roomCallsLocal.length = 0;
+    announcementsLocal.length = 0;
     await matchFlow.handlePlayersStop(null, 'red');
     check('red winning a full 4v4 raises every red player\'s rating above the default', ['RED1', 'RED2', 'RED3', 'RED4'].every((a) => ratingsDb.get(a).mu > 25), true);
     check('...and lowers every blue player\'s rating below the default', ['BLUE5', 'BLUE6', 'BLUE7', 'BLUE8'].every((a) => ratingsDb.get(a).mu < 25), true);
@@ -9116,6 +9425,20 @@ console.log('--- core/bff/matchFlow.js: rating-driven match assembly (no captain
     check('all 8 just-finished players are benched back to spectators', benchCalls.map((c) => c.id).sort((a, b) => a - b), [1, 2, 3, 4, 5, 6, 7, 8]);
     check('reassembly (new team assignments) has NOT happened yet — still inside the pause window', roomCallsLocal.filter((c) => c.fn === 'setPlayerTeam' && c.team !== TeamLocal.SPECTATORS).length, 0);
     check('...and all 8 get a fresh fairness-queue timestamp (sent to the back of the line for next time)', [1, 2, 3, 4, 5, 6, 7, 8].every((id) => stateLocal.specQueueSince.get(id) >= fairnessNow), true);
+
+    // --- item #14: each of the 8 players gets a private rating-delta line,
+    // winners positive, losers negative ---
+    const deltaMsgs = announcementsLocal.filter((a) => /^📊 Рейтинг:/.test(a.msg));
+    check('all 8 just-finished players get a rating-delta message', deltaMsgs.length, 8);
+    check('...each one sent privately (not id: null)', deltaMsgs.every((a) => a.id != null), true);
+    const redDeltaMsgs = deltaMsgs.filter((a) => [1, 2, 3, 4].includes(a.id));
+    const blueDeltaMsgs = deltaMsgs.filter((a) => [5, 6, 7, 8].includes(a.id));
+    check('winning (red) players show a non-negative delta', redDeltaMsgs.every((a) => !/\(-/.test(a.msg)), true);
+    check('losing (blue) players show a negative delta', blueDeltaMsgs.every((a) => /\(-/.test(a.msg)), true);
+
+    // --- item #21: a room-wide countdown announcement precedes the
+    // reassembleDelayMs pause on a natural end ---
+    check('a "next match in N sec" countdown is broadcast room-wide', announcementsLocal.some((a) => a.id == null && /Следующий матч через/.test(a.msg)), true);
 
     // Simulates the real room's own onPlayerTeamChange -> updateTeams() side
     // effect the setPlayerTeam calls above trigger synchronously in
@@ -9224,6 +9547,8 @@ console.log('--- core/bff/threeDefLine.js: "3 defenders" rule (big map only) ---
     const CF = { red: 2, blue: 4, c0: 268435456, c1: 536870912 };
     const discProps = new Map();
     const discCalls = [];
+    const sentLocal = [];
+    const HaxNotificationMock = { CHAT: 1 };
     const roomMock = {
         CollisionFlags: CF,
         getPlayerDiscProperties: (id) => discProps.get(id) ?? null,
@@ -9231,6 +9556,7 @@ console.log('--- core/bff/threeDefLine.js: "3 defenders" rule (big map only) ---
             discCalls.push({ id, cGroup: props.cGroup });
             discProps.set(id, { ...discProps.get(id), ...props });
         },
+        sendAnnouncement: (msg, id, color, style, sound) => sentLocal.push({ msg, id, color, style, sound }),
     };
 
     function mkPlayer(id, x) {
@@ -9238,7 +9564,10 @@ console.log('--- core/bff/threeDefLine.js: "3 defenders" rule (big map only) ---
     }
 
     const stateLocal = { currentStadium: 'classic', teamRed: [], teamBlue: [] };
-    const { adjustDefenseLine } = createBffThreeDefLine({ room: roomMock, state: stateLocal, Team: TeamLocal });
+    const { adjustDefenseLine } = createBffThreeDefLine({
+        room: roomMock, state: stateLocal, Team: TeamLocal,
+        HaxNotification: HaxNotificationMock, warningColor: 3, successColor: 4,
+    });
 
     // --- not the big map (1v1/2v2 classic): the rule never applies ---
     stateLocal.teamRed = [mkPlayer(1, 100)];
@@ -9266,24 +9595,34 @@ console.log('--- core/bff/threeDefLine.js: "3 defenders" rule (big map only) ---
     discProps.set(20, { cGroup: CF.blue });
     discProps.set(21, { cGroup: CF.blue });
     discCalls.length = 0;
+    sentLocal.length = 0;
     adjustDefenseLine();
     check("red's most forward player (highest x) is tagged with the c0 defensive-line group", discProps.get(11).cGroup, CF.red | CF.c0);
     check('...the other red player is left on the plain group, free to defend', discProps.get(10).cGroup, CF.red);
     check("blue's most forward player (lowest x) is tagged with the c1 defensive-line group", discProps.get(21).cGroup, CF.blue | CF.c1);
     check('...the other blue player is left on the plain group', discProps.get(20).cGroup, CF.blue);
     check('exactly 2 disc-property writes happen (one per team), not one per player', discCalls.length, 2);
+    // item #20: the newly-restricted defender on each side is told once, privately.
+    check('the newly-restricted red defender (11) gets a private explanation', sentLocal.some((s) => s.id === 11 && /крайний защитник/.test(s.msg)), true);
+    check('the newly-restricted blue defender (21) gets one too', sentLocal.some((s) => s.id === 21 && /крайний защитник/.test(s.msg)), true);
+    check('the never-restricted teammates get no message at all', sentLocal.some((s) => s.id === 10 || s.id === 20), false);
 
-    // --- idempotent: an unchanged tick makes no redundant writes ---
+    // --- idempotent: an unchanged tick makes no redundant writes OR messages ---
     discCalls.length = 0;
+    sentLocal.length = 0;
     adjustDefenseLine();
     check('a second call with unchanged positions writes nothing (already correct)', discCalls.length, 0);
+    check('...and re-sends no notification either (edge-triggered, not every tick)', sentLocal.length, 0);
 
     // --- the most-forward player changes: the old one is released, the new one restricted ---
     stateLocal.teamRed = [mkPlayer(10, 400), mkPlayer(11, 300)]; // 10 overtakes 11
     discCalls.length = 0;
+    sentLocal.length = 0;
     adjustDefenseLine();
     check('when a teammate overtakes, the new forward player is restricted', discProps.get(10).cGroup, CF.red | CF.c0);
     check('...and the previous one is released back to the plain group', discProps.get(11).cGroup, CF.red);
+    check('the newly-restricted player (10) gets the restriction message', sentLocal.some((s) => s.id === 10 && /крайний защитник/.test(s.msg)), true);
+    check('the just-released player (11) gets a "no longer restricted" message instead', sentLocal.some((s) => s.id === 11 && /больше не крайний/.test(s.msg)), true);
 
     // --- a player with no disc yet (e.g. mid-transition) does not crash the tick ---
     stateLocal.teamBlue = [mkPlayer(20, 200), mkPlayer(99, -500)];
@@ -9419,7 +9758,7 @@ console.log('--- core/bff/roomStats.js: stats persistence, trimmed (no clubs, no
 
     const bffRoomStats = require(path.join(CORE, 'bff', 'roomStats'))({
         room: roomMock, state: stateLocal, Team: TeamLocal, authArray: authArrayLocal, db,
-        HaxStatistics: HaxStatisticsLocal, HaxNotification, errorColor: 2, teamSize: 4,
+        HaxStatistics: HaxStatisticsLocal, HaxNotification, errorColor: 2, announcementColor: 1, teamSize: 4,
         getAssistsPlayer: (p) => perPlayerStat[p.id].assists,
         getCSPlayer: (p) => perPlayerStat[p.id].CS,
         getGametimePlayer: (p) => perPlayerStat[p.id].playtime,
@@ -9435,6 +9774,19 @@ console.log('--- core/bff/roomStats.js: stats persistence, trimmed (no clubs, no
     check('wins only counted for the winning team', db.getPlayerStats('AUTH_BOB').wins, 0);
     check('wins counted for the winning side', db.getPlayerStats('AUTH_ALICE').wins, 1);
     check('no club stat crediting happens at all (BFF has no clubs) — confirmed via db.getAllClubs staying empty', db.getAllClubs(), []);
+
+    // Round-number games-played milestone (item #24), mirrored from the
+    // main room's own — a fresh player seeded one game short of 50.
+    authArrayLocal[20] = ['AUTH_MILESTONE'];
+    perPlayerStat[20] = { goals: 0, assists: 0, CS: 0, playtime: 60 };
+    db.savePlayerStats('AUTH_MILESTONE', Object.assign(new HaxStatisticsLocal('Grinder'), { games: 49 }));
+    sentLocal.length = 0;
+    await bffRoomStats.updatePlayerStats({ id: 20, name: 'Grinder' }, TeamLocal.BLUE);
+    check('crossing a milestone (49 -> 50) announces it publicly', sentLocal.some((s) => s.id === null && /Grinder сыграл\(а\) 50-й матч/.test(s.msg)), true);
+
+    sentLocal.length = 0;
+    await bffRoomStats.updatePlayerStats({ id: 20, name: 'Grinder' }, TeamLocal.BLUE);
+    check('the very next (non-milestone) game, 51, announces nothing', sentLocal.some((s) => /сыграл\(а\)/.test(s.msg)), false);
 
     // updateStats() needs a genuine full 4v4 (teamSize=4 per side) to fire.
     stateLocal.teamRedStats = [1, 2, 3, 4].map((id) => ({ id, name: 'R' + id }));
@@ -9467,8 +9819,11 @@ console.log('--- core/bff/roomStats.js: stats persistence, trimmed (no clubs, no
 
     sentLocal.length = 0;
     await bffRoomStats.printAllRankings(0);
-    check('printAllRankings includes a rating line', sentLocal[0].msg.includes('Рейтинг>'), true);
-    check('...but never a clubs line (BFF has no clubs at all, unlike the main room\'s buildAllRankingsText)', sentLocal[0].msg.includes('Клубы>'), false);
+    // Leader-only per category since 2026-08-15 (same wall-of-text fix as
+    // the main room's own buildAllRankingsText).
+    check('printAllRankings includes a rating line', sentLocal[0].msg.includes('Рейтинг:'), true);
+    check('...but never a clubs line (BFF has no clubs at all, unlike the main room\'s buildAllRankingsText)', sentLocal[0].msg.includes('Клубы'), false);
+    check('...and points at !tops <category> for the full top-5', /Полная таблица по категории: !tops <games\|wins\|goals\|assists\|cs\|playtime\|rating>/.test(sentLocal[0].msg), true);
 
     db.close();
 })();
@@ -9502,15 +9857,17 @@ console.log('--- core/bff/commands.js: !me/!tops/!help, no economy/clubs ---');
     };
     const { computeOrdinal } = require(path.join(CORE, 'bff', 'rating'));
     const hiddenVipSetLocal = new Set();
+    const stateLocal = { teamSpec: [], specQueueSince: new Map() };
 
     const bffCommands = require(path.join(CORE, 'bff', 'commands'))({
-        room: roomMock, state: {}, authArray: authArrayLocal, db, HaxStatistics: HaxStatisticsLocal,
+        room: roomMock, state: stateLocal, authArray: authArrayLocal, db, HaxStatistics: HaxStatisticsLocal,
         HaxNotification: HaxNotificationMock, Role: RoleLocal,
         infoColor: 1, errorColor: 2, successColor: 3, getTimeStats: (s) => `${Math.floor(s / 60)}m`,
         getRole: (p) => (p.auth === 'AUTH_MASTER' ? RoleLocal.MASTER : p.auth === 'AUTH_ADMIN' ? RoleLocal.ADMIN_PERM : p.auth === 'AUTH_VIP' ? RoleLocal.VIP : RoleLocal.PLAYER),
         computeOrdinal,
         bffRoomStats: bffRoomStatsMock,
         hiddenVipSet: hiddenVipSetLocal,
+        teamSize: 4,
     });
 
     // --- !me: existing stats + rating ---
@@ -9618,6 +9975,40 @@ console.log('--- core/bff/commands.js: !me/!tops/!help, no economy/clubs ---');
     bffCommands.helpCommand({ id: 1, auth: 'AUTH_MASTER' });
     check('a master sees the admin section too (MASTER >= ADMIN_TEMP)', sentLocal[0].msg.includes('Админ:'), true);
 
+    // --- !queue: position in the fairness queue (item #13) ---
+    sentLocal.length = 0;
+    await bffCommands.queueCommand({ id: 99, name: 'NotWaiting', auth: 'AUTH_NOTWAITING' });
+    check('!queue for someone not in teamSpec (playing or offline) says so', sentLocal[0].msg.includes('не в очереди'), true);
+
+    stateLocal.teamSpec = [];
+    stateLocal.specQueueSince = new Map();
+    for (let i = 1; i <= 10; i++) {
+        stateLocal.teamSpec.push({ id: i, name: `P${i}` });
+        stateLocal.specQueueSince.set(i, i * 1000); // ascending -> id order == queue order
+    }
+
+    sentLocal.length = 0;
+    await bffCommands.queueCommand({ id: 1 });
+    check('the longest-waiting player (1st in queue) is told their exact position', sentLocal[0].msg.includes('1-й в очереди'), true);
+    check('...phrased as "next match" (within 2*teamSize), not a wait estimate', sentLocal[0].msg.includes('следующий же матч'), true);
+
+    sentLocal.length = 0;
+    await bffCommands.queueCommand({ id: 8 });
+    check('the 8th-in-line player (exactly 2*teamSize) still makes the next match', sentLocal[0].msg.includes('8-й в очереди'), true);
+    check('...still the "next match" phrasing, not a wait estimate', sentLocal[0].msg.includes('следующий же матч'), true);
+
+    sentLocal.length = 0;
+    await bffCommands.queueCommand({ id: 10 });
+    check('the 10th-in-line player (past 2*teamSize) gets a wait estimate instead', sentLocal[0].msg.includes('10-й в очереди из 10'), true);
+    check('...needs to wait 1 more match (ceil((10-8)/8))', sentLocal[0].msg.includes('подождите ещё 1 матч'), true);
+
+    // --- !rules: explains rating-based assembly, no captain-pick (item #16) ---
+    sentLocal.length = 0;
+    bffCommands.rulesCommand({ id: 1 });
+    check('!rules explains team assembly is rating-based', sentLocal[0].msg.includes('рейтингу'), true);
+    check('...mentions the max match size (4x4 for teamSize=4)', sentLocal[0].msg.includes('4x4'), true);
+    check('...and points to !queue', sentLocal[0].msg.includes('!queue'), true);
+
     db.close();
 })();
 
@@ -9691,6 +10082,13 @@ console.log('--- core/bff/events.js: room.onXxx handlers, trimmed of economy/pok
         teamSize: 4,
         fetchSummaryEmbed: (game) => fetchSummaryEmbedCalls.push(game),
         fetchRecording: (game, bot) => fetchRecordingCalls.push({ game, bot }),
+        // Stubbed rather than the real stats/playerStats.js implementation
+        // (heavy setup: authArray/getGK/getPlayerComp/HaxStatistics) — the
+        // aggregation itself is report.js's existing, already-trusted logic;
+        // this test is only about events.js's own recap TEXT formatting.
+        actionReportCountTeam: (goalsByTeam, team) => (team === TeamLocal.RED
+            ? [[{ id: 1, name: 'Red1', team: TeamLocal.RED }, 2, 0, 0], [{ id: 2, name: 'Red2', team: TeamLocal.RED }, 0, 1, 0]]
+            : []),
     });
 
     // --- join: banned auth is kicked, never joins ---
@@ -9705,6 +10103,9 @@ console.log('--- core/bff/events.js: room.onXxx handlers, trimmed of economy/pok
     check('a clean auth is not kicked', roomCallsLocal.some((c) => c.startsWith('kickPlayer')), false);
     check('matchFlow.handlePlayersJoin fires for a real join', matchFlowCalls, ['join']);
     check('a fresh join is stamped into the fairness queue (see matchFlow.js)', stateLocal.specQueueSince.has(2), true);
+    // Onboarding nudge (requested 2026-08-15): a brand new player has no
+    // other signal !help even exists.
+    check('the welcome message points a new player at !help', sentLocal.some((s) => s.msg.includes('!help')), true);
 
     // --- join: master gets the admin badge + owner announcement ---
     roomCallsLocal.length = 0; sentLocal.length = 0;
@@ -9795,6 +10196,13 @@ console.log('--- core/bff/events.js: room.onXxx handlers, trimmed of economy/pok
     check('onGameStop sets playSituation back to STOP', stateLocal.playSituation, SituationLocal.STOP);
     check('onGameStop stops the recording (state.game.rec updated)', stateLocal.game.rec, 'STOPPED_REC');
     check('...and posts a match-report embed to Discord', fetchSummaryEmbedCalls.length, 1);
+    // item #15: the SAME natural end also posts a plain-text recap IN the
+    // room itself, not just to Discord.
+    const recapMsg = sentLocal.find((s) => /^🏁 Матч окончен:/.test(s.msg));
+    check('a natural end posts an in-room recap with the final score', recapMsg?.msg.includes(`${currentScores.red} - ${currentScores.blue}`), true);
+    check('...listing red\'s scorer/assister by name with goal/assist markers', recapMsg?.msg.includes('Red1 (2⚽)') && recapMsg?.msg.includes('Red2 (1🅰️)'), true);
+    check('...and blue, with no actions this game, shown as such rather than blank', recapMsg?.msg.includes('без результативных действий'), true);
+    check('...broadcast to the whole room (id: null)', recapMsg?.id, null);
     await new Promise((resolve) => setTimeout(resolve, 700)); // fetchRecording is scheduled 500ms out, same as the main room's own onGameStop
     check('...and, shortly after, uploads the recording too', fetchRecordingCalls.length, 1);
 
@@ -9871,10 +10279,12 @@ console.log('--- core/bff/chatGuard.js: spam-flood auto-mute + !mute/!unmute/!mu
     const muteArrayReal = new MuteList();
     const MutePlayerReal = createMutePlayerClass({ room: roomLocal, announcementColor: 1, HaxNotification: HaxNotificationMock, muteArray: muteArrayReal });
 
+    const { formatBanRemaining: formatBanRemainingReal } = require(path.join(CORE, 'utils'));
     const chatGuard = require(path.join(CORE, 'bff', 'chatGuard'))({
         room: roomLocal, authArray: authArrayLocal, MutePlayer: MutePlayerReal, muteArray: muteArrayReal,
         hiddenAdminsSet: hiddenAdminsSetLocal, announcementColor: 1, errorColor: 2, HaxNotification: HaxNotificationMock,
         muteDuration: 5, spamWindowMs: 80, spamMessageThreshold: 3, spamMuteMinutes: 5,
+        formatBanRemaining: formatBanRemainingReal,
     });
 
     // --- checkSpamFlood: real threshold behavior (own isolated block, not

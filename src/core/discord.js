@@ -577,6 +577,13 @@ module.exports = function createDiscordBot({
     // message shows only the main room until then — same output as before
     // this feature existed.
     let bffStatus = null;
+    // Set via setRoomDown()/setBffRoomDown() (requested 2026-08-15, after a
+    // real outage where the status message kept showing the last known —
+    // by then dead — room link for the whole time the room was down, with
+    // no indication anything was wrong). Cleared automatically the moment
+    // a fresh link comes back in (setRoomLink/updateBffRoomStatus below).
+    let roomDown = false;
+    let bffRoomDown = false;
 
     // Bug (reported live): a transient Discord API hiccup (503 Service
     // Unavailable, a proxy connect timeout — both seen in production) left
@@ -606,7 +613,18 @@ module.exports = function createDiscordBot({
     function buildStatusPayload() {
         const embeds = [];
         const buttons = [];
-        if (roomLink) {
+        // roomDown/bffRoomDown checked FIRST — a dead link is worse than no
+        // link at all (a live-looking button that just doesn't work), so
+        // the down state always wins over whatever stale roomLink/bffStatus
+        // is still sitting there from before the outage.
+        if (roomDown) {
+            embeds.push(
+                new EmbedBuilder()
+                    .setTitle('HaxLab')
+                    .setDescription('🔴 Комната сейчас недоступна.')
+                    .setColor(0xff4444)
+            );
+        } else if (roomLink) {
             embeds.push(
                 new EmbedBuilder()
                     .setTitle('HaxLab')
@@ -615,7 +633,14 @@ module.exports = function createDiscordBot({
             );
             buttons.push(new ButtonBuilder().setLabel('Присоединиться').setStyle(ButtonStyle.Link).setURL(roomLink));
         }
-        if (bffStatus) {
+        if (bffRoomDown) {
+            embeds.push(
+                new EmbedBuilder()
+                    .setTitle('HaxLab BFF')
+                    .setDescription('🔴 Комната сейчас недоступна.')
+                    .setColor(0xff4444)
+            );
+        } else if (bffStatus) {
             embeds.push(
                 new EmbedBuilder()
                     .setTitle('HaxLab BFF')
@@ -624,7 +649,10 @@ module.exports = function createDiscordBot({
             );
             buttons.push(new ButtonBuilder().setLabel('Присоединиться (BFF)').setStyle(ButtonStyle.Link).setURL(bffStatus.roomLink));
         }
-        return { embeds, components: [new ActionRowBuilder().addComponents(...buttons)] };
+        // An ActionRowBuilder with zero components is rejected by Discord's
+        // API — only attach one when there's actually a button to show (both
+        // rooms down at once is a real case now that down-state exists).
+        return { embeds, components: buttons.length > 0 ? [new ActionRowBuilder().addComponents(...buttons)] : [] };
     }
 
     // Guard relaxed to "either room has something to show" — before BFF
@@ -722,6 +750,15 @@ module.exports = function createDiscordBot({
 
     function setRoomLink(url) {
         roomLink = url;
+        roomDown = false;
+        updateRoomStatus();
+    }
+
+    // Called once launchRoom() has genuinely exhausted its own retries (see
+    // src/index.js) — a real, confirmed outage, not a single transient
+    // hiccup already recovered from internally.
+    function setRoomDown() {
+        roomDown = true;
         updateRoomStatus();
     }
 
@@ -752,6 +789,13 @@ module.exports = function createDiscordBot({
 
     function updateBffRoomStatus(playerCount, url) {
         bffStatus = { playerCount, roomLink: url };
+        bffRoomDown = false;
+        updateRoomStatus();
+    }
+
+    // Same idea as setRoomDown, for BFF (see src/bffIndex.js).
+    function setBffRoomDown() {
+        bffRoomDown = true;
         updateRoomStatus();
     }
 
@@ -833,6 +877,7 @@ module.exports = function createDiscordBot({
         sendReport,
         sendRecording,
         setRoomLink,
+        setRoomDown,
         updateRoomStatus,
         sendPassword,
         sendAdminCall,
@@ -845,6 +890,7 @@ module.exports = function createDiscordBot({
         sendBffReport,
         sendBffRecording,
         updateBffRoomStatus,
+        setBffRoomDown,
     };
 };
 

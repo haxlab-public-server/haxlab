@@ -47,7 +47,33 @@ module.exports = function createBffEvents({
     teamSize,
     fetchSummaryEmbed,
     fetchRecording,
+    actionReportCountTeam,
 }) {
+    // In-room match recap (item #15) — previously the only per-player
+    // goals/assists breakdown went to Discord (fetchSummaryEmbed); players
+    // actually in the room never saw who did what beyond the bare score.
+    // Reuses the exact same [player, goals, assists, CS] tuples report.js's
+    // own Discord embed builds from (actionReportCountTeam), just rendered
+    // as plain chat text instead of an embed field.
+    function buildRoomRecapText(game) {
+        const goals = [[], []];
+        for (const g of game.goals) {
+            goals[g.team - 1].push([g.striker, g.assist]);
+        }
+        const formatTeam = (team) => {
+            const actions = actionReportCountTeam(goals, team);
+            if (actions.length === 0) return 'без результативных действий';
+            return actions.map((act) => {
+                const parts = [];
+                if (act[1] > 0) parts.push(`${act[1]}⚽`);
+                if (act[2] > 0) parts.push(`${act[2]}🅰️`);
+                if (act[3] > 0) parts.push(`${act[3]}🧤`);
+                const ownGoal = act[0].team !== team ? '[АГ] ' : '';
+                return `${ownGoal}${act[0].name} (${parts.join(', ')})`;
+            }).join(', ');
+        };
+        return `🔴 ${formatTeam(Team.RED)}\n🔵 ${formatTeam(Team.BLUE)}`;
+    }
     async function onPlayerJoin(player) {
         authArray[player.id] = [player.auth, player.conn];
 
@@ -65,7 +91,7 @@ module.exports = function createBffEvents({
         );
         room.sendAnnouncement(`${player.name} [${player.auth}]`, null, infoColor, 'small', null);
         room.sendAnnouncement(
-            `👋 Добро пожаловать ${player.name} !`,
+            `👋 Добро пожаловать ${player.name} !\n Введите !help, чтобы увидеть список команд.`,
             player.id,
             welcomeColor,
             'bold',
@@ -217,6 +243,10 @@ module.exports = function createBffEvents({
             // onGameStop (only the RATING update above is gated to a full
             // house, per matchFlow.js's own teamSize check).
             fetchSummaryEmbed(state.game);
+            room.sendAnnouncement(
+                `🏁 Матч окончен: 🔴 ${state.game.scores.red} - ${state.game.scores.blue} 🔵\n${buildRoomRecapText(state.game)}`,
+                null, announcementColor, 'bold', HaxNotification.CHAT
+            );
             setTimeout((gameEnd) => { fetchRecording(gameEnd, discordBot); }, 500, state.game);
             await matchFlow.handlePlayersStop(null, outcome);
         } else {

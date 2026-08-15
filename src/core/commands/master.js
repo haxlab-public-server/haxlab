@@ -12,10 +12,18 @@ module.exports = function createMasterCommands({
     masterList,
     announcementColor,
     errorColor,
+    successColor,
     HaxNotification,
     formatBanRemaining,
     formatVipRemaining,
     discordBot,
+    // This factory is shared as-is by both rooms (see bffEntry.js's own
+    // comment on reusing it) — BFF has none of the main room's !up/
+    // !vipcolor/!shop/economy, so the perks explanation below can't be one
+    // hardcoded string. Each entry point passes its own accurate summary;
+    // defaults to the main room's, since every OTHER caller in this
+    // codebase is the main room's own entry.js.
+    vipPerksText = `приоритет в очереди капитанов (!up), свой цвет префикса (!vipcolor), эксклюзивные предметы в !shop, двойные монеты за победы, увеличенный лимит AFK. Все команды — !viphelp`,
 }) {
     // A grant past its expiry is functionally identical to never having
     // been VIP at all — purged from both the cache and the db the moment
@@ -371,6 +379,18 @@ module.exports = function createMasterCommands({
         state.vipList.push([auth, targetName, expiresAt]);
         await db.addVip(auth, targetName, expiresAt);
         discordBot.grantVipRole(auth);
+        // Item #23: the public "X теперь VIP" broadcast each of the 3 grant
+        // paths (setVipCommand/grantVipByAuth/roomStats.js's win lottery)
+        // sends right after calling this never explains what VIP actually
+        // unlocks — shown privately here, once, to the target specifically,
+        // when they're online to see it, regardless of which path granted it.
+        const targetPlayer = state.playersAll.find((p) => authArray[p.id]?.[0] === auth);
+        if (targetPlayer) {
+            room.sendAnnouncement(
+                `✨ Вам открыт VIP: ${vipPerksText}.`,
+                targetPlayer.id, successColor, 'bold', HaxNotification.CHAT
+            );
+        }
     }
 
     // Called from the Discord bridge (see entry.js's

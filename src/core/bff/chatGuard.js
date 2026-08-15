@@ -22,6 +22,7 @@ module.exports = function createBffChatGuard({
     announcementColor,
     errorColor,
     HaxNotification,
+    formatBanRemaining,
     muteDuration = 5,
     spamWindowMs = 4000,
     spamMessageThreshold = 5,
@@ -57,7 +58,9 @@ module.exports = function createBffChatGuard({
     }
 
     function announceMuted(player) {
-        room.sendAnnouncement(`Вы замучены !`, player.id, errorColor, 'bold', HaxNotification.CHAT);
+        const mute = muteArray.getByAuth(authArray[player.id][0]);
+        const remaining = mute ? ` Осталось: ${formatBanRemaining(mute.expiresAt)}.` : '';
+        room.sendAnnouncement(`Вы замучены !${remaining}`, player.id, errorColor, 'bold', HaxNotification.CHAT);
     }
 
     // !mute #<id> [минуты] — Role.ADMIN_TEMP, same as the main room.

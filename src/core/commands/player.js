@@ -41,6 +41,9 @@ module.exports = function createPlayerCommands({
     formatCoins,
     discordBot,
     formatBanRemaining,
+    upCooldownMs = 60 * 60 * 1000,
+    upDailyMaxUses = 3,
+    upDailyWindowMs = 24 * 60 * 60 * 1000,
 }) {
     // One-time reward for linking a Discord account — only paid out on a
     // genuine first link (see db.linkDiscordId's isNewLink), so relinking
@@ -53,15 +56,37 @@ module.exports = function createPlayerCommands({
     const REPORT_COOLDOWN_MS = 60 * 1000;
     const reportCooldownSet = new Set();
 
-    // !up — per-player cooldown so the same VIP can't camp the front of the
-    // captain queue every round. The "only one live claim at a time" part
-    // is separately enforced via state.priorityCaptainId itself (a single
-    // slot — see team/choosing.js's resolveNextCaptainId). Keyed to an
-    // expiry timestamp (not just presence) so a rejected !up can tell the
-    // player how long is actually left, via the same formatBanRemaining
-    // helper !banauth/!authbans already use for the same "Xmin." shape.
-    const UP_COOLDOWN_MS = 30 * 60 * 1000;
+    // !up — per-auth cooldown (1 use/hour) PLUS a rolling-24h cap (3
+    // uses/day, requested 2026-08-15 — was cooldown-only before) so the
+    // same VIP can't camp the front of the captain queue every round OR
+    // every hour, all day. The "only one live claim at a time" part is
+    // separately enforced via state.priorityCaptainId itself (a single
+    // slot — see team/choosing.js's resolveNextCaptainId).
+    //
+    // Both maps are keyed by AUTH, not player.id — player.id resets on
+    // every reconnect, which would make the daily cap trivially bypassable
+    // by just leaving and rejoining (a real gap in the original id-keyed
+    // cooldown, fixed here while reworking this anyway, since a
+    // reconnect-bypassable "3 times a day" isn't actually a limit at all).
+    //
+    // upCooldownMap: auth -> expiry ISO timestamp, same formatBanRemaining
+    // "Xmin." shape !banauth/!authbans/!mute already use for a rejection.
+    // upDailyUsage: auth -> array of use timestamps (ms), pruned to the
+    // rolling upDailyWindowMs window on every check — a plain sliding
+    // window rather than a calendar-day reset, so there's no timezone/
+    // midnight semantics to explain to players at all. Cooldown/cap/window
+    // are injected (defaults above) rather than hardcoded purely so tests
+    // can shrink them instead of waiting out real hours — same reasoning
+    // as matchFlow.js's own injected reassembleDelayMs.
     const upCooldownMap = new Map();
+    const upDailyUsage = new Map();
+
+    function pruneUpDailyUsage(auth) {
+        const now = Date.now();
+        const timestamps = (upDailyUsage.get(auth) ?? []).filter((t) => now - t < upDailyWindowMs);
+        upDailyUsage.set(auth, timestamps);
+        return timestamps;
+    }
     function leaveCommand(player, message) {
         room.kickPlayer(player.id, 'Пока !', false);
     }
@@ -101,6 +126,13 @@ module.exports = function createPlayerCommands({
                 commandString = commandString.substring(0, commandString.length - 1) + '.\n';
             }
             commandString += "\nДля получения информации о конкретной команде, введите '!help <имя команды>'.";
+            // Unified index pointer (requested 2026-08-15): !club and !vip*
+            // are each their OWN multi-command group with a separate help
+            // entry point (!club help / !viphelp) that nothing in this list
+            // otherwise hints at — spelled out here explicitly so the two-hop
+            // "!help club" -> "see !club help" path isn't the only way to
+            // discover it.
+            commandString += "\nДополнительно: '!club help' — все команды клуба, '!viphelp' — все команды VIP.";
             room.sendAnnouncement(
                 commandString,
                 player.id,
@@ -706,8 +738,18 @@ module.exports = function createPlayerCommands({
             state.priorityCaptainId = null;
         }
         if (state.priorityCaptainId != null) {
+            // Distinguished from the generic "someone else already claimed
+            // it" rejection below (requested 2026-08-15: the two used to
+            // share one message, which read to the CALLER like their own
+            // already-live claim had just been stolen by someone else —
+            // confusing/alarming even though nothing was actually
+            // overridden; state.priorityCaptainId is a single slot and
+            // every other path here already refuses to replace a live
+            // claim with a different one).
             room.sendAnnouncement(
-                `Уже есть VIP в очереди на капитанство — дождитесь следующей итерации !`,
+                state.priorityCaptainId === player.id
+                    ? `Вы уже в очереди на капитанство — дождитесь следующей итерации !`
+                    : `Уже есть VIP в очереди на капитанство — дождитесь следующей итерации !`,
                 player.id,
                 errorColor,
                 'bold',
@@ -715,9 +757,22 @@ module.exports = function createPlayerCommands({
             );
             return;
         }
-        if (upCooldownMap.has(player.id)) {
+        const auth = authArray[player.id][0];
+        const dailyUses = pruneUpDailyUsage(auth);
+        if (dailyUses.length >= upDailyMaxUses) {
+            const nextFreeAt = new Date(dailyUses[0] + upDailyWindowMs).toISOString();
             room.sendAnnouncement(
-                `Команду !up можно использовать раз в 30 минут — осталось ${formatBanRemaining(upCooldownMap.get(player.id))} !`,
+                `!up можно использовать не больше ${upDailyMaxUses} раз в день — использовано ${dailyUses.length}/${upDailyMaxUses}, следующая попытка через ${formatBanRemaining(nextFreeAt)} !`,
+                player.id,
+                errorColor,
+                'bold',
+                HaxNotification.CHAT
+            );
+            return;
+        }
+        if (upCooldownMap.has(auth)) {
+            room.sendAnnouncement(
+                `Команду !up можно использовать раз в час — осталось ${formatBanRemaining(upCooldownMap.get(auth))} !`,
                 player.id,
                 errorColor,
                 'bold',
@@ -726,13 +781,37 @@ module.exports = function createPlayerCommands({
             return;
         }
         state.priorityCaptainId = player.id;
-        const upExpiresAt = new Date(Date.now() + UP_COOLDOWN_MS).toISOString();
-        upCooldownMap.set(player.id, upExpiresAt);
-        setTimeout(() => upCooldownMap.delete(player.id), UP_COOLDOWN_MS);
+        const upExpiresAt = new Date(Date.now() + upCooldownMs).toISOString();
+        upCooldownMap.set(auth, upExpiresAt);
+        setTimeout(() => upCooldownMap.delete(auth), upCooldownMs);
+        dailyUses.push(Date.now());
+        upDailyUsage.set(auth, dailyUses);
+        // Requested 2026-08-15: claiming priority captaincy while AFK is
+        // pointless (they'd get picked as captain still tagged AFK) — pull
+        // them out automatically, same exitAfk() jjCommand/afkCommand's own
+        // toggle-off already use. Called AFTER state.priorityCaptainId is
+        // set (not before): exitAfk() -> handlePlayersJoin() can itself
+        // trigger an immediate captain-need if the room happens to require
+        // one right now, and that re-evaluation must see this claim already
+        // in place to actually honor it. A no-op (returns false) if they
+        // weren't AFK to begin with.
+        exitAfk(player);
         room.sendAnnouncement(
             `⭐ ${player.name} станет капитаном при следующем формировании команд !`,
             null,
             announcementColor,
+            'bold',
+            HaxNotification.CHAT
+        );
+        // Same "tell them the actual state, don't make them guess" UX as
+        // !mute's own remaining-time line (see events/activity.js's
+        // announceMuted) — a private follow-up so the claimant knows
+        // exactly how many uses they have left today, not just that this
+        // one worked.
+        room.sendAnnouncement(
+            `Использований !up сегодня: ${dailyUses.length}/${upDailyMaxUses}.`,
+            player.id,
+            infoColor,
             'bold',
             HaxNotification.CHAT
         );

@@ -49,6 +49,40 @@ async function buildRatingRankingString(db) {
     return rankingString.substring(0, rankingString.length - 2);
 }
 
+// Condensed, leader-only versions of the three builders above — real bug
+// fixed 2026-08-15 ("!tops страдает той же болезнью полотна текста, что и
+// магазин"): the combined "!tops" (no argument) view used to join EVERY
+// category's full top-5 line together, easily 6-7 lines each five names
+// wide — unreadable in HaxBall's small chat window. The combined view now
+// shows just the #1 leader per category (one line each); the full top-5
+// per category is still exactly one `!tops <category>` away, via
+// buildRankingString/buildRatingRankingString/buildClubRankingString
+// above, completely unchanged. Same 5-player (or, for clubs, "any score at
+// all") quorum as their full counterparts, so a category with too little
+// data still gets skipped the same way.
+async function buildTopLeaderLine(db, getTimeStats, statKey) {
+    const key = statKey == 'cs' ? 'CS' : statKey;
+    const leaderboard = await db.getLeaderboard(key, 5);
+    if (leaderboard.length < 5) return null;
+    let value = leaderboard[0].value;
+    if (key == 'playtime') value = getTimeStats(value);
+    return `${STAT_LABELS[key] ?? key}: ${leaderboard[0].playerName} (${value})`;
+}
+
+async function buildRatingLeaderLine(db) {
+    const leaderboard = await db.getRatingLeaderboard(5);
+    if (leaderboard.length < 5) return null;
+    return `Рейтинг: ${leaderboard[0].playerName} (${Math.round(leaderboard[0].ordinal)})`;
+}
+
+async function buildClubLeaderLine(db) {
+    const topClubs = await db.getTopClubs(1);
+    if (topClubs.length === 0) return null;
+    const club = topClubs[0];
+    const tag = `${club.emoji ?? ''}${club.prefix}`;
+    return `${CLUB_STAT_LABEL}: [${tag}] ${club.name} (${club.score})`;
+}
+
 // !tops clubs — ranks clubs by combined goals+assists+clean_sheets (each
 // weighted equally, see db.getTopClubs), NOT the 5-quorum player
 // leaderboards require: clubs are coin-gated and far scarcer than players,
@@ -67,12 +101,16 @@ async function buildClubRankingString(db) {
 
 // Every category in one block, skipping any that don't have the 5-player
 // quorum yet (or, for clubs, don't have any score at all) — null (not an
-// error) if literally none of them do.
+// error) if literally none of them do. Leader-only per category (see
+// buildTopLeaderLine's own comment) — the full top-5 for any one category
+// is a `!tops <category>` away, pointed at explicitly in the trailing hint
+// line so it isn't a dead end.
 async function buildAllRankingsText(db, getTimeStats) {
-    const playerLines = await Promise.all(RANKING_STAT_KEYS.map((key) => buildRankingString(db, getTimeStats, key)));
-    const clubLine = await buildClubRankingString(db);
+    const playerLines = await Promise.all(RANKING_STAT_KEYS.map((key) => buildTopLeaderLine(db, getTimeStats, key)));
+    const clubLine = await buildClubLeaderLine(db);
     const lines = [...playerLines, clubLine].filter((line) => line != null);
-    return lines.length > 0 ? lines.join('\n') : null;
+    if (lines.length === 0) return null;
+    return `${lines.join('\n')}\nПолная таблица по категории: !tops <${[...RANKING_STAT_KEYS.map((k) => k.toLowerCase()), 'clubs'].join('|')}>`;
 }
 
 module.exports = function createPrintStats({
@@ -119,7 +157,9 @@ module.exports = function createPrintStats({
 };
 
 module.exports.buildRankingString = buildRankingString;
+module.exports.buildTopLeaderLine = buildTopLeaderLine;
 module.exports.buildAllRankingsText = buildAllRankingsText;
 module.exports.buildClubRankingString = buildClubRankingString;
 module.exports.buildRatingRankingString = buildRatingRankingString;
+module.exports.buildRatingLeaderLine = buildRatingLeaderLine;
 module.exports.RANKING_STAT_KEYS = RANKING_STAT_KEYS;

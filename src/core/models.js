@@ -118,6 +118,7 @@ function createMutePlayerClass({ room, announcementColor, HaxNotification, muteA
         }
 
         setDuration(minutes) {
+            this.expiresAt = new Date(Date.now() + minutes * 60000).toISOString();
             this.unmuteTimeout = setTimeout(() => {
                 room.sendAnnouncement(
                     `Вы были размучены.`,

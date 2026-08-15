@@ -16,7 +16,7 @@
  * core/bff/roomSetup.js) is a wiring-layer decision this module doesn't
  * need to know about.
  */
-const { assignBalancedTeams, updateRatingsAfterMatch, defaultRating } = require('./rating');
+const { assignBalancedTeams, updateRatingsAfterMatch, computeOrdinal, defaultRating } = require('./rating');
 
 module.exports = function createBffMatchFlow({
     room,
@@ -30,6 +30,9 @@ module.exports = function createBffMatchFlow({
     applyTrainingMap,
     teamSize,
     reassembleDelayMs,
+    HaxNotification,
+    announcementColor,
+    infoColor,
 }) {
     async function ratingFor(auth) {
         return (await getRating(auth)) ?? defaultRating();
@@ -235,6 +238,18 @@ module.exports = function createBffMatchFlow({
             const { teamA: updatedRed, teamB: updatedBlue } = updateRatingsAfterMatch(redRatings, blueRatings, openskillOutcome);
             await Promise.all(state.teamRed.map((p, i) => saveRating(getAuth(p), p.name, updatedRed[i].mu, updatedRed[i].sigma)));
             await Promise.all(state.teamBlue.map((p, i) => saveRating(getAuth(p), p.name, updatedBlue[i].mu, updatedBlue[i].sigma)));
+
+            // Rating delta feedback — a ranked result silently changing a
+            // number nobody sees change is invisible progress. Rounded the
+            // same way !me already displays ratingOrdinal (stats/print.js),
+            // so this line and !me's own number always agree.
+            const reportDelta = (players, before, after) => players.forEach((p, i) => {
+                const delta = Math.round(computeOrdinal(after[i])) - Math.round(computeOrdinal(before[i]));
+                const sign = delta > 0 ? '+' : '';
+                room.sendAnnouncement(`📊 Рейтинг: ${Math.round(computeOrdinal(after[i]))} (${sign}${delta})`, p.id, infoColor, 'bold', HaxNotification.CHAT);
+            });
+            reportDelta(state.teamRed, redRatings, updatedRed);
+            reportDelta(state.teamBlue, blueRatings, updatedBlue);
         }
 
         // room.stopGame() does NOT move anyone back to spectators (native
@@ -256,6 +271,7 @@ module.exports = function createBffMatchFlow({
 
         if (byPlayer == null) {
             state.reassembling = true;
+            room.sendAnnouncement(`⏱️ Следующий матч через ${Math.round(reassembleDelayMs / 1000)} сек...`, null, announcementColor, 'bold', HaxNotification.CHAT);
             setTimeout(() => {
                 state.reassembling = false;
                 assembleMatch().catch((err) => console.error('[bff/matchFlow] assembleMatch failed:', err));

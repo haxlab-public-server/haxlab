@@ -68,8 +68,16 @@ module.exports = function createMovementEvents({
             'small',
             null
         );
+        let welcomeText = `👋 Добро пожаловать ${player.name} !\n Следите за новостями в Discord: dsc.gg/haxlab\n Введите !help, чтобы увидеть список команд.`;
+        // Season-close notice (item #22, see entry.js's own boot-time
+        // comparison) — every joiner sees it for the rest of this process's
+        // lifetime, not just whoever happened to join first right after
+        // the restart that picked up the closed season.
+        if (state.newSeasonAnnounceNeeded) {
+            welcomeText += `\n🏆 Сезон S${state.currentSeason - 1} завершён, топ-3 увековечены ("!trophy <категория> ${state.currentSeason - 1}") — начался сезон S${state.currentSeason}, статистика обнулена.`;
+        }
         room.sendAnnouncement(
-            `👋 Добро пожаловать ${player.name} !\n Следите за новостями в Discord: dsc.gg/haxlab`,
+            welcomeText,
             player.id,
             welcomeColor,
             'bold',

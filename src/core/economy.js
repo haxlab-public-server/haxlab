@@ -501,20 +501,39 @@ module.exports = function createEconomy({
     // `viaVip` — this item isn't actually owned, it's just surfaced for a
     // current VIP (see inventoryCommand/GOAL_ANIMATION_ITEM_IDS) — tagged
     // distinctly so it doesn't read as a real purchase.
-    function formatItemLine(item, owned, equippedId, level, viaVip) {
+    // balance — optional (requested 2026-08-15: "не видно, что по карману, а
+    // что нет"). When given, an item this player can't currently afford gets
+    // a trailing "❌ не хватает" marker — omitted entirely for already-owned
+    // items (affordability is meaningless there) and whenever the caller
+    // doesn't have a balance handy (inventoryCommand's own call below, where
+    // every item shown is already owned anyway).
+    function affordabilityMarker(price, balance) {
+        return balance != null && balance < price ? ' ❌ не хватает' : '';
+    }
+
+    // item.isNew — requested 2026-08-15 ("новые/снятые с продажи товары
+    // визуально не выделены"): no item sets this today (nothing's been
+    // added since this was built), but the mechanism is here so a future
+    // addition to shopItems.js can just set `isNew: true` and have it show
+    // up distinctly without any further code changes.
+    function formatItemLine(item, owned, equippedId, level, viaVip, balance) {
         const tag = !owned ? '' : item.id === equippedId ? ' [надето]' : viaVip ? ' [VIP]' : ' [куплено]';
+        const newTag = item.isNew ? '🆕 ' : '';
         if (item.retired) {
-            return `${item.id} — ${item.name} (снят с продажи)${tag}`;
+            return `${newTag}${item.id} — ${item.name} (снят с продажи)${tag}`;
         }
         if (item.upgradeable) {
             const currentLevel = level ?? 0;
             const progress = `уровень ${currentLevel}/${item.maxLevel}`;
             const nextStep = currentLevel >= item.maxLevel
                 ? 'максимум'
-                : `след.: ${formatCoins(priceForLevel(item, currentLevel + 1))}`;
-            return `${item.id} — ${item.name} (${progress}, ${nextStep})${tag}`;
+                : `след.: ${formatCoins(priceForLevel(item, currentLevel + 1))}${affordabilityMarker(priceForLevel(item, currentLevel + 1), balance)}`;
+            return `${newTag}${item.id} — ${item.name} (${progress}, ${nextStep})${tag}`;
         }
-        return `${item.id} — ${item.name} (${item.price === 0 ? 'бесплатно' : formatCoins(item.price)})${tag}`;
+        if (owned || item.price === 0) {
+            return `${newTag}${item.id} — ${item.name} (${item.price === 0 ? 'бесплатно' : formatCoins(item.price)})${tag}`;
+        }
+        return `${newTag}${item.id} — ${item.name} (${formatCoins(item.price)}${affordabilityMarker(item.price, balance)})${tag}`;
     }
 
     // The smoke bundle (see shopItems.js's `smokeFamily`) is never itself
@@ -525,15 +544,26 @@ module.exports = function createEconomy({
         return item.smokeFamily ? SMOKE_COLOR_ITEM_IDS.some((id) => owned.includes(id)) : owned.includes(item.id);
     }
 
-    function formatCatalogSection(sectionKey, owned, equipped, levels) {
+    function formatCatalogSection(sectionKey, owned, equipped, levels, balance) {
         // `hidden` items (the smoke family's individual colors — see
         // shopItems.js) aren't independent catalog entries anymore, just
         // !equip targets once the smoke bundle above is owned. `retired`
         // items (past seasons' now-unbuyable forms) are the same story —
         // still fully equippable by whoever already owns one, just no
         // longer worth advertising in a list of things you CAN buy.
-        const lines = items.filter((i) => i.type === sectionKey && !i.hidden && !i.retired).map((i) => formatItemLine(i, isOwned(i, owned), equipped[i.type], levels[i.id]));
+        const lines = items.filter((i) => i.type === sectionKey && !i.hidden && !i.retired).map((i) => formatItemLine(i, isOwned(i, owned), equipped[i.type], levels[i.id], undefined, balance));
         return `${CATEGORY_LABELS[sectionKey]}:\n${lines.join('\n')}`;
+    }
+
+    // Requested 2026-08-15 ("!shop вываливает всё одним полотном текста") —
+    // exact match against the 4 real category keys, case-insensitive so
+    // "!shop Form"/"!shop FORM" work the same as "!shop form". None of the
+    // real item ids collide with these words (checked shopItems.js), so
+    // this can be tried BEFORE the item-id lookup below with no ambiguity.
+    const SHOP_CATEGORY_KEYS = ['form', 'size', 'avatar', 'goalAnimation'];
+    function matchShopCategory(arg) {
+        if (!arg) return null;
+        return SHOP_CATEGORY_KEYS.find((key) => key.toLowerCase() === arg.toLowerCase()) ?? null;
     }
 
     // Every upgradeable item's current level for this auth, keyed by id —
@@ -551,9 +581,23 @@ module.exports = function createEconomy({
         if (msgArray.length === 0) {
             const [balance, owned, equipped] = await Promise.all([db.getBalance(auth), db.getOwnedItemIds(auth), db.getEquipped(auth)]);
             const levels = await getUpgradeableLevels(auth, items);
-            const sections = ['form', 'size', 'avatar', 'goalAnimation'].map((key) => formatCatalogSection(key, owned, equipped, levels)).join('\n');
+            const sections = ['form', 'size', 'avatar', 'goalAnimation'].map((key) => formatCatalogSection(key, owned, equipped, levels, balance)).join('\n');
             room.sendAnnouncement(
-                `🛒 Магазин (баланс: ${formatCoins(balance)})\n${sections}\nКупить/улучшить: !shop <id>. Надеть: !equip <id>.`,
+                `🛒 Магазин (баланс: ${formatCoins(balance)})\n${sections}\nКупить/улучшить: !shop <id>. Надеть: !equip <id>. Список одной категории: !shop <${SHOP_CATEGORY_KEYS.join('|')}>.`,
+                player.id,
+                announcementColor,
+                'bold',
+                HaxNotification.CHAT
+            );
+            return;
+        }
+
+        const category = matchShopCategory(msgArray[0]);
+        if (category) {
+            const [balance, owned, equipped] = await Promise.all([db.getBalance(auth), db.getOwnedItemIds(auth), db.getEquipped(auth)]);
+            const levels = await getUpgradeableLevels(auth, items);
+            room.sendAnnouncement(
+                `🛒 Магазин — ${CATEGORY_LABELS[category]} (баланс: ${formatCoins(balance)})\n${formatCatalogSection(category, owned, equipped, levels, balance)}\nКупить/улучшить: !shop <id>. Надеть: !equip <id>.`,
                 player.id,
                 announcementColor,
                 'bold',

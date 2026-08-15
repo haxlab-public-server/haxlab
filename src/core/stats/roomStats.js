@@ -28,6 +28,8 @@ module.exports = function createRoomStats({
     applyVipGrant,
     random,
 }) {
+    const GAMES_MILESTONES = [50, 100, 250, 500, 1000, 2500, 5000];
+
     // Each player on the WINNING side of a genuine full 4v4 quals match
     // (same gate updateStats() already requires below) gets an independent
     // 0.5% roll at a week of VIP — a fun rare bonus, not a grind reward like
@@ -91,6 +93,21 @@ module.exports = function createRoomStats({
         stats.CS += CS;
         stats.playtime += getGametimePlayer(pComp);
         await db.savePlayerStats(auth, stats);
+
+        // Round-number games-played milestone (item #24) — deliberately
+        // narrow scope (see haxchill-ux-reliability-backlog project memory:
+        // flagged as the lower-confidence item of the batch, "more feature
+        // than fix"): just a one-line public congratulation on a fixed set
+        // of round numbers, nothing stateful beyond the games count
+        // player_stats already tracks — no new table, no streak/achievement
+        // system. stats.games is POST-increment here, so this fires exactly
+        // once, on the exact match that crosses the milestone.
+        if (GAMES_MILESTONES.includes(stats.games)) {
+            room.sendAnnouncement(
+                `🎉 ${stats.playerName} сыграл(а) ${stats.games}-й матч в этой комнате !`,
+                null, announcementColor, 'bold', HaxNotification.CHAT
+            );
+        }
 
         // !tops clubs (see db.addClubStats) — credited at this same
         // per-match granularity, keyed off CURRENT club membership

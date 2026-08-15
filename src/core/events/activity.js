@@ -32,6 +32,7 @@ module.exports = function createActivityEvents({
     swapModeFunction,
     formatTrophyLabel,
     resolveTrophyRank,
+    formatBanRemaining,
     getCommand,
     getDate,
     getGoalGame,
@@ -90,8 +91,13 @@ module.exports = function createActivityEvents({
     function isMuted(player) {
         return !player.admin && muteArray.getByAuth(authArray[player.id][0]) != null;
     }
+    // Shows remaining time (same rounding as ban/VIP messages via
+    // formatBanRemaining) — previously just "Вы замучены !" with no
+    // indication of when chat comes back, on every single blocked message.
     function announceMuted(player) {
-        room.sendAnnouncement(`Вы замучены !`, player.id, errorColor, 'bold', HaxNotification.CHAT);
+        const mute = muteArray.getByAuth(authArray[player.id][0]);
+        const remaining = mute ? ` Осталось: ${formatBanRemaining(mute.expiresAt)}.` : '';
+        room.sendAnnouncement(`Вы замучены !${remaining}`, player.id, errorColor, 'bold', HaxNotification.CHAT);
     }
 
     function onPlayerChat(player, message) {

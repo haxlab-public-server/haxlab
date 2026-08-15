@@ -23,6 +23,7 @@ module.exports = function createBffCommands({
     computeOrdinal,
     bffRoomStats,
     hiddenVipSet,
+    teamSize,
 }) {
     const { printPlayerStats } = createPrintStats({ getTimeStats, db });
 
@@ -95,6 +96,40 @@ module.exports = function createBffCommands({
         }
     }
 
+    // !queue (!q) — shows a spectating player their own position in the
+    // fairness queue (see matchFlow.js's specQueueSince sort), so waiting
+    // isn't a black box. 2*teamSize as the "next match" cutoff matches
+    // exactly what assembleMatch's own STOP-state branch slices off the
+    // front of the same sorted queue.
+    function queueCommand(player) {
+        if (state.teamSpec.every((p) => p.id !== player.id)) {
+            room.sendAnnouncement(`Вы сейчас не в очереди — вы либо уже играете, либо не в комнате.`, player.id, infoColor, 'bold', HaxNotification.CHAT);
+            return;
+        }
+        const queue = [...state.teamSpec].sort((a, b) => (state.specQueueSince.get(a.id) ?? 0) - (state.specQueueSince.get(b.id) ?? 0));
+        const position = queue.findIndex((p) => p.id === player.id) + 1;
+        const nextMatchSize = 2 * teamSize;
+        if (position <= nextMatchSize) {
+            room.sendAnnouncement(`⏳ Вы ${position}-й в очереди — попадёте в следующий же матч.`, player.id, infoColor, 'bold', HaxNotification.CHAT);
+        } else {
+            const matchesToWait = Math.ceil((position - nextMatchSize) / nextMatchSize);
+            room.sendAnnouncement(`⏳ Вы ${position}-й в очереди из ${queue.length} — подождите ещё ${matchesToWait} матч(а/ей).`, player.id, infoColor, 'bold', HaxNotification.CHAT);
+        }
+    }
+
+    // !rules (!info) — BFF has no captain-pick ritual and no fixed arena
+    // size (see matchFlow.js's own doc comment), which isn't obvious to a
+    // new player just watching teams appear on their own.
+    function rulesCommand(player) {
+        const text = `ℹ️ Правила BFF:\n` +
+            `Команды собираются автоматически по рейтингу (⚔️) — без выбора капитанов.\n` +
+            `Размер матча — от 1x1 до ${teamSize}x${teamSize}, зависит от того, сколько человек ждёт.\n` +
+            `Рейтинг меняется только за полный ${teamSize}x${teamSize} — в неполных составах он не считается.\n` +
+            `Идущий матч не прерывается: недостающих подберёт из очереди, а новое распределение — только после конца игры.\n` +
+            `!queue - узнать свою позицию в очереди.`;
+        room.sendAnnouncement(text, player.id, infoColor, 'bold', HaxNotification.CHAT);
+    }
+
     // Moderation (bans/admins/VIPs/password) is Role.MASTER-gated, mute/
     // unmute/mutes/hide are Role.ADMIN_TEMP-gated — same split as the main
     // room's own commands.js (regular admins get the native HaxBall admin
@@ -104,6 +139,8 @@ module.exports = function createBffCommands({
             `!me - ваша статистика и рейтинг\n` +
             `!tops [games|wins|goals|assists|cs|playtime|rating] - таблица лидеров\n` +
             `!rename [имя] - переименовать себя для таблицы лидеров\n` +
+            `!queue - ваша позиция в очереди на игру\n` +
+            `!rules - как собираются команды в этой комнате\n` +
             `!voteban #<id> - начать голосование за временный бан игрока\n` +
             `!report - позвать администрацию\n` +
             `!afk, !afks - AFK-режим и список AFK ("jj" в чате тоже выводит из AFK)\n` +
@@ -135,5 +172,7 @@ module.exports = function createBffCommands({
         helpCommand,
         leaveCommand,
         vipHideCommand,
+        queueCommand,
+        rulesCommand,
     };
 };

@@ -247,6 +247,20 @@ module.exports = function createVoteBan({
             HaxNotification.CHAT
         );
         checkVote();
+        // Live tally, room-wide — checkVote() may have already ended this
+        // exact session (endVoteban replaces state.votebanSession with
+        // null), so only broadcast a running count if it's still the same
+        // vote object, not a stale echo after the vote already resolved.
+        if (state.votebanSession === vote) {
+            const { votesFor, votesAgainst } = tally(vote);
+            room.sendAnnouncement(
+                `📊 Голосование за бан ${vote.targetName}: ${votesFor} за, ${votesAgainst} против (нужно ${vote.threshold} за из ${vote.voterIds.size}).`,
+                null,
+                announcementColor,
+                'bold',
+                null
+            );
+        }
         return true;
     }
 

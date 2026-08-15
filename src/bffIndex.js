@@ -221,39 +221,71 @@ async function launchRoom() {
         setTimeout(() => process.exit(1), 2000);
     });
 
-    const newPage = await browser.newPage();
-    await newPage.exposeFunction('__dbCall', handleDbCall);
-    await newPage.exposeFunction('__discordSend', handleDiscordSend);
+    try {
+        const newPage = await browser.newPage();
+        await newPage.exposeFunction('__dbCall', handleDbCall);
+        await newPage.exposeFunction('__discordSend', handleDiscordSend);
 
-    newPage.on('console', (msg) => {
-        const text = msg.text();
-        console.log(`[BFF PAGE ${msg.type()}]`, text);
-        if (text.includes('WebSocket is already in CLOSING or CLOSED state')) {
-            logConnectionDropDiagnostics('WebSocket drop detected');
-        }
-    });
-    newPage.on('pageerror', (err) => {
-        console.error('[BFF PAGE ERROR]', err);
-    });
+        newPage.on('console', (msg) => {
+            const text = msg.text();
+            console.log(`[BFF PAGE ${msg.type()}]`, text);
+            if (text.includes('WebSocket is already in CLOSING or CLOSED state')) {
+                logConnectionDropDiagnostics('WebSocket drop detected');
+            }
+        });
+        newPage.on('pageerror', (err) => {
+            console.error('[BFF PAGE ERROR]', err);
+        });
 
-    await newPage.goto('https://www.haxball.com/headless', { waitUntil: 'domcontentloaded', timeout: 60000 });
-    await newPage.waitForFunction(() => typeof window.HBInit === 'function', { timeout: 60000 });
-    await newPage.evaluate((secrets) => {
-        window.__secrets = secrets;
-    }, { bffToken, bffRoomPassword, testMode });
+        await newPage.goto('https://www.haxball.com/headless', { waitUntil: 'domcontentloaded', timeout: 60000 });
+        await newPage.waitForFunction(() => typeof window.HBInit === 'function', { timeout: 60000 });
+        await newPage.evaluate((secrets) => {
+            window.__secrets = secrets;
+        }, { bffToken, bffRoomPassword, testMode });
 
-    const bundle = await buildBffEntryBundle();
-    await newPage.addScriptTag({ content: bundle });
+        const bundle = await buildBffEntryBundle();
+        await newPage.addScriptTag({ content: bundle });
 
-    page = newPage;
-    return { browser, page: newPage };
+        page = newPage;
+        return { browser, page: newPage };
+    } catch (err) {
+        // Same leak fix as the main room's own launchRoom() (see
+        // src/index.js) — a thrown error here used to leave this browser
+        // process orphaned forever, only relevant once retries (below)
+        // could actually call launchRoom() more than once.
+        await browser.close().catch(() => {});
+        throw err;
+    }
 }
 
-launchRoom().catch((err) => {
-    console.error('[BFF FATAL] Failed to launch room:', err);
-    sendToDiscord({ type: 'log', content: `🔴 **[BFF] Не удалось запустить комнату:**\n\`\`\`${err.stack || err}\`\`\`` });
-    process.exitCode = 1;
-});
+// Same self-heal fix as the main room's own launchRoomWithRetries (see
+// src/index.js's own comment for the full reasoning — this used to only
+// set process.exitCode = 1, never actually exiting, so pm2 never restarted
+// it and a launch failure just sat there forever, silently dead).
+const LAUNCH_RETRY_DELAYS_MS = [30000, 120000, 300000]; // 30s, 2min, 5min
+
+async function launchRoomWithRetries() {
+    for (let attempt = 0; attempt <= LAUNCH_RETRY_DELAYS_MS.length; attempt++) {
+        try {
+            await launchRoom();
+            return;
+        } catch (err) {
+            console.error(`[BFF FATAL] Failed to launch room (attempt ${attempt + 1}/${LAUNCH_RETRY_DELAYS_MS.length + 1}):`, err);
+            if (attempt === 0) {
+                sendToDiscord({ type: 'roomDown' });
+                sendToDiscord({ type: 'log', content: `🔴 **[BFF] Не удалось запустить комнату:**\n\`\`\`${err.stack || err}\`\`\`\nПовторю попытку через ${LAUNCH_RETRY_DELAYS_MS[0] / 1000} сек.` });
+            }
+            if (attempt < LAUNCH_RETRY_DELAYS_MS.length) {
+                await new Promise((resolve) => setTimeout(resolve, LAUNCH_RETRY_DELAYS_MS[attempt]));
+                continue;
+            }
+            sendToDiscord({ type: 'log', content: `🔴 [BFF] Комната не запустилась после ${LAUNCH_RETRY_DELAYS_MS.length + 1} попыток. Перезапускаюсь для новой попытки...` });
+            setTimeout(() => process.exit(1), 2000);
+        }
+    }
+}
+
+launchRoomWithRetries();
 
 process.on('uncaughtException', (err) => {
     console.error('[BFF FATAL] Uncaught exception:', err);

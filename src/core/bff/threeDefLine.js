@@ -17,7 +17,7 @@
  * Net effect: at most teamSize-1 players can occupy the defensive zone at
  * once — exactly 3 for a genuine 4v4.
  */
-module.exports = function createBffThreeDefLine({ room, state, Team }) {
+module.exports = function createBffThreeDefLine({ room, state, Team, HaxNotification, warningColor, successColor }) {
     const cf = room.CollisionFlags;
 
     function mostForward(players, team) {
@@ -28,6 +28,12 @@ module.exports = function createBffThreeDefLine({ room, state, Team }) {
         }, null);
     }
 
+    // Explains the invisible wall the very first time it actually applies
+    // to someone (item #20) — this runs every tick, but the two branches
+    // below only fire on the cGroup transition edge itself (see the
+    // `=== plainGroup` / `!== plainGroup` guards), not on every tick the
+    // restriction merely continues to hold, so a player sees this once per
+    // spell as the most-advanced defender, not spammed every frame.
     function restrictTeam(players, mfpId, plainGroup, restrictedGroup) {
         for (const p of players) {
             const props = room.getPlayerDiscProperties(p.id);
@@ -35,8 +41,16 @@ module.exports = function createBffThreeDefLine({ room, state, Team }) {
             const shouldBeRestricted = p.id === mfpId;
             if (shouldBeRestricted && props.cGroup === plainGroup) {
                 room.setPlayerDiscProperties(p.id, { cGroup: restrictedGroup });
+                room.sendAnnouncement(
+                    `🚧 Вы крайний защитник — дальше своей трети отступать нельзя (правило "3 защитника").`,
+                    p.id, warningColor, 'bold', HaxNotification.CHAT
+                );
             } else if (!shouldBeRestricted && props.cGroup !== plainGroup) {
                 room.setPlayerDiscProperties(p.id, { cGroup: plainGroup });
+                room.sendAnnouncement(
+                    `✅ Вы больше не крайний защитник — можно снова отступать в свою треть.`,
+                    p.id, successColor, 'bold', HaxNotification.CHAT
+                );
             }
         }
     }

@@ -172,6 +172,9 @@ function createDatabaseApi(options = {}) {
         getAllClubs() {
             return sqlite.getAllClubs();
         },
+        getTopClubs(limit) {
+            return sqlite.getTopClubs(limit);
+        },
         getAllClubMembers() {
             return sqlite.getAllClubMembers();
         },

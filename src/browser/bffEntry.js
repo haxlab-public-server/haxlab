@@ -227,7 +227,7 @@ const muteDuration = 5;
 const createBffChatGuard = require('../core/bff/chatGuard');
 const chatGuard = createBffChatGuard({
     room, authArray, MutePlayer, muteArray, hiddenAdminsSet,
-    announcementColor, errorColor, HaxNotification, muteDuration,
+    announcementColor, errorColor, HaxNotification, muteDuration, formatBanRemaining,
 });
 
 /* AFK (voluntary !afk/"jj" toggle — see core/bff/afk.js). Same numbers as
@@ -415,7 +415,7 @@ const { getGoalsPlayer, getAssistsPlayer, getOwnGoalsPlayer, getCSPlayer, getGam
 /* BFF ROOM STATS (trimmed fork — see core/bff/roomStats.js) */
 const createBffRoomStats = require('../core/bff/roomStats');
 const bffRoomStats = createBffRoomStats({
-    room, state, Team, authArray, db, HaxStatistics, HaxNotification, errorColor, teamSize,
+    room, state, Team, authArray, db, HaxStatistics, HaxNotification, errorColor, announcementColor, teamSize,
     getAssistsPlayer, getCSPlayer, getGametimePlayer, getGoalsPlayer, getOwnGoalsPlayer,
     getPlayerComp, getTimeStats,
 });
@@ -494,6 +494,7 @@ const matchFlow = createBffMatchFlow({
     getRating: (auth) => db.getRating(auth),
     saveRating: (auth, playerName, mu, sigma) => db.saveRating(auth, playerName, mu, sigma),
     applyLimitsForSize, applyTrainingMap, teamSize, reassembleDelayMs,
+    HaxNotification, announcementColor, infoColor,
 });
 
 const createBffAfk = require('../core/bff/afk');
@@ -514,7 +515,7 @@ Object.assign(room, wrapEventHandlers(createBffEvents({
     handleLineupChangeLeave, handleLineupChangeTeamChange,
     ghostKickHandle, updateTeams, calculateStadiumVariables, checkOverflowPassword, endGame,
     matchFlow, bffRoomStats, teamSize,
-    fetchSummaryEmbed, fetchRecording,
+    fetchSummaryEmbed, fetchRecording, actionReportCountTeam,
 })));
 
 /* MISCELLANEOUS — events/misc.js is genuinely reused as-is, confirmed
@@ -567,7 +568,7 @@ room.onGameStop = wrapEventHandlers({
 // way onPlayerTeamChange/onGameStop are above, since misc.js is reused
 // as-is by the main room, which has no such mechanic.
 const createBffThreeDefLine = require('../core/bff/threeDefLine');
-const { adjustDefenseLine } = createBffThreeDefLine({ room, state, Team });
+const { adjustDefenseLine } = createBffThreeDefLine({ room, state, Team, HaxNotification, warningColor, successColor });
 const originalGameTick = room.onGameTick;
 room.onGameTick = wrapEventHandlers({
     onGameTick: () => {
@@ -584,10 +585,10 @@ Object.assign(room, wrapEventHandlers({ onPlayerActivity }));
 /* COMMANDS */
 const { computeOrdinal } = require('../core/bff/rating');
 const createBffCommands = require('../core/bff/commands');
-const { meCommand, topsCommand, renameCommand, helpCommand, leaveCommand, vipHideCommand } = createBffCommands({
+const { meCommand, topsCommand, renameCommand, helpCommand, leaveCommand, vipHideCommand, queueCommand, rulesCommand } = createBffCommands({
     room, state, authArray, db, HaxStatistics, HaxNotification, Role,
     infoColor, errorColor, successColor, getTimeStats, getRole, computeOrdinal, bffRoomStats,
-    hiddenVipSet,
+    hiddenVipSet, teamSize,
 });
 
 // Master-level moderation (bans/admins/VIPs/password/restrictions) — reused
@@ -603,6 +604,10 @@ const {
 } = createMasterCommands({
     room, state, authArray, db, masterList, announcementColor, errorColor, HaxNotification,
     formatBanRemaining, formatVipRemaining, discordBot,
+    // BFF has none of the main room's !up/!vipcolor/!shop/economy — see
+    // master.js's own comment on why this can't just use its default text.
+    successColor,
+    vipPerksText: `увеличенный лимит AFK, свой VIP-префикс в чате (!viphide — скрыть/показать). Все команды — !help`,
 });
 // Same purpose as the main room's own periodic sweep (see entry.js) — makes
 // an expired VIP's Discord role actually get revoked promptly, not just
@@ -642,6 +647,8 @@ const commands = {
     me: { aliases: ['stat', 'stats', 'ы', 's'], roles: Role.PLAYER, function: meCommand },
     tops: { aliases: ['top'], roles: Role.PLAYER, function: topsCommand },
     rename: { aliases: [], roles: Role.PLAYER, function: renameCommand },
+    queue: { aliases: ['q', 'очередь'], roles: Role.PLAYER, function: queueCommand },
+    rules: { aliases: ['info', 'правила'], roles: Role.PLAYER, function: rulesCommand },
     help: { aliases: ['commands', 'рудз'], roles: Role.PLAYER, function: helpCommand },
     bb: { aliases: ['bye', 'gn', 'cya', 'ии'], roles: Role.PLAYER, function: leaveCommand },
     viphide: { aliases: [], roles: Role.VIP, function: vipHideCommand },

@@ -256,12 +256,20 @@ function handleMainBridgeMessage(msg) {
             break;
         case 'report':
             discordBot.sendReport(msg.embedData);
+            recordMatchForDigest(msg.embedData, 'main');
             break;
         case 'recording':
             discordBot.sendRecording(Buffer.from(msg.bufferBase64, 'base64'), msg.filename);
             break;
         case 'roomLink':
             discordBot.setRoomLink(msg.url);
+            break;
+        // Sent once src/index.js's own launch-retry loop has genuinely
+        // given up (requested 2026-08-15, after an outage where the status
+        // message kept showing a dead link the whole time with no
+        // indication anything was wrong) — see discord.js's own setRoomDown.
+        case 'roomDown':
+            discordBot.setRoomDown();
             break;
         case 'password':
             discordBot.sendPassword(msg.password);
@@ -399,12 +407,19 @@ function handleBffBridgeMessage(msg) {
             break;
         case 'report':
             discordBot.sendBffReport(msg.embedData);
+            recordMatchForDigest(msg.embedData, 'bff');
             break;
         case 'recording':
             discordBot.sendBffRecording(Buffer.from(msg.bufferBase64, 'base64'), msg.filename);
             break;
         case 'status':
             discordBot.updateBffRoomStatus(msg.playerCount, msg.roomLink);
+            break;
+        // Same idea as the main room's own 'roomDown' (see
+        // handleMainBridgeMessage above) — bffIndex.js's own launch-retry
+        // loop has genuinely given up.
+        case 'roomDown':
+            discordBot.setBffRoomDown();
             break;
         // core/voteBan.js (reused as-is by BFF) — no dedicated BFF voteban
         // channel was ever confirmed in the design, so this is folded into
@@ -493,3 +508,51 @@ function runDatabaseBackup() {
 }
 runDatabaseBackup();
 setInterval(runDatabaseBackup, backupIntervalMs);
+
+/* PERIODIC ADMIN ACTIVITY DIGEST (item #19) */
+
+// No per-match log table is ever actually populated in this codebase (see
+// db/sqlite.js's saveGameReport — defined, never called from anywhere) —
+// this piggybacks on the SAME 'report' bridge messages already flowing
+// through here for Discord's own match-report embeds (every natural match
+// end, both rooms) rather than adding a second persistence path just for
+// this. Reset to zero after every post, so each digest only covers what
+// happened since the last one, not a running total.
+const digestState = { mainMatches: 0, bffMatches: 0, players: new Set() };
+
+// Every participant gets exactly one "> **Name:**" line in the Game Time
+// section of every report (see stats/fetch.js/core/bff/report.js);
+// goal-scorers/assisters/keepers get a second one in the Player Stats
+// section under the same name (own goals prefixed "[OG] ") — deduped here
+// via the Set regardless of which section or how many times a name
+// reappears, so this naturally counts the full match roster.
+function recordMatchForDigest(embedData, room) {
+    if (room === 'main') digestState.mainMatches++;
+    else digestState.bffMatches++;
+    for (const field of embedData?.fields ?? []) {
+        for (const m of (field.value ?? '').matchAll(/> \*\*(?:\[OG\] )?(.+?):\*\*/g)) {
+            digestState.players.add(m[1]);
+        }
+    }
+}
+
+function postActivityDigest() {
+    const { mainMatches, bffMatches, players } = digestState;
+    digestState.mainMatches = 0;
+    digestState.bffMatches = 0;
+    digestState.players = new Set();
+    if (mainMatches === 0 && bffMatches === 0) return; // a quiet period doesn't need a report saying so
+
+    const topClubs = db.getTopClubs(1);
+    const topClubLine = topClubs.length > 0
+        ? `🏆 Топ клуб: [${topClubs[0].emoji ?? ''}${topClubs[0].prefix}] ${topClubs[0].name} (${topClubs[0].score})`
+        : '🏆 Топ клуб: пока никто не набрал очков';
+    discordBot.sendLog(
+        `📊 **Дайджест активности за 24 ч.**\n` +
+        `⚽ Матчей: ${mainMatches + bffMatches} (${mainMatches} основная, ${bffMatches} BFF)\n` +
+        `👥 Уникальных игроков: ${players.size}\n` +
+        `${topClubLine}`
+    );
+}
+const digestIntervalMs = 24 * 60 * 60 * 1000;
+setInterval(postActivityDigest, digestIntervalMs);

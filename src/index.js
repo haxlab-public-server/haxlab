@@ -310,48 +310,98 @@ async function launchRoom() {
         setTimeout(() => process.exit(1), 2000);
     });
 
-    const newPage = await browser.newPage();
-    await newPage.exposeFunction('__dbCall', handleDbCall);
-    await newPage.exposeFunction('__discordSend', handleDiscordSend);
+    try {
+        const newPage = await browser.newPage();
+        await newPage.exposeFunction('__dbCall', handleDbCall);
+        await newPage.exposeFunction('__discordSend', handleDiscordSend);
 
-    // Without this, everything the injected bundle logs (console.log/error
-    // calls inside the page, including onRoomLink's own console.log(url))
-    // only ever reaches the browser's own devtools console — invisible to
-    // `pm2 logs`. Forwarding it here is the only way to see it from Node.
-    newPage.on('console', (msg) => {
-        const text = msg.text();
-        console.log(`[PAGE ${msg.type()}]`, text);
-        if (text.includes('WebSocket is already in CLOSING or CLOSED state')) {
-            logConnectionDropDiagnostics('WebSocket drop detected');
-        }
-    });
-    newPage.on('pageerror', (err) => {
-        console.error('[PAGE ERROR]', err);
-    });
+        // Without this, everything the injected bundle logs (console.log/error
+        // calls inside the page, including onRoomLink's own console.log(url))
+        // only ever reaches the browser's own devtools console — invisible to
+        // `pm2 logs`. Forwarding it here is the only way to see it from Node.
+        newPage.on('console', (msg) => {
+            const text = msg.text();
+            console.log(`[PAGE ${msg.type()}]`, text);
+            if (text.includes('WebSocket is already in CLOSING or CLOSED state')) {
+                logConnectionDropDiagnostics('WebSocket drop detected');
+            }
+        });
+        newPage.on('pageerror', (err) => {
+            console.error('[PAGE ERROR]', err);
+        });
 
-    // networkidle2 previously hung indefinitely here (30s timeout) — this
-    // page appears to keep some background connection alive, so "network
-    // idle" never actually arrives. domcontentloaded is enough to have the
-    // page's own scripts running, then wait for the one thing we actually
-    // need: HBInit becoming available as a global.
-    await newPage.goto('https://www.haxball.com/headless', { waitUntil: 'domcontentloaded', timeout: 60000 });
-    await newPage.waitForFunction(() => typeof window.HBInit === 'function', { timeout: 60000 });
-    await newPage.evaluate((secrets) => {
-        window.__secrets = secrets;
-    }, { token, roomPassword, testMode, mentionWatchName });
+        // networkidle2 previously hung indefinitely here (30s timeout) — this
+        // page appears to keep some background connection alive, so "network
+        // idle" never actually arrives. domcontentloaded is enough to have the
+        // page's own scripts running, then wait for the one thing we actually
+        // need: HBInit becoming available as a global.
+        await newPage.goto('https://www.haxball.com/headless', { waitUntil: 'domcontentloaded', timeout: 60000 });
+        await newPage.waitForFunction(() => typeof window.HBInit === 'function', { timeout: 60000 });
+        await newPage.evaluate((secrets) => {
+            window.__secrets = secrets;
+        }, { token, roomPassword, testMode, mentionWatchName });
 
-    const bundle = await buildEntryBundle();
-    await newPage.addScriptTag({ content: bundle });
+        const bundle = await buildEntryBundle();
+        await newPage.addScriptTag({ content: bundle });
 
-    page = newPage;
-    return { browser, page: newPage };
+        page = newPage;
+        return { browser, page: newPage };
+    } catch (err) {
+        // Real bug fixed 2026-08-15: a failure here used to leave this
+        // browser process running, orphaned, forever — `browser` was only
+        // ever local to this function, never closed on a thrown error.
+        // Harmless for a single unrecoverable failure, but a real resource
+        // leak once launchRoom() started being retried in-process (see
+        // launchRoomWithRetries below) — each failed attempt would have
+        // left one more zombie Chromium running.
+        await browser.close().catch(() => {});
+        throw err;
+    }
 }
 
-launchRoom().catch((err) => {
-    console.error('[FATAL] Failed to launch room:', err);
-    sendToDiscord({ type: 'log', content: `🔴 **Не удалось запустить комнату:**\n\`\`\`${err.stack || err}\`\`\`` });
-    process.exitCode = 1;
-});
+// Real bug fixed 2026-08-15 ("launchRoom() doesn't self-heal" — the actual
+// root cause of a real ~20-minute outage): a launch failure used to only
+// set process.exitCode = 1, which does NOT actually terminate the process —
+// pm2 never saw a crash and never auto-restarted, so the room sat dead
+// forever, silently, with `page` stuck null, until a human noticed and
+// restarted by hand. Now retries a few times with a growing delay before
+// giving up — that specific outage was a transient elevated Cloudflare
+// security posture (see haxchill-vps-deployment project memory), and simply
+// trying again a few minutes later is literally what fixed it. The Discord
+// status flips to "down" on the FIRST failure already (not only once every
+// retry has also failed), so nobody's left staring at a dead-but-still-
+// displayed join link in the meantime.
+const LAUNCH_RETRY_DELAYS_MS = [30000, 120000, 300000]; // 30s, 2min, 5min
+
+async function launchRoomWithRetries() {
+    for (let attempt = 0; attempt <= LAUNCH_RETRY_DELAYS_MS.length; attempt++) {
+        try {
+            await launchRoom();
+            return;
+        } catch (err) {
+            console.error(`[FATAL] Failed to launch room (attempt ${attempt + 1}/${LAUNCH_RETRY_DELAYS_MS.length + 1}):`, err);
+            if (attempt === 0) {
+                sendToDiscord({ type: 'roomDown' });
+                sendToDiscord({ type: 'log', content: `🔴 **Не удалось запустить комнату:**\n\`\`\`${err.stack || err}\`\`\`\nПовторю попытку через ${LAUNCH_RETRY_DELAYS_MS[0] / 1000} сек.` });
+            }
+            if (attempt < LAUNCH_RETRY_DELAYS_MS.length) {
+                await new Promise((resolve) => setTimeout(resolve, LAUNCH_RETRY_DELAYS_MS[attempt]));
+                continue;
+            }
+            // Every in-process retry exhausted — exit so pm2 hands this a
+            // genuinely fresh process (new Chromium instance, not the same
+            // possibly-wedged attempt) rather than looping forever inside
+            // one. pm2 restarts near-instantly, so the NEXT process's own
+            // retry cycle becomes the "still down, remind again" cadence
+            // from here on, roughly every ~8 minutes (this cycle's own
+            // delays) for as long as the underlying issue persists.
+            sendToDiscord({ type: 'log', content: `🔴 Комната не запустилась после ${LAUNCH_RETRY_DELAYS_MS.length + 1} попыток. Перезапускаюсь для новой попытки...` });
+            setTimeout(() => process.exit(1), 2000);
+        }
+    }
+}
+
+launchRoomWithRetries();
 
 // Last-resort safety net for THIS process (Puppeteer/orchestrator-side
 // bugs) — errors inside the page itself are handled by entry.js's own

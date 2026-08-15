@@ -8,7 +8,7 @@
  * confirmed by reading their factory signatures before deciding to share
  * them rather than fork them too.
  */
-const { buildRankingString, buildRatingRankingString, RANKING_STAT_KEYS } = require('../stats/print');
+const { buildRankingString, buildRatingRankingString, buildTopLeaderLine, buildRatingLeaderLine, RANKING_STAT_KEYS } = require('../stats/print');
 
 module.exports = function createBffRoomStats({
     room,
@@ -19,6 +19,7 @@ module.exports = function createBffRoomStats({
     HaxStatistics,
     HaxNotification,
     errorColor,
+    announcementColor,
     teamSize,
     getAssistsPlayer,
     getCSPlayer,
@@ -28,6 +29,8 @@ module.exports = function createBffRoomStats({
     getPlayerComp,
     getTimeStats,
 }) {
+    const GAMES_MILESTONES = [50, 100, 250, 500, 1000, 2500, 5000];
+
     async function updatePlayerStats(player, teamStats) {
         const auth = authArray[player.id][0];
         const pComp = getPlayerComp(player);
@@ -41,6 +44,16 @@ module.exports = function createBffRoomStats({
         stats.CS += getCSPlayer(pComp);
         stats.playtime += getGametimePlayer(pComp);
         await db.savePlayerStats(auth, stats);
+
+        // Round-number games-played milestone (item #24) — same narrow
+        // scope as the main room's own (see roomStats.js), just mirrored
+        // for BFF's own separate games counter.
+        if (GAMES_MILESTONES.includes(stats.games)) {
+            room.sendAnnouncement(
+                `🎉 ${stats.playerName} сыграл(а) ${stats.games}-й матч в этой комнате !`,
+                null, announcementColor, 'bold', HaxNotification.CHAT
+            );
+        }
     }
 
     // Same qualifying-match gate as the main room's updateStats() — a full
@@ -79,16 +92,20 @@ module.exports = function createBffRoomStats({
 
     // !tops with no argument — every category in one message (including
     // rating, NOT clubs — BFF has none), skipping any that don't have the
-    // 5-player quorum yet rather than erroring.
+    // 5-player quorum yet rather than erroring. Leader-only per category
+    // (real bug fixed 2026-08-15, same wall-of-text problem the main room's
+    // own buildAllRankingsText had — see its own comment) — full top-5 for
+    // any one category is still exactly `!tops <category>` away.
     async function printAllRankings(id = 0) {
-        const playerLines = await Promise.all(RANKING_STAT_KEYS.map((key) => buildRankingString(db, getTimeStats, key)));
-        const ratingLine = await buildRatingRankingString(db);
+        const playerLines = await Promise.all(RANKING_STAT_KEYS.map((key) => buildTopLeaderLine(db, getTimeStats, key)));
+        const ratingLine = await buildRatingLeaderLine(db);
         const lines = [...playerLines, ratingLine].filter((line) => line != null);
         if (lines.length === 0) {
             room.sendAnnouncement('Недостаточно игр сыграно !', id, errorColor, 'bold', HaxNotification.CHAT);
             return;
         }
-        room.sendAnnouncement(lines.join('\n'), id, null, 'bold', HaxNotification.CHAT);
+        const categories = [...RANKING_STAT_KEYS.map((k) => k.toLowerCase()), 'rating'].join('|');
+        room.sendAnnouncement(`${lines.join('\n')}\nПолная таблица по категории: !tops <${categories}>`, id, null, 'bold', HaxNotification.CHAT);
     }
 
     return {
