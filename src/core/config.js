@@ -53,6 +53,13 @@ const discordBffReportChannelId = process.env.DISCORD_BFF_REPORT_CHANNEL_ID ?? '
 // SAME running Discord bot/client, instead of spawning a second bot.
 const discordBridgePort = Number(process.env.DISCORD_BRIDGE_PORT ?? 47100);
 
+// Same idea, for the MAIN room's orchestrator (src/index.js) — confirmed
+// 2026-08-15: discordProcess.js is now a genuinely independent pm2 process
+// (own ecosystem.config.js entry), not forked from src/index.js anymore, so
+// the main room needs the same kind of loopback TCP bridge BFF already had,
+// not fork()'s built-in IPC channel.
+const discordMainBridgePort = Number(process.env.DISCORD_MAIN_BRIDGE_PORT ?? 47101);
+
 // SOCKS5 proxy for the Discord process's own outbound traffic only (REST +
 // gateway), e.g. `socks5://user:pass@host:port` — see discordProcess.js's
 // proxy patch. Leave empty to connect directly. Never touches the room
@@ -81,4 +88,5 @@ module.exports = {
     discordBffLogChannelId,
     discordBffReportChannelId,
     discordBridgePort,
+    discordMainBridgePort,
 };

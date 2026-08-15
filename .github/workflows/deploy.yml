@@ -14,29 +14,38 @@ jobs:
           host: ${{ secrets.DEPLOY_HOST }}
           username: ${{ secrets.DEPLOY_USER }}
           key: ${{ secrets.DEPLOY_SSH_KEY }}
-          # Restarting a room's pm2 process drops every player in it, so a
-          # push that only touches one room's own files shouldn't restart
-          # the other. Classification is by exact path, computed by walking
-          # both rooms' actual require() graphs (see the two entry points'
-          # module trees) rather than guessed from directory names — files
-          # shared by both (or read by the fork()-ed discordProcess.js,
-          # which require()-graph traversal alone can't see) are NOT listed
-          # in either exclusive bucket, so any file not recognized below
-          # (including new files added later and forgotten here) falls
-          # through to the safe default: restart both.
+          # Restarting a pm2 process drops whatever it was mid-doing (every
+          # player in a room, or a few seconds of Discord bot uptime), so a
+          # push that only touches one process's own files shouldn't restart
+          # the other two. Three independent processes now (confirmed
+          # 2026-08-15): both rooms, plus the shared Discord bot — genuinely
+          # independent of both since that date (see discordProcess.js's own
+          # header comment for why: it used to be fork()'d from the main
+          # room specifically, so restarting that room also killed and
+          # respawned Discord, dropping BFF's own bridge connection along
+          # with it even though BFF was never touched).
           #
-          # A third bucket (tools/**, scripts/**, this workflow file itself)
-          # restarts NEITHER: none of those are ever require()'d by
-          # index.js/bffIndex.js or the two browser entry points at
-          # runtime — both build their bundle fresh, in-memory, from
-          # entry.js/bffEntry.js's own graph on every startup (see
-          # haxchill-vps-deployment project memory), so tools/scripts are
-          # structurally unreachable from either running process no matter
-          # what they contain. Editing this workflow file doesn't need a
-          # restart either — GitHub Actions already read the version at the
-          # trigger commit before this script started running, so by the
-          # time this line executes, this run IS that new version; there's
-          # no stale copy left running anywhere to restart.
+          # Classification is by exact path, computed by walking each
+          # process's actual require() graph (see the three entry points'
+          # module trees) rather than guessed from directory names — files
+          # shared by more than one process are NOT listed in any exclusive
+          # bucket, so any file not recognized below (including new files
+          # added later and forgotten here) falls through to the safe
+          # default: restart all three.
+          #
+          # A separate bucket (tools/**, scripts/**, this workflow file
+          # itself) restarts NONE of them: none of those are ever
+          # require()'d by index.js/bffIndex.js/discordProcess.js or the two
+          # browser entry points at runtime — both rooms build their bundle
+          # fresh, in-memory, from entry.js/bffEntry.js's own graph on every
+          # startup (see haxchill-vps-deployment project memory), so
+          # tools/scripts are structurally unreachable from any running
+          # process no matter what they contain. Editing this workflow file
+          # doesn't need a restart either — GitHub Actions already read the
+          # version at the trigger commit before this script started
+          # running, so by the time this line executes, this run IS that
+          # new version; there's no stale copy left running anywhere to
+          # restart.
           script: |
             set -e
             cd /opt/haxlab
@@ -54,6 +63,7 @@ jobs:
             else
               RESTART_MAIN=false
               RESTART_BFF=false
+              RESTART_DISCORD=false
               while IFS= read -r f; do
                 [ -z "$f" ] && continue
                 case "$f" in
@@ -63,28 +73,27 @@ jobs:
                   src/bffIndex.js|HaxBotBFF_public.js|src/browser/bffEntry.js|src/core/bff/adminCall.js|src/core/bff/afk.js|src/core/bff/chatGuard.js|src/core/bff/commands.js|src/core/bff/config.js|src/core/bff/dbBridge.js|src/core/bff/events.js|src/core/bff/matchFlow.js|src/core/bff/rating.js|src/core/bff/report.js|src/core/bff/roomSetup.js|src/core/bff/roomStats.js|src/core/bff/stadiums.js|src/core/bff/threeDefLine.js)
                     RESTART_BFF=true
                     ;;
+                  HaxDiscordBot_public.js|src/core/discord.js|src/core/discordProcess.js)
+                    RESTART_DISCORD=true
+                    ;;
                   tools/*|scripts/*|.github/workflows/deploy.yml)
-                    # No-op — neither restart flag is set. See this step's
-                    # own top comment for why these are structurally inert.
+                    # No-op — no restart flag is set. See this step's own
+                    # top comment for why these are structurally inert.
                     ;;
                   *)
                     RESTART_MAIN=true
                     RESTART_BFF=true
+                    RESTART_DISCORD=true
                     ;;
                 esac
               done <<< "$CHANGED"
 
-              if [ "$RESTART_MAIN" = true ] && [ "$RESTART_BFF" = true ]; then
-                echo "Restarting both rooms."
-                pm2 startOrReload ecosystem.config.js
-              elif [ "$RESTART_MAIN" = true ]; then
-                echo "Restarting main room only (haxlab)."
-                pm2 startOrReload ecosystem.config.js --only haxlab
-              elif [ "$RESTART_BFF" = true ]; then
-                echo "Restarting BFF room only (haxlab-bff)."
-                pm2 startOrReload ecosystem.config.js --only haxlab-bff
-              else
+              if [ "$RESTART_MAIN" = false ] && [ "$RESTART_BFF" = false ] && [ "$RESTART_DISCORD" = false ]; then
                 echo "Only dev-only/tooling files changed — nothing to restart."
+              else
+                [ "$RESTART_MAIN" = true ] && { echo "Restarting main room (haxlab)."; pm2 startOrReload ecosystem.config.js --only haxlab; }
+                [ "$RESTART_BFF" = true ] && { echo "Restarting BFF room (haxlab-bff)."; pm2 startOrReload ecosystem.config.js --only haxlab-bff; }
+                [ "$RESTART_DISCORD" = true ] && { echo "Restarting Discord bot (haxlab-discord)."; pm2 startOrReload ecosystem.config.js --only haxlab-discord; }
               fi
               pm2 save
             fi

@@ -12,17 +12,20 @@
  * This process itself no longer touches `room`/`state` at all — those live
  * entirely inside the page now. It owns only what a browser page genuinely
  * can't: the real sqlite DB (bridged to the page via page.exposeFunction)
- * and the Discord child process (unchanged from before this migration,
- * except its two room-touching message types now reach the page via
- * page.evaluate() instead of touching `room`/`state` directly).
+ * and a connection to the shared Discord bot process — genuinely
+ * independent now (confirmed 2026-08-15, see discordProcess.js's own
+ * header comment for why), reached over local loopback TCP the same way
+ * BFF's own orchestrator already reaches it, not fork()'s built-in IPC.
+ * Its two room-touching message types reach the page via page.evaluate()
+ * instead of touching `room`/`state` directly.
  */
 const path = require('node:path');
 const os = require('node:os');
-const { fork } = require('node:child_process');
+const net = require('node:net');
 const puppeteer = require('puppeteer');
 const esbuild = require('esbuild');
 
-const { roomPassword, token, testMode, mentionWatchName } = require('./core/config');
+const { roomPassword, token, testMode, mentionWatchName, discordMainBridgePort } = require('./core/config');
 const { createDatabaseApi } = require('../api/database');
 const { BRIDGED_METHODS } = require('./browser/dbBridgeClient');
 
@@ -80,39 +83,49 @@ function logConnectionDropDiagnostics(trigger) {
     );
 }
 
-/* DISCORD CHILD PROCESS */
-// Unchanged from before this migration — still its own process, still
-// respawned with backoff, still deprioritized on this single-vCPU host so
-// the room (now the browser's rendering/JS thread, not this process) gets
-// CPU first. Only the 'relay'/'kickByAuth' handling below changed: this
-// process has no direct `room`/`state` to touch anymore, so those two
-// message types now reach into the page via page.evaluate() instead.
-let discordProcess = null;
-let discordRespawnTimer = null;
-const DISCORD_RESPAWN_BASE_DELAY_MS = 5000;
-const DISCORD_RESPAWN_MAX_DELAY_MS = 5 * 60 * 1000;
-const DISCORD_STABLE_UPTIME_MS = 60 * 1000;
-let discordRespawnDelay = DISCORD_RESPAWN_BASE_DELAY_MS;
+/* DISCORD BRIDGE (TCP client) */
+// discordProcess.js is a genuinely independent pm2 process now (confirmed
+// 2026-08-15 — see its own header comment for why), reached over local
+// loopback TCP the same way BFF's own orchestrator already reaches it,
+// rather than fork()'s built-in IPC. Reconnects with a simple fixed delay
+// on drop, same as bffIndex.js's own connectDiscordBridge — no exponential
+// backoff needed here anymore: that used to guard against rapidly
+// respawning a whole Discord gateway client (heavy, rate-limit-sensitive)
+// on a crash loop, but this process no longer spawns/owns that client at
+// all, just a cheap TCP socket to an already-running, independently
+// supervised one.
+let discordSocket = null;
+let discordReconnectTimer = null;
+const DISCORD_RECONNECT_DELAY_MS = 5000;
 
 // room.onRoomLink only fires once, right when the room is first created —
-// a respawned Discord process would otherwise never learn it. Cached here
-// (set whenever a 'roomLink' message passes through __discordSend below)
-// so resyncDiscordProcess can replay it after a respawn.
+// a discordProcess.js that (re)starts after that, or a reconnect following
+// a dropped socket, would otherwise never learn it. Cached here (set
+// whenever a 'roomLink' message passes through __discordSend below) so
+// resyncDiscordProcess can replay it.
 let lastRoomLink = null;
 
 // Set once the browser/page is ready (see launchRoom below) — every
 // Discord->room bridge call guards on this being non-null, since the
-// Discord process can finish spawning before the browser has.
+// Discord bridge can connect before the browser is ready.
 let page = null;
 
 function sendToDiscord(message) {
-    if (discordProcess && discordProcess.connected) discordProcess.send(message);
+    if (!discordSocket || discordSocket.destroyed) return;
+    try {
+        discordSocket.write(JSON.stringify(message) + '\n');
+    } catch (err) {
+        console.error('[WARN] Failed to write to Discord bridge:', err.message);
+    }
 }
 
-// Replays the state a freshly (re)spawned Discord process would otherwise
-// have missed. Reads the roster from the page (this process holds none of
-// it directly) — a no-op if the page isn't ready yet, same as the
-// pre-migration version was a no-op before state.playersAll existed.
+// Replays the state a freshly (re)connected discordProcess.js would
+// otherwise have missed — whether because IT just (re)started (its own
+// in-memory roster is empty until told) or because THIS process just
+// (re)started (a fresh page always starts with a real roomLink of its own
+// via room.onRoomLink, but discordProcess.js has no way to know that
+// without this). Reads the roster from the page (this process holds none
+// of it directly) — a no-op if the page isn't ready yet.
 async function resyncDiscordProcess() {
     if (!page) return;
     try {
@@ -124,105 +137,93 @@ async function resyncDiscordProcess() {
     }
 }
 
-function spawnDiscordProcess() {
-    const child = fork(path.join(__dirname, 'core', 'discordProcess.js'), {
-        serialization: 'advanced',
-    });
-    discordProcess = child;
-    const spawnedAt = Date.now();
-
-    // The host this runs on has a single vCPU — separating the event loops
-    // doesn't separate the CPU itself, both processes still take turns on
-    // the same core. Lowering the child's OS scheduling priority means the
-    // kernel favors the room (the browser's rendering/JS thread — i.e.
-    // player ping) over Discord traffic whenever both want the CPU at the
-    // same instant. Best-effort: some platforms/permission setups don't
-    // allow this, and that must never take the room down with it.
-    if (child.pid) {
-        try {
-            os.setPriority(child.pid, os.constants.priority.PRIORITY_LOW);
-        } catch (err) {
-            console.error('[WARN] Could not lower Discord process OS priority:', err.message);
-        }
+let discordBridgeBuffer = '';
+function handleDiscordBridgeMessage(msg) {
+    if (!msg || typeof msg !== 'object') return;
+    if (msg.type === 'relay') {
+        if (page) page.evaluate((m) => window.__roomBridge.relayToRoom(m.username, m.content), msg).catch((err) => console.error('[WARN] relay bridge failed:', err));
+        return;
     }
-
-    child.on('message', (msg) => {
-        if (!msg || typeof msg !== 'object') return;
-        if (msg.type === 'relay') {
-            if (page) page.evaluate((m) => window.__roomBridge.relayToRoom(m.username, m.content), msg).catch((err) => console.error('[WARN] relay bridge failed:', err));
+    if (msg.type === 'kickByAuth') {
+        if (!page) {
+            sendToDiscord({ type: 'kickResult', requestId: msg.requestId, result: null });
             return;
         }
-        if (msg.type === 'kickByAuth') {
-            if (!page) {
+        page.evaluate((m) => window.__roomBridge.kickByAuth(m.auth, m.reason), msg)
+            .then((result) => sendToDiscord({ type: 'kickResult', requestId: msg.requestId, result }))
+            .catch((err) => {
+                console.error('[WARN] kickByAuth bridge failed:', err);
                 sendToDiscord({ type: 'kickResult', requestId: msg.requestId, result: null });
-                return;
-            }
-            page.evaluate((m) => window.__roomBridge.kickByAuth(m.auth, m.reason), msg)
-                .then((result) => sendToDiscord({ type: 'kickResult', requestId: msg.requestId, result }))
-                .catch((err) => {
-                    console.error('[WARN] kickByAuth bridge failed:', err);
-                    sendToDiscord({ type: 'kickResult', requestId: msg.requestId, result: null });
-                });
+            });
+        return;
+    }
+    if (msg.type === 'grantVip') {
+        if (page) page.evaluate((m) => window.__roomBridge.grantVipByAuth(m.auth, m.targetName), msg).catch((err) => console.error('[WARN] grantVip bridge failed:', err));
+        return;
+    }
+    if (msg.type === 'muteByAuth') {
+        if (!page) {
+            sendToDiscord({ type: 'muteResult', requestId: msg.requestId, result: { ok: false, reason: 'offline' } });
             return;
         }
-        if (msg.type === 'grantVip') {
-            if (page) page.evaluate((m) => window.__roomBridge.grantVipByAuth(m.auth, m.targetName), msg).catch((err) => console.error('[WARN] grantVip bridge failed:', err));
-            return;
-        }
-        if (msg.type === 'muteByAuth') {
-            if (!page) {
+        page.evaluate((m) => window.__roomBridge.muteByAuth(m.auth, m.minutes), msg)
+            .then((result) => sendToDiscord({ type: 'muteResult', requestId: msg.requestId, result }))
+            .catch((err) => {
+                console.error('[WARN] muteByAuth bridge failed:', err);
                 sendToDiscord({ type: 'muteResult', requestId: msg.requestId, result: { ok: false, reason: 'offline' } });
-                return;
-            }
-            page.evaluate((m) => window.__roomBridge.muteByAuth(m.auth, m.minutes), msg)
-                .then((result) => sendToDiscord({ type: 'muteResult', requestId: msg.requestId, result }))
-                .catch((err) => {
-                    console.error('[WARN] muteByAuth bridge failed:', err);
-                    sendToDiscord({ type: 'muteResult', requestId: msg.requestId, result: { ok: false, reason: 'offline' } });
-                });
+            });
+        return;
+    }
+    if (msg.type === 'unmuteByAuth') {
+        if (!page) {
+            sendToDiscord({ type: 'unmuteResult', requestId: msg.requestId, result: { ok: false } });
             return;
         }
-        if (msg.type === 'unmuteByAuth') {
-            if (!page) {
+        page.evaluate((m) => window.__roomBridge.unmuteByAuth(m.auth), msg)
+            .then((result) => sendToDiscord({ type: 'unmuteResult', requestId: msg.requestId, result }))
+            .catch((err) => {
+                console.error('[WARN] unmuteByAuth bridge failed:', err);
                 sendToDiscord({ type: 'unmuteResult', requestId: msg.requestId, result: { ok: false } });
-                return;
+            });
+        return;
+    }
+}
+
+function connectDiscordBridge() {
+    const socket = net.connect(discordMainBridgePort, '127.0.0.1');
+    socket.on('connect', () => {
+        console.log('[Main] Connected to the shared Discord bridge.');
+        discordSocket = socket;
+        resyncDiscordProcess();
+    });
+    socket.on('data', (chunk) => {
+        discordBridgeBuffer += chunk.toString('utf8');
+        let newlineIndex;
+        while ((newlineIndex = discordBridgeBuffer.indexOf('\n')) !== -1) {
+            const line = discordBridgeBuffer.slice(0, newlineIndex);
+            discordBridgeBuffer = discordBridgeBuffer.slice(newlineIndex + 1);
+            if (!line.trim()) continue;
+            try {
+                handleDiscordBridgeMessage(JSON.parse(line));
+            } catch (err) {
+                console.error('[WARN] Failed to parse Discord bridge message:', err);
             }
-            page.evaluate((m) => window.__roomBridge.unmuteByAuth(m.auth), msg)
-                .then((result) => sendToDiscord({ type: 'unmuteResult', requestId: msg.requestId, result }))
-                .catch((err) => {
-                    console.error('[WARN] unmuteByAuth bridge failed:', err);
-                    sendToDiscord({ type: 'unmuteResult', requestId: msg.requestId, result: { ok: false } });
-                });
-            return;
         }
     });
-    child.on('error', (err) => {
-        console.error('[WARN] Discord process error:', err);
+    socket.on('error', () => {
+        // Expected/frequent if discordProcess.js hasn't started yet (startup
+        // ordering between independent pm2 processes isn't guaranteed) — the
+        // reconnect loop below handles it, so this doesn't need its own log
+        // spam.
     });
-    // Auto-respawned rather than left dead: a crash in discord.js (or the
-    // process being OOM-killed, etc.) must not permanently lose logging/
-    // moderation/stats until someone notices and restarts the whole VPS
-    // process by hand.
-    child.on('exit', (code, signal) => {
-        discordRespawnDelay = Date.now() - spawnedAt >= DISCORD_STABLE_UPTIME_MS
-            ? DISCORD_RESPAWN_BASE_DELAY_MS
-            : Math.min(discordRespawnDelay * 2, DISCORD_RESPAWN_MAX_DELAY_MS);
-        console.error(`[WARN] Discord process exited (code=${code}, signal=${signal}), respawning in ${discordRespawnDelay}ms`);
-        if (discordProcess === child) discordProcess = null;
-        discordRespawnTimer = setTimeout(() => {
-            spawnDiscordProcess();
-            resyncDiscordProcess();
-        }, discordRespawnDelay);
+    socket.on('close', () => {
+        if (discordSocket === socket) discordSocket = null;
+        discordBridgeBuffer = '';
+        clearTimeout(discordReconnectTimer);
+        discordReconnectTimer = setTimeout(connectDiscordBridge, DISCORD_RECONNECT_DELAY_MS);
     });
-
-    return child;
 }
-spawnDiscordProcess();
-
-process.on('exit', () => {
-    clearTimeout(discordRespawnTimer);
-    if (discordProcess) discordProcess.kill();
-});
+connectDiscordBridge();
 
 /* DB BRIDGE */
 // One generic dispatcher rather than one page.exposeFunction per method —
@@ -246,10 +247,12 @@ async function handleDbCall(method, args) {
 // discordBridgeClient.js) and this decodes it back to a real Buffer.
 function handleDiscordSend(type, payload) {
     if (type === 'roomLink') lastRoomLink = payload.url;
-    if (type === 'recording') {
-        sendToDiscord({ type: 'recording', buffer: Buffer.from(payload.bufferBase64, 'base64'), filename: payload.filename });
-        return;
-    }
+    // 'recording' carries bufferBase64 straight through, unchanged — no
+    // longer decoded into a real Buffer here: fork()'s 'advanced'
+    // serialization could carry a Buffer natively, but sendToDiscord now
+    // writes plain JSON over a TCP socket (see discordProcess.js's own
+    // handleMainBridgeMessage, which decodes it on that end instead, same
+    // as it already does for BFF's identical 'recording' message).
     sendToDiscord({ type, ...payload });
 }
 

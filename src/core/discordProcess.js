@@ -1,24 +1,33 @@
 /*
- * Entry point for the Discord bot's own process (forked from src/index.js
- * with `serialization: 'advanced'`). Runs on a completely separate event
- * loop from the HaxBall room: discord.js's gateway traffic, JSON parsing and
- * object churn can no longer compete with the room's physics tick for the
- * main thread, and a GC pause here can no longer show up to players as a
- * ping spike. Also owns the periodic DB backup (VACUUM INTO fully blocks
- * whichever event loop runs it — see db/sqlite.js's backup()) for the same
- * reason.
+ * Entry point for the Discord bot's own process — a genuinely independent
+ * pm2 process (own ecosystem.config.js entry, own root wrapper
+ * HaxDiscordBot_public.js), not forked from either room's orchestrator.
+ * Confirmed 2026-08-15: the bot used to be forked from src/index.js
+ * specifically, which meant restarting the main room (any deploy, crash, or
+ * forced restart) also killed and respawned Discord — dropping BFF's own
+ * bridge connection along with it even though BFF was never touched. Runs
+ * on its own event loop either way: discord.js's gateway traffic, JSON
+ * parsing and object churn was never meant to compete with either room's
+ * physics tick for the main thread, and a GC pause here must never show up
+ * to players as a ping spike. Also owns the periodic DB backup (VACUUM INTO
+ * fully blocks whichever event loop runs it — see db/sqlite.js's backup())
+ * for the same reason.
  *
- * Has no access to `room`/`state` — those live in the parent. Talks to it
- * over the fork's IPC channel: this process pushes 'relay'/'kickByAuth'/
- * 'muteByAuth'/'unmuteByAuth' messages up, and receives 'log'/'report'/
- * 'recording'/'roomLink'/'password'/'roster' messages down (see the
- * matching shim in src/index.js).
+ * Has no access to either room's `room`/`state` directly — those live in
+ * their own orchestrator processes (src/index.js, src/bffIndex.js). Talks
+ * to both over local loopback TCP, one listener per room (discordBridgePort
+ * for BFF, discordMainBridgePort for the main room — see ./config), plain
+ * newline-delimited JSON on each. Symmetric in both directions: this
+ * process pushes 'relay'/'kickByAuth'/'muteByAuth'/'unmuteByAuth'/etc.
+ * messages to whichever room they're addressed to, and receives
+ * 'log'/'report'/'recording'/'roomLink'/'password'/'roster'/etc. messages
+ * back from it.
  */
 
 // Registered first, before anything that could actually throw: a crash here
-// must never take the room down with it — it's a separate process
-// specifically so it can't. Just log and keep whatever still works (the
-// parent auto-respawns this process if it does fully exit — see index.js).
+// must never take either room down with it — it's a separate process
+// specifically so it can't. Just log and keep whatever still works (pm2
+// auto-restarts this process on its own if it does fully exit).
 process.on('uncaughtException', (err) => {
     console.error('[discordProcess] Uncaught exception:', err);
 });
@@ -26,8 +35,25 @@ process.on('unhandledRejection', (reason) => {
     console.error('[discordProcess] Unhandled rejection:', reason);
 });
 
+const os = require('node:os');
 const path = require('node:path');
 const fs = require('node:fs');
+const net = require('node:net');
+
+// The VPS this runs on has few vCPUs shared with BOTH rooms' own Chromium
+// instances — lowering this process's own OS scheduling priority means the
+// kernel favors room rendering/JS (i.e. player ping) over Discord traffic
+// whenever more than one wants the CPU at the same instant. Previously done
+// externally by src/index.js right after fork()'ing this process (it had
+// the child's pid to hand to os.setPriority); now that this runs as its own
+// independent process with no parent to do that for it, it does it to
+// itself. Best-effort: some platforms/permission setups don't allow this,
+// and that must never take this process down.
+try {
+    os.setPriority(process.pid, os.constants.priority.PRIORITY_LOW);
+} catch (err) {
+    console.error('[WARN] Could not lower Discord process OS priority:', err.message);
+}
 
 const {
     discordToken,
@@ -47,6 +73,7 @@ const {
     discordBffLogChannelId,
     discordBffReportChannelId,
     discordBridgePort,
+    discordMainBridgePort,
 } = require('./config');
 const { maxPlayers: bffMaxPlayers } = require('./bff/roomConstants');
 const { getTimeStats } = require('./utils');
@@ -55,8 +82,8 @@ const { getTimeStats } = require('./utils');
 // DISCORD_PROXY_URL, when set — the ISP appears to drop Discord's TCP
 // traffic outright, so both REST and the gateway need to go through it.
 // This process only ever talks to Discord (see the file header above), so
-// patching `ws` globally here is safe: the room/Puppeteer connection that
-// players actually ride on lives entirely in the parent process and never
+// patching `ws` globally here is safe: neither room's own Puppeteer
+// connection (what players actually ride on) lives in this process or ever
 // sees this. Must run before `./discord` (-> discord.js -> @discordjs/ws)
 // is required below, since @discordjs/ws reads `require('ws').WebSocket`
 // once, at module-load time, into a module-level constant — patching it
@@ -81,21 +108,35 @@ db.init();
 const createPrintStats = require('./stats/print');
 const { printPlayerStats } = createPrintStats({ getTimeStats, db });
 
-// Mirrors the room's live roster, kept in sync via 'roster' messages from
-// the parent (sent on every join/leave) — this process has no direct access
-// to the real `room`/`state`.
+// Mirrors the main room's live roster, kept in sync via 'roster' messages
+// from it (sent on every join/leave) — this process has no direct access to
+// the real `room`/`state`. BFF doesn't feed this at all (only !stats/`/stats`
+// need a live roster, and those have only ever looked up the main room's).
 const state = { playersAll: [] };
 const authArray = [];
 
-// process.send only exists while the IPC channel to the parent is alive —
-// guarding every call means a channel hiccup degrades to "this particular
-// message is dropped" instead of an uncaught TypeError.
-function sendToParent(message) {
-    if (process.connected) process.send(message);
+/* MAIN ROOM BRIDGE — local TCP server the main room's orchestrator
+ * (src/index.js) connects to, the same shape as the BFF bridge below (see
+ * its own comment for why plain loopback TCP rather than a Unix socket).
+ * Used to be the main room's own dedicated channel via fork()'s built-in
+ * IPC; now genuinely symmetric with BFF's bridge, just a different port and
+ * message vocabulary (the main room's discordBot.* calls, not the *Bff*
+ * ones, plus the kickByAuth/muteByAuth/unmuteByAuth request/reply protocol
+ * BFF has no equivalent of yet). */
+
+let mainSocket = null;
+
+function sendToMainRoom(message) {
+    if (!mainSocket || mainSocket.destroyed) return;
+    try {
+        mainSocket.write(JSON.stringify(message) + '\n');
+    } catch (err) {
+        console.error('[Main bridge] Failed to write message:', err.message);
+    }
 }
 
-// Bounded so a lost/delayed reply from the parent (dead channel, the parent
-// itself mid-restart) can't leave a !banauth/`/banauth` command hung
+// Bounded so a lost/delayed reply from the main room (dead channel, that
+// process itself mid-restart) can't leave a !banauth/`/banauth` command hung
 // forever — kickPlayerByAuth always settles, worst case with "nobody was
 // kicked", and the ban itself still gets recorded by the caller either way.
 const KICK_REPLY_TIMEOUT_MS = 5000;
@@ -103,7 +144,7 @@ let nextRequestId = 1;
 const pendingKicks = new Map();
 
 function kickPlayerByAuth(auth, reason) {
-    if (!process.connected) return Promise.resolve(null);
+    if (!mainSocket || mainSocket.destroyed) return Promise.resolve(null);
     const requestId = nextRequestId++;
     return new Promise((resolve) => {
         const timer = setTimeout(() => {
@@ -114,12 +155,12 @@ function kickPlayerByAuth(auth, reason) {
             clearTimeout(timer);
             resolve(result);
         });
-        sendToParent({ type: 'kickByAuth', requestId, auth, reason });
+        sendToMainRoom({ type: 'kickByAuth', requestId, auth, reason });
     });
 }
 
 function relayToRoom(username, content) {
-    sendToParent({ type: 'relay', username, content });
+    sendToMainRoom({ type: 'relay', username, content });
 }
 
 // Fire-and-forget, same as relayToRoom above — a member getting the
@@ -127,7 +168,7 @@ function relayToRoom(username, content) {
 // grants room VIP to whichever HaxBall auth they've linked, but nothing on
 // this side is waiting on a reply to report back.
 function grantVipByAuth(auth, targetName) {
-    sendToParent({ type: 'grantVip', auth, targetName });
+    sendToMainRoom({ type: 'grantVip', auth, targetName });
 }
 
 // Same request/reply-with-timeout shape as kickPlayerByAuth above, for
@@ -138,7 +179,7 @@ const pendingMutes = new Map();
 const pendingUnmutes = new Map();
 
 function muteByAuth(auth, minutes) {
-    if (!process.connected) return Promise.resolve({ ok: false, reason: 'offline' });
+    if (!mainSocket || mainSocket.destroyed) return Promise.resolve({ ok: false, reason: 'offline' });
     const requestId = nextRequestId++;
     return new Promise((resolve) => {
         const timer = setTimeout(() => {
@@ -149,12 +190,12 @@ function muteByAuth(auth, minutes) {
             clearTimeout(timer);
             resolve(result);
         });
-        sendToParent({ type: 'muteByAuth', requestId, auth, minutes });
+        sendToMainRoom({ type: 'muteByAuth', requestId, auth, minutes });
     });
 }
 
 function unmuteByAuth(auth) {
-    if (!process.connected) return Promise.resolve({ ok: false });
+    if (!mainSocket || mainSocket.destroyed) return Promise.resolve({ ok: false });
     const requestId = nextRequestId++;
     return new Promise((resolve) => {
         const timer = setTimeout(() => {
@@ -165,7 +206,7 @@ function unmuteByAuth(auth) {
             clearTimeout(timer);
             resolve(result);
         });
-        sendToParent({ type: 'unmuteByAuth', requestId, auth });
+        sendToMainRoom({ type: 'unmuteByAuth', requestId, auth });
     });
 }
 
@@ -202,7 +243,12 @@ const discordBot = createDiscordBot({
 });
 discordBot.init();
 
-process.on('message', (msg) => {
+// Unchanged in substance from the old process.on('message') switch — just
+// invoked from the TCP data handler below instead of fork() IPC. Handles
+// both directions that flow over the main room's socket: messages IT
+// initiates (log/report/recording/...) and replies to requests THIS process
+// initiated (kickResult/muteResult/unmuteResult).
+function handleMainBridgeMessage(msg) {
     if (!msg || typeof msg !== 'object') return;
     switch (msg.type) {
         case 'log':
@@ -212,7 +258,7 @@ process.on('message', (msg) => {
             discordBot.sendReport(msg.embedData);
             break;
         case 'recording':
-            discordBot.sendRecording(msg.buffer, msg.filename);
+            discordBot.sendRecording(Buffer.from(msg.bufferBase64, 'base64'), msg.filename);
             break;
         case 'roomLink':
             discordBot.setRoomLink(msg.url);
@@ -279,6 +325,44 @@ process.on('message', (msg) => {
             break;
         }
     }
+}
+
+const mainBridgeServer = net.createServer((socket) => {
+    // src/index.js reconnects with backoff on drop (mirroring bffIndex.js's
+    // own connectDiscordBridge) — always the latest/only connection, so a
+    // fresh one here simply replaces whatever was tracked before.
+    mainSocket = socket;
+    let buffer = '';
+    socket.on('data', (chunk) => {
+        buffer += chunk.toString('utf8');
+        let newlineIndex;
+        while ((newlineIndex = buffer.indexOf('\n')) !== -1) {
+            const line = buffer.slice(0, newlineIndex);
+            buffer = buffer.slice(newlineIndex + 1);
+            if (!line.trim()) continue;
+            try {
+                handleMainBridgeMessage(JSON.parse(line));
+            } catch (err) {
+                console.error('[Main bridge] Failed to parse message:', err);
+            }
+        }
+    });
+    socket.on('close', () => {
+        if (mainSocket === socket) mainSocket = null;
+    });
+    socket.on('error', (err) => {
+        console.error('[Main bridge] Socket error:', err.message);
+    });
+});
+mainBridgeServer.on('error', (err) => {
+    // Non-fatal: BFF's own bridge (and the Discord client itself) must keep
+    // working even if this particular listener can't bind (port already in
+    // use from a stale process, etc.) — src/index.js already tolerates a
+    // failed connection (fire-and-forget, own reconnect backoff).
+    console.error('[Main bridge] Server error (main room Discord bridging unavailable):', err.message);
+});
+mainBridgeServer.listen(discordMainBridgePort, '127.0.0.1', () => {
+    console.log(`[Main bridge] Listening on 127.0.0.1:${discordMainBridgePort}`);
 });
 
 /* BFF BRIDGE — local TCP server so the BFF orchestrator (src/bffIndex.js, a
@@ -290,19 +374,14 @@ process.on('message', (msg) => {
  * platform-specific branching. Newline-delimited JSON, one message per
  * line — simple enough not to need a real framing protocol at this
  * message rate (a handful of events per minute, not a firehose). */
-const net = require('node:net');
 
 // Tracks the single active BFF connection (bffIndex.js only ever opens one)
-// so relayToBffRoom below has something to write to — the bridge was
-// write-only from BFF's side until now (log/report/recording/status/
-// voteBanNotification/adminCall all flow BFF -> here, nothing flowed back
-// the other way). !saybff/`/saybff` (discord.js) need the reverse
-// direction, so this is the first thing sent back down this socket.
+// so relayToBffRoom below has something to write to.
 let bffSocket = null;
 
-// Fire-and-forget, same as relayToRoom (index.js's IPC 'relay' message) —
-// a disconnected/reconnecting BFF bridge degrades to "this message never
-// reached the room," never to the command itself erroring.
+// Fire-and-forget, same as relayToRoom above — a disconnected/reconnecting
+// BFF bridge degrades to "this message never reached the room," never to
+// the command itself erroring.
 function relayToBffRoom(username, content) {
     if (!bffSocket || bffSocket.destroyed) return;
     try {
@@ -339,11 +418,10 @@ function handleBffBridgeMessage(msg) {
             break;
         // !report (core/bff/adminCall.js) — corrected 2026-08-14: goes to
         // the SAME shared DISCORD_ADMIN_CALL_CHANNEL_ID the main room's own
-        // !report already uses (not a separate BFF channel, and not folded
-        // into the log channel like voteBanNotification above) — the
-        // [BFF]/[FUTSAL] tags exist specifically so one shared channel can
-        // tell the two rooms' alerts apart. Also picks up the real @here
-        // ping sendAdminCall already does, which sendBffLog never had.
+        // !report already uses (not a separate BFF channel), tagged so the
+        // one shared channel can tell the two rooms' alerts apart. Also
+        // picks up the real @here ping sendAdminCall already does, which
+        // sendBffLog never had.
         case 'adminCall':
             discordBot.sendAdminCall(msg.playerName, 'BFF');
             break;
@@ -351,9 +429,6 @@ function handleBffBridgeMessage(msg) {
 }
 
 const bffBridgeServer = net.createServer((socket) => {
-    // bffIndex.js reconnects with backoff on drop (see its own
-    // connectDiscordBridge) — always the latest/only connection, so a
-    // fresh one here simply replaces whatever was tracked before.
     bffSocket = socket;
     let buffer = '';
     socket.on('data', (chunk) => {
@@ -391,11 +466,12 @@ bffBridgeServer.listen(discordBridgePort, '127.0.0.1', () => {
 
 /* DATABASE BACKUPS */
 
-// Moved here from src/index.js for the same reason the Discord client lives
-// here: VACUUM INTO fully blocks whichever event loop runs it for as long as
-// it takes to snapshot the whole file, and that must never be the room's.
-// WAL mode lets this connection see a consistent, fully committed snapshot
-// regardless of which process (this one or the room's) last wrote to it.
+// Lives here rather than in either room's orchestrator for the same reason
+// the Discord client does: VACUUM INTO fully blocks whichever event loop
+// runs it for as long as it takes to snapshot the whole file, and that must
+// never be either room's. WAL mode lets this connection see a consistent,
+// fully committed snapshot regardless of which process (this one or either
+// room's) last wrote to it.
 const backupDir = path.join(__dirname, '..', '..', 'db', 'backups');
 const backupIntervalMs = 6 * 60 * 60 * 1000;
 const maxBackups = 28; // 1 week of history at the 6h cadence
