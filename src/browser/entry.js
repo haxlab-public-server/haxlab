@@ -774,7 +774,7 @@ function checkTime() {
         state.cleanSheetWatchAnnounced = true;
         const teamName = cleanSheetTeam == Team.RED ? 'Красная команда' : 'Синяя команда';
         room.sendAnnouncement(
-            `👀 Сухая серия под угрозой — ${getTimeGame(scores.timeLimit - scores.time)} до конца, ${teamName} пока не пропустила !`,
+            `👀 Сухой тайм под угрозой — ${getTimeGame(scores.timeLimit - scores.time)} до конца, ${teamName} пока не пропустила !`,
             null,
             infoColor,
             'small',
