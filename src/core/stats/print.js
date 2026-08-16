@@ -187,12 +187,22 @@ async function buildClubRankingString(db) {
 // buildTopLeaderLine's own comment) — the full top-5 for any one category
 // is a `!tops <category>` away, pointed at explicitly in the trailing hint
 // line so it isn't a dead end.
-async function buildAllRankingsText(db, getTimeStats) {
+//
+// `extraLines`/`extraCategories` let a caller (main room's roomStats.js —
+// see printAllRankings) fold in a room-specific leader line (ELO) BEFORE
+// the hint, not after the whole block — real bug fixed 2026-08-17: the
+// caller used to just append its own eloLine after this function's already-
+// complete return value, which put the "full table" hint ABOVE the ELO
+// line instead of below it. BFF's own printAllRankings (core/bff/roomStats.js)
+// never had this bug — it builds its rating line into the SAME lines array
+// before adding the hint, which is exactly the pattern this now matches.
+async function buildAllRankingsText(db, getTimeStats, { extraLines = [], extraCategories = [] } = {}) {
     const playerLines = await Promise.all(RANKING_STAT_KEYS.map((key) => buildTopLeaderLine(db, getTimeStats, key)));
     const clubLine = await buildClubLeaderLine(db);
-    const lines = [...playerLines, clubLine].filter((line) => line != null);
+    const lines = [...playerLines, clubLine, ...extraLines].filter((line) => line != null);
     if (lines.length === 0) return null;
-    return `${lines.join('\n')}\nПолная таблица по категории: !tops <${[...RANKING_STAT_KEYS.map((k) => k.toLowerCase()), 'clubs'].join('|')}>`;
+    const categories = [...RANKING_STAT_KEYS.map((k) => k.toLowerCase()), 'clubs', ...extraCategories];
+    return `${lines.join('\n')}\nПолная таблица по категории: !tops <${categories.join('|')}>`;
 }
 
 module.exports = function createPrintStats({
@@ -212,6 +222,13 @@ module.exports = function createPrintStats({
         return rankInfo.total === 0 ? '—' : `${rankInfo.rank}/${rankInfo.total}`;
     }
 
+    // Multi-line layout (requested 2026-08-17 — the original single "Name
+    // [bracket] [bracket] [bracket]" line read as one dense run-on
+    // sentence). Same substrings as before (rank/value pairs, labels),
+    // just grouped onto their own lines instead of comma-joined inside
+    // brackets — identity, then volume, then per-category ranks, then
+    // room-specific rating lines (BFF's ratingOrdinal / main room's ELO),
+    // each opt-in field still only appearing when the caller actually set it.
     async function printPlayerStats(stats) {
         const goalsRank = await db.getStatRank('goals', stats.goals);
         const assistsRank = await db.getStatRank('assists', stats.assists);
@@ -223,18 +240,20 @@ module.exports = function createPrintStats({
         // module deliberately has no `getRole`/`room` access at all — see
         // this file's own header comment).
         const vipBadge = stats.isVip ? '⭐ ' : '';
-        let text = `${vipBadge}${stats.playerName} ` +
-            `[🏆 ${stats.winrate} побед, 🕹️ ${stats.games} игр] ` +
-            `[🏅 Ранг по голам: ${formatRank(goalsRank)}(${stats.goals}), ` +
-            `ассистам: ${formatRank(assistsRank)}(${stats.assists}), ` +
-            `сухим матчам: ${formatRank(csRank)}(${stats.CS}), ` +
-            `времени игры: ${formatRank(playtimeRank)}(${getTimeStats(stats.playtime)})]`;
+        const lines = [
+            `${vipBadge}${stats.playerName}`,
+            `🏆 ${stats.winrate} побед · 🕹️ ${stats.games} игр`,
+            `🏅 Голы ${formatRank(goalsRank)}(${stats.goals}) · ` +
+            `Ассисты ${formatRank(assistsRank)}(${stats.assists}) · ` +
+            `Сухие ${formatRank(csRank)}(${stats.CS}) · ` +
+            `Время ${formatRank(playtimeRank)}(${getTimeStats(stats.playtime)})`,
+        ];
         // BFF-only (see core/bff/rating.js) — the main room never sets this
         // field on the stats object it passes in, so this stays 100%
         // unchanged there. Rounded for display; the DB keeps the real
         // precision for actual balancing.
         if (stats.ratingOrdinal != null) {
-            text += ` [⚔️ Рейтинг: ${formatRatingDisplay(stats.ratingOrdinal)}]`;
+            lines.push(`⚔️ Рейтинг: ${formatRatingDisplay(stats.ratingOrdinal)}`);
         }
         // Main-room-only ELO (see stats/elo.js), same ad-hoc opt-in pattern
         // as ratingOrdinal above — deliberately a SEPARATE field from
@@ -251,9 +270,9 @@ module.exports = function createPrintStats({
             // ELO — null when they've never had a match analyzed yet, so it
             // just doesn't show rather than printing "(null)".
             const ratingSuffix = stats.lastMatchRating != null ? ` (${stats.lastMatchRating.toFixed(1)})` : '';
-            text += ` [🎯 ELO: ${stats.eloDisplay}${ratingSuffix}, ранг: ${formatRank(eloRank)}]`;
+            lines.push(`🎯 ELO ${stats.eloDisplay}${ratingSuffix} · ранг ${formatRank(eloRank)}`);
         }
-        return text;
+        return lines.join('\n');
     }
 
     return {

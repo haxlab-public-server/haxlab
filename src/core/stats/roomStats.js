@@ -316,14 +316,18 @@ module.exports = function createRoomStats({
 
     // !tops with no argument — every category in one message, skipping any
     // that don't have the 5-player quorum yet rather than erroring. The ELO
-    // leader line is appended on top of the generic text (same pattern
-    // BFF's own printAllRankings uses for its rating line) rather than
-    // folded into buildAllRankingsText itself, since 'elo' deliberately
-    // isn't in the shared RANKING_STAT_KEYS list.
+    // leader line is folded INTO buildAllRankingsText's own lines (via
+    // extraLines/extraCategories), landing before the "full table" hint —
+    // not appended after the whole block, which used to put the hint above
+    // ELO (real bug, fixed 2026-08-17). 'elo' still isn't in the shared
+    // RANKING_STAT_KEYS list (see that list's own comment for why), just
+    // threaded through per-call here instead.
     async function printAllRankings(id = 0) {
-        const genericText = await buildAllRankingsText(db, getTimeStats);
         const eloLine = await buildEloLeaderLine(db);
-        const text = [genericText, eloLine].filter((line) => line != null).join('\n') || null;
+        const text = await buildAllRankingsText(db, getTimeStats, {
+            extraLines: [eloLine],
+            extraCategories: ['elo'],
+        });
         if (text == null) {
             room.sendAnnouncement(
                 'Недостаточно игр сыграно !',

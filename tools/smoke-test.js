@@ -55,10 +55,10 @@ console.log('--- stats/print.js: !stats shows the full stat block ---');
     check('shows the player name', output.includes('Alice'), true);
     check('shows winrate', output.includes('🏆 70.0% побед'), true);
     check('shows games', output.includes('🕹️ 10 игр'), true);
-    check('shows goals rank', output.includes('Ранг по голам: 3/20(25)'), true);
-    check('shows assists rank', output.includes('ассистам: 5/20(12)'), true);
-    check('shows clean sheets rank', output.includes('сухим матчам: 2/20(3)'), true);
-    check('shows playtime rank', output.includes('времени игры: 7/20(10m)'), true);
+    check('shows goals rank', output.includes('Голы 3/20(25)'), true);
+    check('shows assists rank', output.includes('Ассисты 5/20(12)'), true);
+    check('shows clean sheets rank', output.includes('Сухие 2/20(3)'), true);
+    check('shows playtime rank', output.includes('Время 7/20(10m)'), true);
     check('the main room never sets ratingOrdinal, so no rating line appears at all', output.includes('Рейтинг'), false);
 
     const bffStats = { ...stats, ratingOrdinal: 27.849 };
@@ -74,7 +74,7 @@ console.log('--- stats/print.js: !stats shows the full stat block ---');
     const emptyRoomPrintStats = createPrintStats({ getTimeStats: (s) => `${Math.floor(s / 60)}m`, db: emptyRoomDb });
     const emptyRoomOutput = await emptyRoomPrintStats.printPlayerStats({ ...stats, playerName: 'Newbie', goals: 0, assists: 0, CS: 0 });
     check('an empty player_stats table shows "—", never the misleading "1/0"', emptyRoomOutput.includes('1/0'), false);
-    check('...shows a clear placeholder instead', emptyRoomOutput.includes('Ранг по голам: —(0)'), true);
+    check('...shows a clear placeholder instead', emptyRoomOutput.includes('Голы —(0)'), true);
 
     const ratingDbFew = { getRatingLeaderboard: async () => [{ playerName: 'A', ordinal: 40 }, { playerName: 'B', ordinal: 30 }] };
     check('buildRatingRankingString returns null below the 5-player quorum', await require(path.join(CORE, 'stats', 'print')).buildRatingRankingString(ratingDbFew), null);
@@ -697,14 +697,21 @@ console.log('\n--- db + roomStats.js/player.js: player data actually round-trips
     // anything at this point in the test).
     sent.length = 0;
     await roomStats.printAllRankings(0);
-    // 6 categories + hint line + the ELO line appended on top (all 5 rows
-    // sit at the elo_rating DEFAULT 1000 at this point — the quorum only
-    // needs 5 rows to exist, not 5 players who've actually had ELO moved).
+    // 6 categories + the ELO line + hint line (all 5 rows sit at the
+    // elo_rating DEFAULT 1000 at this point — the quorum only needs 5 rows
+    // to exist, not 5 players who've actually had ELO moved).
     check('printAllRankings combines every category into one message', sent[0].msg.split('\n').length, 8);
     check('printAllRankings includes the goals leader', /Голы: Filler2 \(100\)/.test(sent[0].msg), true);
     check('printAllRankings includes the playtime leader too', /Время игры:/.test(sent[0].msg), true);
-    check('...and points at !tops <category> for the full top-5', /Полная таблица по категории: !tops <games\|wins\|goals\|assists\|cs\|playtime\|clubs>/.test(sent[0].msg), true);
-    check('...and the ELO leader line is appended after it (elo is deliberately outside the generic list)', /ELO: \w+ \(1000\)/.test(sent[0].msg), true);
+    // Real bug fixed 2026-08-17: the hint line used to render ABOVE the ELO
+    // line (ELO was appended after buildAllRankingsText's already-complete
+    // return value, hint included) — now ELO is folded into the SAME lines
+    // array the hint is built from, so it lands before the hint, and the
+    // hint itself now also lists 'elo' as a valid !tops <category>.
+    const eloLineIndex = sent[0].msg.split('\n').findIndex((line) => /^ELO: \w+ \(1000\)/.test(line));
+    const hintLineIndex = sent[0].msg.split('\n').findIndex((line) => line.startsWith('Полная таблица по категории'));
+    check('the ELO leader line appears BEFORE the "full table" hint, not after it', eloLineIndex >= 0 && eloLineIndex < hintLineIndex, true);
+    check('...and the hint now also advertises elo as a valid !tops <category>', /Полная таблица по категории: !tops <games\|wins\|goals\|assists\|cs\|playtime\|clubs\|elo>/.test(sent[0].msg), true);
 
     const printRankingsCalls = [];
     const printAllRankingsCalls = [];
