@@ -204,6 +204,12 @@ module.exports = function createPlayerCommands({
         // stays hidden for BFF (see print.js's own comment for why it can't
         // just check stats.elo directly).
         stats.eloDisplay = stats.elo;
+        // core/stats/analytics/'s per-match 0-10 rating (requested
+        // 2026-08-17), shown in parentheses right after ELO — null (not 0)
+        // when they've never had a match analyzed yet, same "distinguish
+        // never-played from a real zero" reasoning as getRecentRatingDelta.
+        const lastMatchReport = await db.getLatestMatchAnalyticsReport(authArray[player.id][0]);
+        stats.lastMatchRating = lastMatchReport?.rating ?? null;
         const statsString = await printPlayerStats(stats);
         room.sendAnnouncement(
             statsString,
@@ -276,8 +282,14 @@ module.exports = function createPlayerCommands({
             return;
         }
         const auth = authArray[player.id][0];
+        // Master is exempt from both limits below (requested 2026-08-17 —
+        // "мастер всегда один, и даже если бы было несколько, им бы тоже
+        // имело смысл бегать без лимита"). No usage bookkeeping for them
+        // either (tipUsedThisMatch/tipDailyUsage stay untouched) — there's
+        // no cap to track against, so recording it would be pointless.
+        const isUnlimited = getRole(player) >= Role.MASTER;
 
-        if (state.tipUsedThisMatch.has(auth)) {
+        if (!isUnlimited && state.tipUsedThisMatch.has(auth)) {
             room.sendAnnouncement(
                 `!tip можно использовать только один раз за матч !`,
                 player.id,
@@ -290,7 +302,7 @@ module.exports = function createPlayerCommands({
 
         const dailyMax = getRole(player) >= Role.VIP ? tipDailyMaxUsesVip : tipDailyMaxUses;
         const dailyUses = pruneTipDailyUsage(auth);
-        if (dailyUses.length >= dailyMax) {
+        if (!isUnlimited && dailyUses.length >= dailyMax) {
             const nextFreeAt = new Date(dailyUses[0] + tipDailyWindowMs).toISOString();
             room.sendAnnouncement(
                 `!tip можно использовать не больше ${dailyMax} раз в день — использовано ${dailyUses.length}/${dailyMax}, следующая попытка через ${formatBanRemaining(nextFreeAt)} !`,
@@ -302,24 +314,71 @@ module.exports = function createPlayerCommands({
             return;
         }
 
-        state.tipUsedThisMatch.add(auth);
-        dailyUses.push(Date.now());
-        tipDailyUsage.set(auth, dailyUses);
+        if (!isUnlimited) {
+            state.tipUsedThisMatch.add(auth);
+            dailyUses.push(Date.now());
+            tipDailyUsage.set(auth, dailyUses);
+        }
 
         room.sendAnnouncement(
-            `👏 ${player.name} благодарит ${target.name}. Хорошая игра!`,
+            `👏 ${player.name} благодарит ${target.name}. Хорошо сыграно!`,
             null,
             announcementColor,
             'bold',
             HaxNotification.CHAT
         );
-        room.sendAnnouncement(
-            `Использований !tip сегодня: ${renderProgressBar(dailyUses.length, dailyMax)}`,
-            player.id,
-            infoColor,
-            'bold',
-            HaxNotification.CHAT
-        );
+        if (!isUnlimited) {
+            room.sendAnnouncement(
+                `Использований !tip сегодня: ${renderProgressBar(dailyUses.length, dailyMax)}`,
+                player.id,
+                infoColor,
+                'bold',
+                HaxNotification.CHAT
+            );
+        }
+    }
+
+    // !rating — the 28-metric advanced analytics report (see
+    // core/stats/analytics/), main room only. Looks up the CALLER's own most
+    // recent match (db.getLatestMatchAnalyticsReport) — there's no
+    // cross-match aggregation yet (see analytics/index.js's own doc comment:
+    // one row per match, ELO integration is a deliberate follow-up, not
+    // built here), so this only ever shows "how did I do last game."
+    //
+    // The single X.X/10 up top is MatchRatingDetector's re-centered
+    // composite (requested after seeing a replay-analyzer screenshot with
+    // per-player match ratings) — relative to the OTHER 7 players in that
+    // SAME match, not an absolute/historical scale. The 27 raw metrics below
+    // it are what it's built from, for anyone who wants the detail.
+    function ratingEmoji(rating) {
+        if (rating >= 8.5) return '🌟';
+        if (rating >= 7) return '✅';
+        if (rating >= 5.5) return '➖';
+        return '🔻';
+    }
+
+    async function ratingCommand(player, message) {
+        const auth = authArray[player.id][0];
+        const report = await db.getLatestMatchAnalyticsReport(auth);
+        if (report == null) {
+            room.sendAnnouncement(
+                `Пока нет данных о последнем матче — сыграйте хотя бы один полный матч.`,
+                player.id,
+                errorColor,
+                'bold',
+                HaxNotification.CHAT
+            );
+            return;
+        }
+        const text = `${ratingEmoji(report.rating)} Оценка за последний матч — ${report.playerName}: ${report.rating.toFixed(1)}/10\n` +
+            `⚽ Голы ${report.goals} | Передачи ${report.assists}\n` +
+            `🎯 Владение: касания ${report.posTouches} | голевые ${report.scoringPct}% | скорость решений ${report.decisionSpeed}\n` +
+            `⏩ Прогресс: прог. передачи ${report.progPasses} (${report.progDistance}px) | выход в финальную треть ${report.final3rdEntries} | ключевые передачи ${report.keyPasses}\n` +
+            `🅰️ Цепочка: 2-й ассист ${report.secondAssists} | 3-й ассист ${report.thirdAssists} | добивания ${report.rebounds} (забрал ${report.reboundsRecovered}) | контратаки ${report.counters}\n` +
+            `🛡️ Оборона: потери ${report.turnoverTouches} (опасных ${report.dangerousTurnovers}) | отборы ${report.forcedTakeaways} | перехваты ${report.intercDuels} | подборы ${report.recoveries} (в атаке ${report.f3Recoveries}) | выносы ${report.clearances} (сохранено ${report.clearancesRecovered})\n` +
+            `🤺 Дуэли: ${report.duels} (${report.duelsWon}П / ${report.duelsLost}П) | без давления ${report.pressRelief}%\n` +
+            `🧤 Вратарь: xG соперника ${report.xgFaced} | предотвращено ${report.xgPrevented} | подчистки ${report.sweeperActions}`;
+        room.sendAnnouncement(text, player.id, infoColor, 'bold', HaxNotification.CHAT);
     }
 
     async function renameCommand(player, message) {
@@ -919,8 +978,14 @@ module.exports = function createPlayerCommands({
             return;
         }
         const auth = authArray[player.id][0];
+        // Master is exempt from both rate limits below (requested
+        // 2026-08-17 — same reasoning/exemption as !tip's own). The
+        // single-slot claim itself (state.priorityCaptainId) is untouched
+        // — that's the actual mechanic, not a personal rate limit, so even
+        // the master can only hold it once at a time like anyone else.
+        const isUnlimited = getRole(player) >= Role.MASTER;
         const dailyUses = pruneUpDailyUsage(auth);
-        if (dailyUses.length >= upDailyMaxUses) {
+        if (!isUnlimited && dailyUses.length >= upDailyMaxUses) {
             const nextFreeAt = new Date(dailyUses[0] + upDailyWindowMs).toISOString();
             room.sendAnnouncement(
                 `!up можно использовать не больше ${upDailyMaxUses} раз в день — использовано ${dailyUses.length}/${upDailyMaxUses}, следующая попытка через ${formatBanRemaining(nextFreeAt)} !`,
@@ -931,7 +996,7 @@ module.exports = function createPlayerCommands({
             );
             return;
         }
-        if (upCooldownMap.has(auth)) {
+        if (!isUnlimited && upCooldownMap.has(auth)) {
             room.sendAnnouncement(
                 `Команду !up можно использовать раз в час — осталось ${formatBanRemaining(upCooldownMap.get(auth))} !`,
                 player.id,
@@ -942,11 +1007,13 @@ module.exports = function createPlayerCommands({
             return;
         }
         state.priorityCaptainId = player.id;
-        const upExpiresAt = new Date(Date.now() + upCooldownMs).toISOString();
-        upCooldownMap.set(auth, upExpiresAt);
-        setTimeout(() => upCooldownMap.delete(auth), upCooldownMs);
-        dailyUses.push(Date.now());
-        upDailyUsage.set(auth, dailyUses);
+        if (!isUnlimited) {
+            const upExpiresAt = new Date(Date.now() + upCooldownMs).toISOString();
+            upCooldownMap.set(auth, upExpiresAt);
+            setTimeout(() => upCooldownMap.delete(auth), upCooldownMs);
+            dailyUses.push(Date.now());
+            upDailyUsage.set(auth, dailyUses);
+        }
         // Requested 2026-08-15: claiming priority captaincy while AFK is
         // pointless (they'd get picked as captain still tagged AFK) — pull
         // them out automatically, same exitAfk() jjCommand/afkCommand's own
@@ -970,13 +1037,15 @@ module.exports = function createPlayerCommands({
         // exactly how many uses they have left today, not just that this
         // one worked. Rendered as a small block-bar (requested 2026-08-16)
         // rather than a bare "N/3" fraction.
-        room.sendAnnouncement(
-            `Использований !up сегодня: ${renderProgressBar(dailyUses.length, upDailyMaxUses)}`,
-            player.id,
-            infoColor,
-            'bold',
-            HaxNotification.CHAT
-        );
+        if (!isUnlimited) {
+            room.sendAnnouncement(
+                `Использований !up сегодня: ${renderProgressBar(dailyUses.length, upDailyMaxUses)}`,
+                player.id,
+                infoColor,
+                'bold',
+                HaxNotification.CHAT
+            );
+        }
     }
 
     return {
@@ -985,6 +1054,7 @@ module.exports = function createPlayerCommands({
         globalStatsCommand,
         vsCommand,
         tipCommand,
+        ratingCommand,
         renameCommand,
         customColorsCommand,
         vipColorCommand,

@@ -943,8 +943,40 @@ async function endGame(winner) {
         'bold',
         HaxNotification.NONE
     );
+    // 28-metric advanced analytics (see core/stats/analytics/, !rating) —
+    // independent of updateStats()'s quals-only gate, runs for every match
+    // that reaches endGame() regardless of team size. Now runs BEFORE
+    // updateStats() (requested 2026-08-17: feed the per-match rating into
+    // ELO) — updateStats() needs this match's ratings to individually
+    // differentiate each player's ELO delta, so it has to have them in hand
+    // already. matchRatingsByAuth stays an empty Map (roomStats.js's own
+    // per-player fallback) if this block fails, so a detector bug degrades
+    // ELO back to the old flat-per-team behavior instead of blocking it.
+    let matchRatingsByAuth = new Map();
     try {
-        await updateStats();
+        const analyticsReports = await analyzeMatch();
+        matchRatingsByAuth = new Map(analyticsReports.map((r) => [r.auth, r.rating]));
+        // MVP by rating (requested 2026-08-17) — same scope as the
+        // analytics run itself (every match that reaches here, not gated to
+        // full 4v4 quals like updateStats()). Ties broken by whoever sorts
+        // first — genuinely rare (rating is rounded to 1 decimal from a
+        // continuous z-score) and not worth a tiebreak rule of its own.
+        if (analyticsReports.length > 0) {
+            const mvp = analyticsReports.reduce((best, r) => (r.rating > best.rating ? r : best));
+            room.sendAnnouncement(
+                `⭐ MVP матча: ${mvp.playerName} (${mvp.rating.toFixed(1)}/10)`,
+                null,
+                achievementColor,
+                'bold',
+                HaxNotification.MENTION
+            );
+        }
+    } catch (err) {
+        console.error('[endGame] analyzeMatch failed:', err);
+        discordBot.sendLog(`⚠️ Не удалось посчитать продвинутую статистику: ${err.message}`);
+    }
+    try {
+        await updateStats(matchRatingsByAuth);
     } catch (err) {
         console.error('[endGame] updateStats failed:', err);
         discordBot.sendLog(`⚠️ Не удалось сохранить статистику: ${err.message}`);
@@ -1172,6 +1204,29 @@ const {
     getPlayerComp,
 });
 
+/* MATCH ANALYTICS FUNCTIONS */
+
+// 28-metric per-match player analytics (see core/stats/analytics/'s own doc
+// comments) — main room only, same scope as ELO/!tip. Wired here (after GK
+// FUNCTIONS, which is where getGK comes from) rather than earlier: needed by
+// its own ShotQualityModel/SweeperDetector detectors internally.
+const createMatchAnalytics = require('../core/stats/analytics');
+const {
+    reset: resetMatchAnalytics,
+    recordTick: recordMatchAnalyticsTick,
+    analyzeMatch,
+} = createMatchAnalytics({
+    room,
+    state,
+    Team,
+    State,
+    Situation,
+    db,
+    authArray,
+    pointDistance,
+    getGK,
+});
+
 /* GLOBAL STATS FUNCTIONS */
 
 const createGlobalStats = require('../core/stats/global');
@@ -1290,6 +1345,7 @@ const {
     getRecordingName,
     getSecondsReport,
     getTimeEmbed,
+    db,
 });
 
 /* TEAM BALANCE FUNCTIONS */
@@ -1343,6 +1399,7 @@ const {
     globalStatsCommand,
     vsCommand,
     tipCommand,
+    ratingCommand,
     renameCommand,
     customColorsCommand,
     vipColorCommand,
@@ -1550,6 +1607,7 @@ const commands = createCommands({
     globalStatsCommand,
     vsCommand,
     tipCommand,
+    ratingCommand,
     renameCommand,
     customColorsCommand,
     vipColorCommand,
@@ -1753,6 +1811,7 @@ Object.assign(room, wrapEventHandlers(createGameManagementEvents({
     infoColor,
     authArray,
     db,
+    resetMatchAnalytics,
 })));
 
 /* MISCELLANEOUS */
@@ -1776,6 +1835,7 @@ Object.assign(room, wrapEventHandlers(createMiscEvents({
     handleActivity,
     stadiumCommand,
     updateTeams,
+    recordMatchAnalyticsTick,
 })));
 
 // Exposed on the resolved `ready` value (see below) purely for

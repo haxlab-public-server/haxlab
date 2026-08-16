@@ -6,6 +6,20 @@
  */
 const { buildRankingString, buildAllRankingsText, buildClubRankingString, buildEloRankingString, buildEloLeaderLine, STAT_LABELS } = require('./print');
 const { INITIAL_ELO, computeEloDelta } = require('./elo');
+// Only the neutral fallback constant, not any class — keeps a player with
+// no computed rating this match (e.g. analyzeMatch failed) landing at
+// exactly the "no individual adjustment" value MatchRatingDetector itself
+// centers a solid, unremarkable game on, rather than a second hardcoded 6.5.
+const { RATING_BASELINE } = require('./analytics/detectors/MatchRatingDetector');
+
+// How much a player's OWN per-match rating (core/stats/analytics/'s 0-10
+// score, requested 2026-08-17) pulls their ELO delta away from their team's
+// flat share of the team-level exchange below — see updateStats()'s own doc
+// comment for the full reasoning. A player 2 rating points above their
+// team's own match average (a big, genuinely notable spread) gets +/-8 ELO
+// on top of the team's shared delta — a meaningful but not dominant swing
+// next to K_FACTOR=32's own max per-match range.
+const RATING_INFLUENCE = 4;
 
 // !tops categories a fresh top-5 entry is worth privately pinging a player
 // about (requested 2026-08-16) — same 6 columns !tops/voteBan.js's own
@@ -184,7 +198,13 @@ module.exports = function createRoomStats({
         }
     }
 
-    async function updateStats() {
+    // matchRatingsByAuth: Map<auth, 0-10 rating> for THIS match (entry.js's
+    // endGame() now runs analyzeMatch() before this and passes its result
+    // straight through) — defaults to empty so a caller that never computed
+    // ratings (e.g. a test) still gets the old flat-per-team behavior, since
+    // every lookup below falls back to RATING_BASELINE (a neutral "no
+    // adjustment") when a player's auth isn't in the map.
+    async function updateStats(matchRatingsByAuth = new Map()) {
         if (
             state.players.length >= 2 * teamSize &&
             (
@@ -212,11 +232,34 @@ module.exports = function createRoomStats({
             const eloDeltaRed = computeEloDelta(avgRed, avgBlue, actualRed);
             const eloDeltaBlue = -eloDeltaRed;
 
-            for (let player of state.teamRedStats) {
-                await updatePlayerStats(player, Team.RED, eloDeltaRed);
+            // Redistributes each TEAM's own total delta by rating deviation
+            // from that team's own match-average rating (requested
+            // 2026-08-17 — the earlier design conversation's "ELO ~=
+            // winrate in a different wrapper" problem: a flat per-team
+            // delta means every player on a side gains/loses the exact same
+            // ELO no matter how they personally played). Deviations from a
+            // group's own mean always sum to zero, so redDeltas/blueDeltas
+            // still average out to EXACTLY eloDeltaRed/eloDeltaBlue across
+            // each team — the team-level (and therefore population-level)
+            // zero-sum exchange computed above is untouched, only WHO within
+            // a team gets how much of it changes. A standout individual
+            // performance can outweigh RATING_INFLUENCE*(own team's spread)
+            // and flip the sign entirely — a poor game in a win can
+            // net-lose ELO, a great game in a loss can net-gain it. That's
+            // intentional, not a bug.
+            function individualDeltas(players, teamDelta) {
+                const ratings = players.map((p) => matchRatingsByAuth.get(authArray[p.id][0]) ?? RATING_BASELINE);
+                const avgRating = ratings.reduce((a, b) => a + b, 0) / ratings.length;
+                return players.map((_, i) => Math.round(teamDelta + RATING_INFLUENCE * (ratings[i] - avgRating)));
             }
-            for (let player of state.teamBlueStats) {
-                await updatePlayerStats(player, Team.BLUE, eloDeltaBlue);
+            const redDeltas = individualDeltas(state.teamRedStats, eloDeltaRed);
+            const blueDeltas = individualDeltas(state.teamBlueStats, eloDeltaBlue);
+
+            for (let i = 0; i < state.teamRedStats.length; i++) {
+                await updatePlayerStats(state.teamRedStats[i], Team.RED, redDeltas[i]);
+            }
+            for (let i = 0; i < state.teamBlueStats.length; i++) {
+                await updatePlayerStats(state.teamBlueStats[i], Team.BLUE, blueDeltas[i]);
             }
             // Refreshes the "who currently holds #1" snapshot trophies
             // (commands/trophies.js) and the chat prefix read off of —

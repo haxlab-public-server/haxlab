@@ -1484,6 +1484,57 @@ console.log('\n--- stats/roomStats.js + stats/elo.js: main-room ELO exchange (re
     check('a non-full-house match end leaves ELO untouched', dbElo.getPlayerStats('AUTH_R1').elo, 1116);
     check('...and sends no ELO DM either', sentElo.some((s) => /^🎯 ELO:/.test(s.msg)), false);
 
+    // Individual rating-informed differentiation (requested 2026-08-17, the
+    // analytics/!rating follow-up) — same full-house RED-win matchup as
+    // above (avgRed=1016, avgBlue=984 -> eloDeltaRed=15), but now with a
+    // per-player rating map: R1/R2 both won, but R1 played a standout game
+    // (9.0) and R2 a poor one (4.0); B1/B2 both lost, but B1 played well
+    // (8.5) and B2 badly (4.5).
+    stateElo.teamRedStats = [{ id: 1, name: 'R1' }, { id: 2, name: 'R2' }];
+    stateElo.teamBlueStats = [{ id: 3, name: 'B1' }, { id: 4, name: 'B2' }];
+    stateElo.lastWinner = Team.RED;
+    sentElo.length = 0;
+    const matchRatings = new Map([
+        ['AUTH_R1', 9.0], ['AUTH_R2', 4.0],
+        ['AUTH_B1', 8.5], ['AUTH_B2', 4.5],
+    ]);
+    await roomStatsElo.updateStats(matchRatings);
+    // Hand-derived: eloDeltaRed=15 (from the pre-match averages above).
+    // R1 deviates +2.5 from the team's own 6.5 rating average -> 15+4*2.5=25.
+    // R2 deviates -2.5 -> 15-10=5. Both still sum to 2*15=30, the SAME team
+    // total the flat-delta version above would have produced.
+    check('the standout winner gains MORE than their flat team share', dbElo.getPlayerStats('AUTH_R1').elo, 1116 + 25);
+    check('...while the underperforming winner gains LESS, despite being on the same winning side', dbElo.getPlayerStats('AUTH_R2').elo, 916 + 5);
+    // B1 deviates +2.0 from blue's own 6.5 average -> -15+4*2=-7 (still a
+    // loss, but a much smaller one). B2 deviates -2.0 -> -15-8=-23.
+    check('the standout LOSER loses much less than their flat team share', dbElo.getPlayerStats('AUTH_B1').elo, 984 - 7);
+    check('...while the poor-performing loser loses much more', dbElo.getPlayerStats('AUTH_B2').elo, 984 - 23);
+
+    const ratedEloDms = sentElo.filter((s) => /^🎯 ELO:/.test(s.msg));
+    check('individual deltas still reach each player via their own private ELO DM', ratedEloDms.find((s) => s.id === 1).msg, `🎯 ELO: ${1116 + 25} (+25)`);
+    check('...including the smaller-than-flat winner', ratedEloDms.find((s) => s.id === 2).msg, `🎯 ELO: ${916 + 5} (+5)`);
+
+    // A genuinely extreme individual gap can flip the sign entirely — a
+    // brilliant game on the losing side nets a real GAIN, not just a
+    // smaller loss. Fresh reset to a flat, even 1000/1000 matchup
+    // (eloDeltaRed = round(32*0.5) = 16 -> eloDeltaBlue = -16) isolates
+    // this from the accumulated deltas above.
+    dbElo.savePlayerStats('AUTH_R1', Object.assign(new HaxStatisticsElo('R1'), { elo: 1000 }));
+    dbElo.savePlayerStats('AUTH_R2', Object.assign(new HaxStatisticsElo('R2'), { elo: 1000 }));
+    dbElo.savePlayerStats('AUTH_B1', Object.assign(new HaxStatisticsElo('B1'), { elo: 1000 }));
+    dbElo.savePlayerStats('AUTH_B2', Object.assign(new HaxStatisticsElo('B2'), { elo: 1000 }));
+    const extremeRatings = new Map([
+        ['AUTH_R1', 6.5], ['AUTH_R2', 6.5], // even, unremarkable winning side
+        ['AUTH_B1', 10], ['AUTH_B2', 0], // one flawless (rating-max), one disastrous (rating-min) loser
+    ]);
+    await roomStatsElo.updateStats(extremeRatings);
+    // avgBlueRating=5, B1 deviates +5 -> round(-16+4*5)=+4: a genuine GAIN
+    // despite being on the LOSING team. B2 deviates -5 -> round(-16-20)=-36.
+    check('an extreme enough individual gap flips the sign — a flawless game in a loss nets a real ELO GAIN', dbElo.getPlayerStats('AUTH_B1').elo, 1004);
+    check('...while their teammate\'s disastrous game loses far more than the flat -16 share', dbElo.getPlayerStats('AUTH_B2').elo, 964);
+    check('the team-level zero-sum exchange still holds exactly, even with the sign flip', (dbElo.getPlayerStats('AUTH_R1').elo - 1000) + (dbElo.getPlayerStats('AUTH_R2').elo - 1000), 32);
+    check('...and the losing team\'s total is the exact negation', (dbElo.getPlayerStats('AUTH_B1').elo - 1000) + (dbElo.getPlayerStats('AUTH_B2').elo - 1000), -32);
+
     dbElo.close();
 })();
 
@@ -6805,13 +6856,14 @@ console.log('\n--- commands/player.js: !tip #<id> — once per match + role-base
         [1, { id: 1, name: 'Alice' }],
         [2, { id: 2, name: 'Bob' }],
         [3, { id: 3, name: 'VipCarol' }],
+        [4, { id: 4, name: 'MasterDave' }],
     ]);
     const roomMockTip = {
         sendAnnouncement: (msg, id, color) => sentTip.push({ msg, id, color }),
         getPlayer: (id) => playersById.get(id) ?? null,
     };
-    const authArrayTip = { 1: ['AUTH_TIP_ALICE'], 2: ['AUTH_TIP_BOB'], 3: ['AUTH_TIP_VIP'] };
-    const RoleMock = { PLAYER: 0, VIP: 1 };
+    const authArrayTip = { 1: ['AUTH_TIP_ALICE'], 2: ['AUTH_TIP_BOB'], 3: ['AUTH_TIP_VIP'], 4: ['AUTH_TIP_MASTER'] };
+    const RoleMock = { PLAYER: 0, VIP: 1, MASTER: 4 };
     const stateTip = { tipUsedThisMatch: new Set() };
     const { tipCommand } = require(path.join(CORE, 'commands', 'player'))({
         room: roomMockTip, state: stateTip, Team: {}, Role: RoleMock, HaxStatistics: function () {}, authArray: authArrayTip, db: {},
@@ -6820,7 +6872,7 @@ console.log('\n--- commands/player.js: !tip #<id> — once per match + role-base
         minAFKDuration: 0, maxAFKDuration: 0, AFKCooldown: 0,
         announcementColor: 1, errorColor: 3, infoColor: 5, successColor: 6,
         HaxNotification: { CHAT: 1 },
-        getCommand: () => false, getRole: (p) => (p.id === 3 ? RoleMock.VIP : RoleMock.PLAYER),
+        getCommand: () => false, getRole: (p) => (p.id === 4 ? RoleMock.MASTER : p.id === 3 ? RoleMock.VIP : RoleMock.PLAYER),
         handlePlayersJoin: () => {}, handlePlayersLeave: () => {},
         printPlayerStats: () => '', printRankings: async () => {}, printAllRankings: async () => {}, printClubRankings: async () => {},
         updateTeams: () => {}, getCommands: () => ({}),
@@ -6844,7 +6896,7 @@ console.log('\n--- commands/player.js: !tip #<id> — once per match + role-base
 
     sentTip.length = 0;
     await tipCommand({ id: 1, name: 'Alice' }, '!tip #2');
-    check('a valid !tip sends the exact public thank-you message, broadcast (id: null)', sentTip[0], { msg: '👏 Alice благодарит Bob. Хорошая игра!', id: null, color: 1 });
+    check('a valid !tip sends the exact public thank-you message, broadcast (id: null)', sentTip[0], { msg: '👏 Alice благодарит Bob. Хорошо сыграно!', id: null, color: 1 });
     check('...plus a private usage-count follow-up', sentTip[1].msg, 'Использований !tip сегодня: 1/2');
     check('...sent privately, not broadcast', sentTip[1].id, 1);
 
@@ -6886,7 +6938,124 @@ console.log('\n--- commands/player.js: !tip #<id> — once per match + role-base
     sentTip.length = 0;
     await tipCommand({ id: 1, name: 'Alice' }, '!tip #2');
     check('a regular player\'s own cap is unaffected by a VIP\'s usage (separate per-auth tracking)', /не больше 2 раз в день/.test(sentTip[0].msg), true);
+
+    // Master (id 4, requested 2026-08-17) is exempt from BOTH limits — no
+    // once-per-match block, no daily cap, no bookkeeping at all.
+    for (let i = 1; i <= 5; i++) {
+        sentTip.length = 0;
+        await tipCommand({ id: 4, name: 'MasterDave' }, '!tip #2');
+        check(`master tip #${i} in the SAME match succeeds (no once-per-match limit)`, sentTip[0].msg, '👏 MasterDave благодарит Bob. Хорошо сыграно!');
+        check('...no progress-bar follow-up either (nothing to track)', sentTip.length, 1);
+    }
+    check('the master\'s tips were never recorded in the once-per-match set', stateTip.tipUsedThisMatch.has('AUTH_TIP_MASTER'), false);
 })();
+
+console.log('\n--- commands/player.js: !rating — 28-metric analytics report lookup ---');
+(async () => {
+    const sentRating = [];
+    const roomMockRating = { sendAnnouncement: (msg, id, color) => sentRating.push({ msg, id, color }) };
+    const authArrayRating = { 1: ['AUTH_RATING_ALICE'] };
+    const dbRating = {
+        reports: new Map(),
+        getLatestMatchAnalyticsReport: async function (auth) { return this.reports.get(auth) ?? null; },
+    };
+    const { ratingCommand } = require(path.join(CORE, 'commands', 'player'))({
+        room: roomMockRating, state: {}, Team: {}, Role: {}, HaxStatistics: function () {}, authArray: authArrayRating, db: dbRating,
+        AFKSet: new Set(), AFKMinSet: new Set(), AFKCooldownSet: new Set(),
+        hiddenVipSet: new Set(), silencedAuths: new Map(),
+        minAFKDuration: 0, maxAFKDuration: 0, AFKCooldown: 0,
+        announcementColor: 1, errorColor: 3, infoColor: 5, successColor: 6,
+        HaxNotification: { CHAT: 1 },
+        getCommand: () => false, getRole: () => 0,
+        handlePlayersJoin: () => {}, handlePlayersLeave: () => {},
+        printPlayerStats: () => '', printRankings: async () => {}, printAllRankings: async () => {}, printClubRankings: async () => {},
+        updateTeams: () => {}, getCommands: () => ({}),
+        formatCoins: (n) => `${n}`, formatBanRemaining: () => '',
+        renderProgressBar: () => '',
+        discordBot: { sendAdminCall: () => {}, checkVipRoleOnLink: () => {} },
+    });
+
+    sentRating.length = 0;
+    await ratingCommand({ id: 1, name: 'Alice' }, '!rating');
+    check('no report yet -> a clear "play a match first" message, sent privately', sentRating[0], { msg: 'Пока нет данных о последнем матче — сыграйте хотя бы один полный матч.', id: 1, color: 3 });
+
+    const { PlayerMatchReport } = require(path.join(CORE, 'stats', 'analytics', 'PlayerMatchReport'));
+    const report = new PlayerMatchReport('AUTH_RATING_ALICE', 'Alice', 1);
+    report.posTouches = 12;
+    report.progPasses = 3;
+    report.keyPasses = 1;
+    report.goals = 2;
+    report.assists = 1;
+    report.rating = 9.1;
+    dbRating.reports.set('AUTH_RATING_ALICE', report);
+
+    sentRating.length = 0;
+    await ratingCommand({ id: 1, name: 'Alice' }, '!rating');
+    check('a real report is looked up by the CALLER\'s own auth, not broadcast', sentRating[0].id, 1);
+    check('...and shows the player\'s name', sentRating[0].msg.includes('Alice'), true);
+    check('...and leads with the single 0-10 composite rating', sentRating[0].msg.includes('9.1/10'), true);
+    check('...with the strong-game emoji for a rating this high', sentRating[0].msg.startsWith('🌟'), true);
+    check('...and shows match goals/assists', sentRating[0].msg.includes('Голы 2 | Передачи 1'), true);
+    check('...and reflects the actual stored metrics', sentRating[0].msg.includes('касания 12'), true);
+    check('...including a field that was never touched, defaulting to 0', sentRating[0].msg.includes('выносы 0'), true);
+
+    sentRating.length = 0;
+    report.rating = 3.2;
+    await ratingCommand({ id: 1, name: 'Alice' }, '!rating');
+    check('a low rating gets the weak-game emoji instead', sentRating[0].msg.startsWith('🔻'), true);
+})();
+
+console.log('\n--- commands/player.js: !up — master exemption from the daily cap + hourly cooldown (requested 2026-08-17) ---');
+{
+    // Dedicated instantiation, same reasoning as !tip's own above — the
+    // giant shared `player` mock elsewhere in this file hardcodes
+    // getRole: () => 0 (always PLAYER), so it can never exercise this
+    // MASTER-only branch.
+    const sentUp = [];
+    const roomMockUp = { sendAnnouncement: (msg, id, color) => sentUp.push({ msg, id, color }) };
+    const TeamMockUp = { RED: 1, BLUE: 2, SPECTATORS: 0 };
+    const authArrayUp = { 1: ['AUTH_UP_MASTER'] };
+    const RoleMockUp = { PLAYER: 0, VIP: 1, MASTER: 4 };
+    const stateUp = { chooseMode: false, priorityCaptainId: null, teamSpec: [{ id: 1, name: 'MasterDave' }] };
+    const { upCommand } = require(path.join(CORE, 'commands', 'player'))({
+        room: roomMockUp, state: stateUp, Team: TeamMockUp, Role: RoleMockUp, HaxStatistics: function () {}, authArray: authArrayUp, db: {},
+        AFKSet: new Set(), AFKMinSet: new Set(), AFKCooldownSet: new Set(),
+        hiddenVipSet: new Set(), silencedAuths: new Map(),
+        minAFKDuration: 0, maxAFKDuration: 0, AFKCooldown: 0,
+        announcementColor: 1, errorColor: 3, infoColor: 5, successColor: 6,
+        HaxNotification: { CHAT: 1 },
+        getCommand: () => false, getRole: () => RoleMockUp.MASTER,
+        handlePlayersJoin: () => {}, handlePlayersLeave: () => {},
+        printPlayerStats: () => '', printRankings: async () => {}, printAllRankings: async () => {}, printClubRankings: async () => {},
+        updateTeams: () => {}, getCommands: () => ({}),
+        formatCoins: (n) => `${n}`, formatBanRemaining: (iso) => `${Math.max(0, Math.ceil((new Date(iso) - Date.now()) / 60000))} мин.`,
+        renderProgressBar: (used, max) => `${used}/${max}`,
+        discordBot: { sendAdminCall: () => {}, checkVipRoleOnLink: () => {} },
+        // Deliberately tiny (1 use/day, cooldown irrelevant since it's
+        // never actually applied for the master) — if the exemption ever
+        // regressed, even ONE extra claim below would immediately hit it.
+        upDailyMaxUses: 1, upCooldownMs: 60 * 60 * 1000, upDailyWindowMs: 24 * 60 * 60 * 1000,
+    });
+
+    for (let i = 1; i <= 3; i++) {
+        // Simulates the claim being consumed by resolveNextCaptainId each
+        // round (out of scope here — this block only tests the rate-limit
+        // exemption, not the pick flow itself).
+        stateUp.priorityCaptainId = null;
+        sentUp.length = 0;
+        upCommand({ id: 1, name: 'MasterDave', team: TeamMockUp.SPECTATORS }, '!up');
+        check(`master !up claim #${i}, past their 1-per-day cap, still succeeds`, /станет капитаном/.test(sentUp[0].msg), true);
+        check('...no progress-bar follow-up either (nothing to track)', sentUp.length, 1);
+    }
+    // upDailyUsage itself isn't exported to assert on directly — confirmed
+    // instead via a 4th claim: if the 3 above had actually been recorded
+    // against the 1-per-day cap, this one would be rejected exactly like a
+    // regular player hitting it.
+    stateUp.priorityCaptainId = null;
+    sentUp.length = 0;
+    upCommand({ id: 1, name: 'MasterDave', team: TeamMockUp.SPECTATORS }, '!up');
+    check('the master\'s prior claims were never recorded in the daily-usage map (a 4th claim still succeeds)', /станет капитаном/.test(sentUp[0].msg), true);
+}
 
 console.log('\n--- core/overflowPassword.js: activates/rotates/deactivates around a threshold ---');
 (async () => {
@@ -11746,6 +11915,251 @@ console.log('--- db/sqlite.js: rating persistence (getRating/saveRating/getRatin
     check('...worst last', leaderboard[leaderboard.length - 1].auth, 'AUTH_NEW');
 
     db.close();
+}
+
+console.log('\n--- stats/analytics/: TouchChain + ZoneClassifier (pure primitives) ---');
+{
+    const { TouchChain } = require(path.join(CORE, 'stats', 'analytics', 'TouchChain'));
+    const { ZoneClassifier } = require(path.join(CORE, 'stats', 'analytics', 'ZoneClassifier'));
+    const pointDistance = (p1, p2) => Math.sqrt((p1.x - p2.x) ** 2 + (p1.y - p2.y) ** 2);
+
+    const R1 = { id: 1, team: Team.RED };
+    const R2 = { id: 2, team: Team.RED };
+    const B1 = { id: 3, team: Team.BLUE };
+    const touches = [
+        { player: R1, time: 0, position: { x: -400, y: 0 } },
+        { player: R2, time: 1, position: { x: 0, y: 0 } },
+        { player: B1, time: 1.05, position: { x: 350, y: 0 } },
+    ];
+    const chain = new TouchChain(touches, { pointDistance });
+    check('index 0 is never a pass or turnover (no predecessor)', [chain.isPass(0), chain.isTurnoverAt(0)], [false, false]);
+    check('same team, different player -> a pass', chain.isPass(1), true);
+    check('different team, different player -> a turnover for the previous toucher', chain.isTurnoverAt(2), true);
+    check('a pass is never simultaneously a turnover', chain.isTurnoverAt(1), false);
+    check('samePlayer/sameTeamAs agree with the touches above', [chain.samePlayer(0, 1), chain.sameTeamAs(1, 2)], [false, false]);
+    check('distanceBetween is plain euclidean distance', chain.distanceBetween(0, 1), 400);
+
+    const zones = new ZoneClassifier({ Team });
+    zones.calibrate(500);
+    check('RED\'s own defensive third is the negative-x end (RED attacks +x)', zones.thirdOf(-400, Team.RED), 'defensive');
+    check('BLUE\'s own defensive third is the mirror, positive-x end (BLUE attacks -x)', zones.thirdOf(400, Team.BLUE), 'defensive');
+    check('center of the pitch is the middle third for either team', zones.thirdOf(0, Team.RED), 'middle');
+    check('a forward third change is detected (defensive -> attacking)', zones.isForwardThirdChange('defensive', 'attacking'), true);
+    check('...but not a backward one', zones.isForwardThirdChange('attacking', 'defensive'), false);
+    check('...or a sideways non-change', zones.isForwardThirdChange('middle', 'middle'), false);
+    zones.calibrate(0);
+    check('calibrate() falls back to the default half-width for a degenerate (0) observed range', zones.fieldHalfWidth > 0, true);
+}
+
+console.log('\n--- stats/analytics/detectors/: RecoveryDetector + ClearanceDetector direct unit tests ---');
+{
+    const { RecoveryDetector } = require(path.join(CORE, 'stats', 'analytics', 'detectors', 'RecoveryDetector'));
+    const { ClearanceDetector } = require(path.join(CORE, 'stats', 'analytics', 'detectors', 'ClearanceDetector'));
+    const { ZoneClassifier } = require(path.join(CORE, 'stats', 'analytics', 'ZoneClassifier'));
+    const { PlayerMatchReport } = require(path.join(CORE, 'stats', 'analytics', 'PlayerMatchReport'));
+    const pointDistance = (p1, p2) => Math.sqrt((p1.x - p2.x) ** 2 + (p1.y - p2.y) ** 2);
+    const zones = new ZoneClassifier({ Team, fieldHalfWidth: 500 });
+
+    const R1 = { id: 1, team: Team.RED };
+    const B1 = { id: 3, team: Team.BLUE };
+    const reports = new Map([
+        ['AR1', new PlayerMatchReport('AR1', 'R1', Team.RED)],
+        ['AB1', new PlayerMatchReport('AB1', 'B1', Team.BLUE)],
+    ]);
+    const authOf = (p) => (p.id === 1 ? 'AR1' : 'AB1');
+
+    // A loose-ball recovery: gainIndex comes 5s after loseIndex, well past
+    // TurnoverDetector's RECOVERY_GAP_SECONDS contested-duel window — tagged
+    // 'loose' upstream, which is what actually routes it here instead of to
+    // DuelDetector.
+    const touchChain = {
+        at: (i) => [
+            { player: R1, time: 0, position: { x: -480, y: 0 } },
+            { player: B1, time: 5, position: { x: -450, y: 0 } },
+        ][i],
+    };
+    const recovery = new RecoveryDetector({ zones });
+    const ctx = { touchChain, reports, authOf, turnovers: [{ loseIndex: 0, gainIndex: 1, tag: 'loose' }] };
+    recovery.analyze(ctx);
+    check('a loose-ball takeaway counts as a Recovery for the gaining player', reports.get('AB1').recoveries, 1);
+    check('...and since it happened deep in RED\'s defensive third (BLUE\'s attacking third), it\'s also an F3 Recovery', reports.get('AB1').f3Recoveries, 1);
+    check('the losing player gets no Recovery credit', reports.get('AR1').recoveries, 0);
+    check('ctx.recoveryEvents is exposed for SweeperDetector/CounterDetector to build on', ctx.recoveryEvents, [{ index: 1, auth: 'AB1' }]);
+
+    const reports2 = new Map([['AR1', new PlayerMatchReport('AR1', 'R1', Team.RED)]]);
+    const clearChain = {
+        length: 2,
+        at: (i) => [
+            { player: R1, time: 0, position: { x: -480, y: 0 } },
+            { player: R1, time: 1, position: { x: -100, y: 0 } },
+        ][i],
+        sameTeamAs: () => true,
+    };
+    const clearance = new ClearanceDetector({ zones, pointDistance });
+    const clearCtx = { touchChain: clearChain, reports: reports2, authOf: () => 'AR1' };
+    clearance.analyze(clearCtx);
+    check('a big touch out of the defensive third, past the min distance, is a Clearance', reports2.get('AR1').clearances, 1);
+}
+
+console.log('\n--- stats/analytics/index.js: full pipeline (recordTick + analyzeMatch), a real match end to end ---');
+(async () => {
+    const State = { PLAY: 0, PAUSE: 1, STOP: 2 };
+    const Situation = { STOP: 0, KICKOFF: 1, PLAY: 2, GOAL: 3 };
+    const authArrayAn = { 1: ['AR1'], 2: ['AR2'], 3: ['AB1'], 4: ['AB2'] };
+    const R1 = { id: 1, team: Team.RED, name: 'R1', position: { x: -400, y: 0 } };
+    const R2 = { id: 2, team: Team.RED, name: 'R2', position: { x: 0, y: 0 } };
+    const B1 = { id: 3, team: Team.BLUE, name: 'B1', position: { x: 50, y: 0 } };
+    const B2 = { id: 4, team: Team.BLUE, name: 'B2', position: { x: 600, y: 0 } };
+    const playersAn = [R1, R2, B1, B2];
+
+    let ballPos = { x: 0, y: 0 };
+    let ballVel = { xspeed: 0, yspeed: 0 };
+    const roomMockAn = {
+        getBallPosition: () => ballPos,
+        getDiscProperties: () => ballVel,
+        getPlayerList: () => playersAn,
+    };
+    const savedReports = [];
+    const dbMockAn = { saveMatchAnalyticsReport: async (r) => { savedReports.push(r); } };
+    const stateMockAn = {
+        playSituation: Situation.PLAY,
+        gameState: State.PLAY,
+        game: {
+            scores: { time: 0 },
+            touchArray: [],
+            goals: [],
+            playerComp: [
+                [{ auth: 'AR1', player: R1 }, { auth: 'AR2', player: R2 }],
+                [{ auth: 'AB1', player: B1 }, { auth: 'AB2', player: B2 }],
+            ],
+        },
+    };
+
+    const createMatchAnalytics = require(path.join(CORE, 'stats', 'analytics'));
+    const analytics = createMatchAnalytics({
+        room: roomMockAn, state: stateMockAn, Team, State, Situation,
+        db: dbMockAn, authArray: authArrayAn, pointDistance: (p1, p2) => Math.sqrt((p1.x - p2.x) ** 2 + (p1.y - p2.y) ** 2),
+        getGK: (team) => (team === Team.RED ? { auth: 'AR2', player: R2 } : { auth: 'AB2', player: B2 }),
+    });
+    analytics.reset();
+
+    // Kickoff: establishes the observed field range (fieldHalfWidth -> 500).
+    stateMockAn.game.scores.time = 0; ballPos = { x: -500, y: 0 };
+    analytics.recordTick();
+
+    // t=1: R1 -> R2, a clean progressive pass out of RED's defensive third.
+    stateMockAn.game.touchArray.push({ player: R1, time: 0, goal: 0, position: { x: -400, y: 0 } });
+    stateMockAn.game.touchArray.push({ player: R2, time: 1, goal: 0, position: { x: 0, y: 0 } });
+    stateMockAn.game.scores.time = 1; ballPos = { x: 0, y: 0 };
+    analytics.recordTick(); // B1 at (50,0), B2 at (600,0) here -> B1 is clearly the closer defender.
+
+    // t=1.05: B1 wins it off R2 in a genuine, closely-contested 1v1.
+    stateMockAn.game.touchArray.push({ player: B1, time: 1.05, goal: 0, position: { x: 50, y: 0 } });
+    stateMockAn.game.scores.time = 1.05; ballPos = { x: 50, y: 0 };
+    analytics.recordTick();
+
+    // B2 makes a run in behind before receiving the through-ball.
+    B2.position = { x: -350, y: 0 };
+    stateMockAn.game.touchArray.push({ player: B2, time: 1.1, goal: 0, position: { x: -350, y: 0 } });
+    stateMockAn.game.scores.time = 1.1; ballPos = { x: -350, y: 0 }; ballVel = { xspeed: -8, yspeed: 0 };
+    analytics.recordTick();
+
+    // B2 shoots and scores; goalAttribution.js would have resolved B1 as the assist.
+    stateMockAn.game.goals.push({ time: 1.15, team: Team.BLUE, striker: B2, assist: B1 });
+    stateMockAn.game.scores.time = 1.15;
+
+    const reports = await analytics.analyzeMatch();
+    const byAuth = Object.fromEntries(reports.map((r) => [r.auth, r]));
+
+    check('all 4 participants (from playerComp, both teams) get a report', reports.length, 4);
+    check('every touch counts toward Pos Touches, including the turnover instant on both sides', [byAuth.AR1.posTouches, byAuth.AR2.posTouches, byAuth.AB1.posTouches, byAuth.AB2.posTouches], [1, 1, 1, 1]);
+    check('R1\'s pass out of the defensive third into midfield is progressive', [byAuth.AR1.progPasses, byAuth.AR1.progDistance], [1, 400]);
+    check('R2 lost it right after receiving -> exactly one turnover, not flagged dangerous (lost it in midfield)', [byAuth.AR2.turnoverTouches, byAuth.AR2.dangerousTurnovers], [1, 0]);
+    check('B1 won the ball in a genuine contested duel (a real gap < the loose-ball threshold)', [byAuth.AB1.duels, byAuth.AB1.duelsWon], [1, 1]);
+    check('...credited as a Forced TO, not an interception (B1 really was the closest defender)', [byAuth.AB1.forcedTakeaways, byAuth.AB1.intercDuels], [1, 0]);
+    check('R2 is on the losing side of that same duel', [byAuth.AR2.duels, byAuth.AR2.duelsLost], [1, 1]);
+    check('B1\'s pass into B2\'s run breaks into the attacking third', [byAuth.AB1.progPasses, byAuth.AB1.final3rdEntries], [1, 1]);
+    check('B1\'s pass right before the shot is the key pass', byAuth.AB1.keyPasses, 1);
+    check('B2\'s own scoring touch is 100% of his (single) possession touch', byAuth.AB2.scoringPct, 100);
+    check('the chain correctly stops at the turnover boundary — no 2nd assist leaks to the opposing team\'s R2', byAuth.AR2.secondAssists, 0);
+    check('every participant\'s report is persisted to the DB exactly once', savedReports.length, 4);
+
+    // MatchRatingDetector — the single 0-10 composite (runs last, reads
+    // every field the detectors above just wrote), re-centered against
+    // this SAME match's own 4 participants rather than any absolute scale.
+    check('the scorer tallies a match goal (separate from player_stats\' own career total)', byAuth.AB2.goals, 1);
+    check('the assist provider tallies a match assist', byAuth.AB1.assists, 1);
+    check('nobody else tallies a goal or assist', [byAuth.AR1.goals, byAuth.AR1.assists, byAuth.AR2.goals, byAuth.AR2.assists], [0, 0, 0, 0]);
+    // NOT "the scorer always rates highest" — that was the OLD, unfair-by-
+    // design assumption this detector was rebuilt to drop. B1 (a forced
+    // takeaway AND an assist/key pass/progression) can legitimately outrate
+    // B2 (goal alone) since both a strong defensiveZ and a strong attackZ
+    // now count, not just attacking output — see MatchRatingDetector's own
+    // "fair across roles" doc comment and the dedicated GK-vs-striker
+    // fairness test elsewhere in this file.
+    check('the assist provider rates above the player who just moved the ball once, doing nothing else', byAuth.AB1.rating > byAuth.AR1.rating, true);
+    check('the player who turned the ball over rates lowest', byAuth.AR2.rating < byAuth.AR1.rating, true);
+    check('the goalscorer rates above the 6.5 "solid average game" baseline', byAuth.AB2.rating > 6.5, true);
+    check('the player who lost the ball rates below that baseline', byAuth.AR2.rating < 6.5, true);
+    check('every computed rating stays within the valid 0-10 range', reports.every((r) => r.rating >= 0 && r.rating <= 10), true);
+})();
+
+console.log('\n--- stats/analytics/detectors/MatchRatingDetector.js: fair across roles (requested 2026-08-17) ---');
+{
+    // Real gap the user flagged directly: the first version summed ONE set
+    // of weights dominated by attacking output, so even a flawless
+    // goalkeeping/destroyer game couldn't reach the heights a single decent
+    // goal did. Rebuilt around the best of two INDEPENDENTLY re-centered
+    // category scores (attack vs defense) — this is the test that actually
+    // proves that fix, not the touch-chain pipeline test above (which was
+    // never meant to exercise role fairness, just detector wiring).
+    const { MatchRatingDetector } = require(path.join(CORE, 'stats', 'analytics', 'detectors', 'MatchRatingDetector'));
+    const { PlayerMatchReport } = require(path.join(CORE, 'stats', 'analytics', 'PlayerMatchReport'));
+
+    function freshReports() {
+        const gk = new PlayerMatchReport('AUTH_GK', 'HeroGK', Team.RED);
+        gk.forcedTakeaways = 6; gk.intercDuels = 3; gk.duelsWon = 5; gk.recoveries = 4;
+        gk.clearances = 5; gk.sweeperActions = 3; gk.xgPrevented = 3.5; gk.pressRelief = 90;
+
+        const striker = new PlayerMatchReport('AUTH_STRIKER', 'HeroStriker', Team.RED);
+        striker.assists = 1; striker.keyPasses = 2; striker.scoringPct = 80;
+        striker.progPasses = 4; striker.final3rdEntries = 3;
+
+        const anon = new PlayerMatchReport('AUTH_ANON', 'Anon', Team.RED);
+        const filler = new PlayerMatchReport('AUTH_FILLER', 'Filler', Team.BLUE);
+        return new Map([['AUTH_GK', gk], ['AUTH_STRIKER', striker], ['AUTH_ANON', anon], ['AUTH_FILLER', filler]]);
+    }
+
+    // GK and striker are TEAMMATES (both RED), which RED wins big behind
+    // the striker's goals while keeping a clean sheet behind the GK's
+    // defending — isolates exactly the thing under test: do two very
+    // different EXCELLENT performances (pure attack vs pure defense) land
+    // at comparable ratings, instead of the attacker structurally winning.
+    const goalsForStriker = [
+        { time: 10, team: Team.RED, striker: { id: 1, team: Team.RED }, assist: null },
+        { time: 40, team: Team.RED, striker: { id: 1, team: Team.RED }, assist: null },
+        { time: 70, team: Team.RED, striker: { id: 1, team: Team.RED }, assist: null },
+    ];
+    const authOfStriker = () => 'AUTH_STRIKER';
+    const getGKMock = (team) => (team === Team.RED ? { auth: 'AUTH_GK' } : { auth: 'AUTH_FILLER' });
+
+    const reportsA = freshReports();
+    new MatchRatingDetector({ Team, getGK: getGKMock }).analyze({ reports: reportsA, goals: goalsForStriker, authOf: authOfStriker });
+    const gkClean = reportsA.get('AUTH_GK');
+    const strikerA = reportsA.get('AUTH_STRIKER');
+    const anonA = reportsA.get('AUTH_ANON');
+
+    check('the striker tallies all 3 goals from ctx.goals', strikerA.goals, 3);
+    check('a flawless GOALKEEPING performance rates above the 6.5 baseline', gkClean.rating > 6.5, true);
+    check('a flawless ATTACKING performance also rates above the 6.5 baseline', strikerA.rating > 6.5, true);
+    check('the two very different excellent performances land within 1.5 of each other — neither role structurally capped below the other', Math.abs(gkClean.rating - strikerA.rating) < 1.5, true);
+    check('both clearly outrate an anonymous teammate who did nothing notable in either category', gkClean.rating > anonA.rating && strikerA.rating > anonA.rating, true);
+
+    // Same GK performance, but this time RED also concedes once.
+    const reportsB = freshReports();
+    const goalsWithConcede = [...goalsForStriker, { time: 90, team: Team.BLUE, striker: { id: 2, team: Team.BLUE }, assist: null }];
+    new MatchRatingDetector({ Team, getGK: getGKMock }).analyze({ reports: reportsB, goals: goalsWithConcede, authOf: authOfStriker });
+    check('the identical GK performance rates lower once their team actually concedes (loses the clean-sheet bonus)', reportsB.get('AUTH_GK').rating < gkClean.rating, true);
 }
 
 // The movement.js leave broadcast fires from inside a 10ms setTimeout, the

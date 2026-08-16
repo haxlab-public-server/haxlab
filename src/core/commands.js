@@ -6,6 +6,7 @@ module.exports = function createCommands({
     globalStatsCommand,
     vsCommand,
     tipCommand,
+    ratingCommand,
     renameCommand,
     customColorsCommand,
     vipColorCommand,
@@ -141,12 +142,20 @@ module.exports = function createCommands({
         roles: Role.PLAYER,
         category: 'misc',
         desc: `
-        Эта команда публично благодарит другого игрока за игру ("👏 вы благодарит(е) игрока. Хорошая игра!").
+        Эта команда публично благодарит другого игрока за игру ("👏 вы благодарит(е) игрока. Хорошо сыграно!").
     Не больше 1 раза за матч, и не больше 5 раз в день (10 раз для VIP).
     Она принимает 1 аргумент:
     Аргумент 1: #<id> где <id> это id игрока, которого вы благодарите.
     Пример: !tip #3 благодарит игрока с id 3.`,
         function: tipCommand,
+    },
+    rating: {
+        aliases: ['рейтинг'],
+        roles: Role.PLAYER,
+        category: 'stats',
+        desc: `
+        Эта команда показывает оценку X.X/10 за ваш последний сыгранный матч (относительно остальных игроков ЭТОГО матча) плюс подробную статистику (28 продвинутых метрик — владение, прогресс, оборона, единоборства и т.д.).`,
+        function: ratingCommand,
     },
     rename: {
         aliases: [],

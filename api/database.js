@@ -124,6 +124,12 @@ function createDatabaseApi(options = {}) {
         saveGameReport(report) {
             return sqlite.saveGameReport(report);
         },
+        saveMatchAnalyticsReport(report) {
+            return sqlite.saveMatchAnalyticsReport(report);
+        },
+        getLatestMatchAnalyticsReport(auth) {
+            return sqlite.getLatestMatchAnalyticsReport(auth);
+        },
         addCoins(auth, playerName, amount) {
             return sqlite.addCoins(auth, playerName, amount);
         },

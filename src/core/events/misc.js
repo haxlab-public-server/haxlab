@@ -22,6 +22,7 @@ module.exports = function createMiscEvents({
     handleActivity,
     stadiumCommand,
     updateTeams,
+    recordMatchAnalyticsTick,
 }) {
     function onRoomLink(url) {
         console.log(url);
@@ -96,6 +97,7 @@ module.exports = function createMiscEvents({
         checkTime();
         getLastTouchOfTheBall();
         getGameStats();
+        recordMatchAnalyticsTick();
         handleActivity();
     }
 

@@ -17,6 +17,7 @@ module.exports = function createFetchReports({
     getRecordingName,
     getSecondsReport,
     getTimeEmbed,
+    db,
 }) {
     function fetchGametimeReport(game) {
         const fieldGametimeRed = {
@@ -100,8 +101,40 @@ module.exports = function createFetchReports({
         return [fieldReportRed, fieldReportBlue];
     }
 
-    function fetchSummaryEmbed(game) {
-        const fetchEndgame = [fetchGametimeReport, fetchActionsSummaryReport];
+    // core/stats/analytics/ !rating — every participant's per-match 0-10
+    // rating, read back from the DB (already persisted by analyzeMatch()
+    // inside entry.js's endGame(), which runs before onGameStop's deferred
+    // room.stopGame() fires this) rather than threaded through as a param —
+    // decouples this from analyzeMatch()'s exact call site/timing, same
+    // "read the DB, don't thread the in-memory result" choice !rating itself
+    // makes. Lists every participant (game.playerComp), not just scorers —
+    // unlike fetchActionsSummaryReport, which only ever lists players with a
+    // nonzero G/A/CS.
+    async function fetchRatingsReport(game) {
+        const fieldRatingsRed = { value: '⭐ __**Ratings:**__\n\n' };
+        const fieldRatingsBlue = { value: '⭐ __**Ratings:**__\n\n' };
+
+        for (const p of game.playerComp[0]) {
+            const report = await db.getLatestMatchAnalyticsReport(p.auth);
+            fieldRatingsRed.value += `> **${p.player.name}:** ${report != null ? report.rating.toFixed(1) : '—'}\n`;
+        }
+        fieldRatingsRed.value += `\n${game.playerComp[1].length - game.playerComp[0].length > 0 ? '\n'.repeat(game.playerComp[1].length - game.playerComp[0].length) : ''
+            }`;
+        fieldRatingsRed.value += '=====================';
+
+        for (const p of game.playerComp[1]) {
+            const report = await db.getLatestMatchAnalyticsReport(p.auth);
+            fieldRatingsBlue.value += `> **${p.player.name}:** ${report != null ? report.rating.toFixed(1) : '—'}\n`;
+        }
+        fieldRatingsBlue.value += `\n${game.playerComp[0].length - game.playerComp[1].length > 0 ? '\n'.repeat(game.playerComp[0].length - game.playerComp[1].length) : ''
+            }`;
+        fieldRatingsBlue.value += '=====================';
+
+        return [fieldRatingsRed, fieldRatingsBlue];
+    }
+
+    async function fetchSummaryEmbed(game) {
+        const fetchEndgame = [fetchGametimeReport, fetchActionsSummaryReport, fetchRatingsReport];
         const fields = [
             {
                 name: '🔴        **RED TEAM STATS**',
@@ -115,7 +148,11 @@ module.exports = function createFetchReports({
             },
         ];
         for (let i = 0; i < fetchEndgame.length; i++) {
-            const fieldsReport = fetchEndgame[i](game);
+            // fetchGametimeReport/fetchActionsSummaryReport are plain sync
+            // functions — awaiting a non-promise value just resolves to it
+            // immediately, so this works uniformly across all three without
+            // needing to special-case the one async report.
+            const fieldsReport = await fetchEndgame[i](game);
             fields[0].value += fieldsReport[0].value + '\n\n';
             fields[1].value += fieldsReport[1].value + '\n\n';
         }
@@ -152,6 +189,7 @@ module.exports = function createFetchReports({
     return {
         fetchGametimeReport,
         fetchActionsSummaryReport,
+        fetchRatingsReport,
         fetchSummaryEmbed,
     };
 };

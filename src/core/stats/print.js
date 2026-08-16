@@ -246,7 +246,12 @@ module.exports = function createPrintStats({
         // sets eloDisplay.
         if (stats.eloDisplay != null) {
             const eloRank = await db.getStatRank('elo', stats.eloDisplay);
-            text += ` [🎯 ELO: ${stats.eloDisplay}, ранг: ${formatRank(eloRank)}]`;
+            // lastMatchRating (core/stats/analytics/'s 0-10 per-match score,
+            // requested 2026-08-17) rides along in parentheses right after
+            // ELO — null when they've never had a match analyzed yet, so it
+            // just doesn't show rather than printing "(null)".
+            const ratingSuffix = stats.lastMatchRating != null ? ` (${stats.lastMatchRating.toFixed(1)})` : '';
+            text += ` [🎯 ELO: ${stats.eloDisplay}${ratingSuffix}, ранг: ${formatRank(eloRank)}]`;
         }
         return text;
     }

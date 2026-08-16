@@ -41,6 +41,7 @@ module.exports = function createGameManagementEvents({
     infoColor,
     authArray,
     db,
+    resetMatchAnalytics = () => {},
 }) {
     // Same-day rematch (item #13) takes priority over a general rivalry
     // callout (item #10) when both would apply — it's the more specific,
@@ -120,6 +121,9 @@ module.exports = function createGameManagementEvents({
         // "everything per-match resets in onGameStart" convention as
         // pauseVoteUsed just above.
         state.tipUsedThisMatch = new Set();
+        // core/stats/analytics/ — fresh per-tick telemetry each match, same
+        // "everything per-match resets in onGameStart" convention.
+        resetMatchAnalytics();
         if (state.teamRed.length == teamSize && state.teamBlue.length == teamSize) {
             for (let i = 0; i < teamSize; i++) {
                 state.teamRedStats.push(state.teamRed[i]);
@@ -165,7 +169,13 @@ module.exports = function createGameManagementEvents({
                 state.endGameVariable
             )
         ) {
-            fetchSummaryEmbed(state.game);
+            // fetchSummaryEmbed is now async (fetchRatingsReport reads the
+            // DB) — still fire-and-forget like every other call in this
+            // handler, but with an explicit .catch() so a DB hiccup can't
+            // produce an unhandled rejection (wrapEventHandlers only guards
+            // the SYNCHRONOUS body of this handler, not a promise that
+            // settles after it's already returned).
+            fetchSummaryEmbed(state.game).catch((err) => console.error('[onGameStop] fetchSummaryEmbed failed:', err));
             if (fetchRecordingVariable) {
                 setTimeout((gameEnd) => { fetchRecording(gameEnd, discordBot); }, 500, state.game);
             }

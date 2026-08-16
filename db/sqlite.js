@@ -302,6 +302,22 @@ function createSqliteDatabase(filePath = path.join(__dirname, 'haxlab.sqlite')) 
             achieved_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
     `);
+    // !rating (main room only — see core/stats/analytics/) — one row per
+    // player per match, the full 28-metric PlayerMatchReport stored as a
+    // JSON payload (same shape as the never-used game_reports table's own
+    // report_id/payload precedent) rather than one column per metric: the
+    // report is naturally a single structured object, and this keeps adding
+    // a metric #29 later a code-only change, no migration. auth/player_name
+    // stay real columns since those are what's actually queried on.
+    const matchAnalyticsStatement = database.prepare(`
+        CREATE TABLE IF NOT EXISTS match_analytics_reports (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            auth TEXT NOT NULL,
+            player_name TEXT NOT NULL,
+            payload TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+    `);
     // Not database.prepare()'d up here like the CREATE TABLE statements
     // above — unlike a bare CREATE TABLE, CREATE INDEX references an
     // existing table by name, and prepare() validates that against the
@@ -366,6 +382,8 @@ function createSqliteDatabase(filePath = path.join(__dirname, 'haxlab.sqlite')) 
         silencedPairsStatement.run();
         headToHeadStatement.run();
         roomRecordsStatement.run();
+        matchAnalyticsStatement.run();
+        database.exec('CREATE INDEX IF NOT EXISTS idx_match_analytics_auth ON match_analytics_reports (auth, id DESC)');
         // !viphide (both rooms — see commands/player.js / bff/commands.js),
         // same shape/reasoning as hide_custom_colors above (requested
         // 2026-08-16: survive a restart, keyed by auth rather than the old
@@ -1569,6 +1587,27 @@ function createSqliteDatabase(filePath = path.join(__dirname, 'haxlab.sqlite')) 
         return report;
     }
 
+    // core/stats/analytics/ — one row per player per match, see
+    // match_analytics_reports' own doc comment above for why this is a JSON
+    // payload rather than 28 dedicated columns.
+    function saveMatchAnalyticsReport(report) {
+        const payload = JSON.stringify(report);
+        database
+            .prepare('INSERT INTO match_analytics_reports (auth, player_name, payload) VALUES (?, ?, ?)')
+            .run(report.auth, report.playerName, payload);
+        return report;
+    }
+
+    // Ordered by `id DESC`, not `created_at DESC` — same same-second-tie
+    // reasoning as getRecentRatingDelta above (a full match's worth of
+    // reports lands within the same second).
+    function getLatestMatchAnalyticsReport(auth) {
+        const row = database
+            .prepare('SELECT payload FROM match_analytics_reports WHERE auth = ? ORDER BY id DESC LIMIT 1')
+            .get(auth);
+        return row ? JSON.parse(row.payload) : null;
+    }
+
     function close() {
         database.close();
     }
@@ -1614,6 +1653,8 @@ function createSqliteDatabase(filePath = path.join(__dirname, 'haxlab.sqlite')) 
         getSetting,
         setSetting,
         saveGameReport,
+        saveMatchAnalyticsReport,
+        getLatestMatchAnalyticsReport,
         addCoins,
         getBalance,
         spendCoins,
