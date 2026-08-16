@@ -243,10 +243,14 @@ module.exports = function createPrintStats({
         const lines = [
             `${vipBadge}${stats.playerName}`,
             `🏆 ${stats.winrate} побед · 🕹️ ${stats.games} игр`,
-            `🏅 Голы ${formatRank(goalsRank)}(${stats.goals}) · ` +
-            `Ассисты ${formatRank(assistsRank)}(${stats.assists}) · ` +
-            `Сухие ${formatRank(csRank)}(${stats.CS}) · ` +
-            `Время ${formatRank(playtimeRank)}(${getTimeStats(stats.playtime)})`,
+            // Value leads, rank trails in parentheses (requested 2026-08-17
+            // — the old rank-then-value order read as if "3/20" and "25"
+            // could each be either the count or the position). "25 (3/20)"
+            // reads unambiguously as "25 goals, ranked 3rd of 20" now.
+            `🏅 Голы: ${stats.goals} (${formatRank(goalsRank)}) · ` +
+            `Ассисты: ${stats.assists} (${formatRank(assistsRank)}) · ` +
+            `Сухие: ${stats.CS} (${formatRank(csRank)}) · ` +
+            `Время: ${getTimeStats(stats.playtime)} (${formatRank(playtimeRank)})`,
         ];
         // BFF-only (see core/bff/rating.js) — the main room never sets this
         // field on the stats object it passes in, so this stays 100%

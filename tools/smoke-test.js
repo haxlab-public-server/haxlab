@@ -55,10 +55,10 @@ console.log('--- stats/print.js: !stats shows the full stat block ---');
     check('shows the player name', output.includes('Alice'), true);
     check('shows winrate', output.includes('🏆 70.0% побед'), true);
     check('shows games', output.includes('🕹️ 10 игр'), true);
-    check('shows goals rank', output.includes('Голы 3/20(25)'), true);
-    check('shows assists rank', output.includes('Ассисты 5/20(12)'), true);
-    check('shows clean sheets rank', output.includes('Сухие 2/20(3)'), true);
-    check('shows playtime rank', output.includes('Время 7/20(10m)'), true);
+    check('shows goals rank', output.includes('Голы: 25 (3/20)'), true);
+    check('shows assists rank', output.includes('Ассисты: 12 (5/20)'), true);
+    check('shows clean sheets rank', output.includes('Сухие: 3 (2/20)'), true);
+    check('shows playtime rank', output.includes('Время: 10m (7/20)'), true);
     check('the main room never sets ratingOrdinal, so no rating line appears at all', output.includes('Рейтинг'), false);
 
     const bffStats = { ...stats, ratingOrdinal: 27.849 };
@@ -74,7 +74,7 @@ console.log('--- stats/print.js: !stats shows the full stat block ---');
     const emptyRoomPrintStats = createPrintStats({ getTimeStats: (s) => `${Math.floor(s / 60)}m`, db: emptyRoomDb });
     const emptyRoomOutput = await emptyRoomPrintStats.printPlayerStats({ ...stats, playerName: 'Newbie', goals: 0, assists: 0, CS: 0 });
     check('an empty player_stats table shows "—", never the misleading "1/0"', emptyRoomOutput.includes('1/0'), false);
-    check('...shows a clear placeholder instead', emptyRoomOutput.includes('Голы —(0)'), true);
+    check('...shows a clear placeholder instead', emptyRoomOutput.includes('Голы: 0 (—)'), true);
 
     const ratingDbFew = { getRatingLeaderboard: async () => [{ playerName: 'A', ordinal: 40 }, { playerName: 'B', ordinal: 30 }] };
     check('buildRatingRankingString returns null below the 5-player quorum', await require(path.join(CORE, 'stats', 'print')).buildRatingRankingString(ratingDbFew), null);
