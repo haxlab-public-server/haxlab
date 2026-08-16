@@ -55,6 +55,11 @@ global.window = {
         if (method === 'getMasters') return Promise.resolve([]);
         // overflowPassword.js's init reads these two settings directly.
         if (method === 'getSetting') return Promise.resolve(null);
+        // Every getAll* call (getAllVipColors, getAllHiddenVipAuths, ...) is
+        // immediately chained (.reduce/.map/new Set()) during init — null
+        // would throw before this stub even gets a chance to catch a real
+        // wiring fault. Same fallback load-check.js's own stub already has.
+        if (method.startsWith('getAll')) return Promise.resolve([]);
         return Promise.resolve(null);
     },
     __discordSend: () => {},

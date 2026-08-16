@@ -31,6 +31,12 @@ function createDatabaseApi(options = {}) {
         getRatingLeaderboard(limit) {
             return sqlite.getRatingLeaderboard(limit);
         },
+        saveRatingHistory(auth, delta) {
+            return sqlite.saveRatingHistory(auth, delta);
+        },
+        getRecentRatingDelta(auth, limit) {
+            return sqlite.getRecentRatingDelta(auth, limit);
+        },
         getMasters() {
             return sqlite.getMasters();
         },
@@ -147,6 +153,21 @@ function createDatabaseApi(options = {}) {
         },
         getAllHiddenCustomColors() {
             return sqlite.getAllHiddenCustomColors();
+        },
+        setHiddenVip(auth, hidden) {
+            return sqlite.setHiddenVip(auth, hidden);
+        },
+        getAllHiddenVipAuths() {
+            return sqlite.getAllHiddenVipAuths();
+        },
+        addSilence(viewerAuth, targetAuth) {
+            return sqlite.addSilence(viewerAuth, targetAuth);
+        },
+        removeSilence(viewerAuth, targetAuth) {
+            return sqlite.removeSilence(viewerAuth, targetAuth);
+        },
+        getAllSilencedPairs() {
+            return sqlite.getAllSilencedPairs();
         },
         setVipColor(auth, color) {
             return sqlite.setVipColor(auth, color);

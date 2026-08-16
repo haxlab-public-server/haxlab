@@ -529,10 +529,18 @@ module.exports = function createClubCommands({
         if (captain) entries.push(`${captain.playerName} (c)`);
         if (assistant) entries.push(`${assistant.playerName} (a)`);
         entries.push(...rest.map((m) => m.playerName));
+        // A club that paid to unlock + set a custom color (!club color,
+        // colorUnlocked-gated — see clubColorCommand) previously only ever
+        // saw it in chat prefixes (events/activity.js); this is its own
+        // "!club" info display, so it should show it too, not the flat
+        // neutral color every other announcement uses. `club.color` is
+        // nullable (never set, or unlocked-but-not-yet-picked) — falls back
+        // to the usual announcementColor exactly like an un-set custom color
+        // already does everywhere else.
         room.sendAnnouncement(
             `${club.name} (${members.length}/${club.slots}): ${entries.join(', ')}`,
             player.id,
-            announcementColor,
+            club.color ?? announcementColor,
             'bold',
             HaxNotification.CHAT
         );
@@ -578,7 +586,9 @@ module.exports = function createClubCommands({
             '!cc <сообщение> — клубный чат: отправляет сообщение всем участникам вашего клуба, которые сейчас на сервере. Пример: !cc привет!',
             '!club help — эта команда.',
         ].join('\n');
-        room.sendAnnouncement(text, player.id, announcementColor, 'bold', HaxNotification.CHAT);
+        // 'italic' (requested 2026-08-16) — reference text, not an event or
+        // a warning, same reasoning as bff/commands.js's own !rules.
+        room.sendAnnouncement(text, player.id, announcementColor, 'italic', HaxNotification.CHAT);
     }
 
     // Every !clubXxx command used to be its own registered top-level command

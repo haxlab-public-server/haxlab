@@ -29,9 +29,24 @@ module.exports = function createBffDatabaseBridge({ roomDb, sharedDb }) {
         getRating: (auth) => roomDb.getRating(auth),
         saveRating: (auth, playerName, mu, sigma) => roomDb.saveRating(auth, playerName, mu, sigma),
         getRatingLeaderboard: (limit) => roomDb.getRatingLeaderboard(limit),
+        saveRatingHistory: (auth, delta) => roomDb.saveRatingHistory(auth, delta),
+        getRecentRatingDelta: (auth, limit) => roomDb.getRecentRatingDelta(auth, limit),
         getSetting: (key) => roomDb.getSetting(key),
         setSetting: (key, value) => roomDb.setSetting(key, value),
         backup: (destPath) => roomDb.backup(destPath),
+
+        // !viphide (bff/commands.js) — own file, own independent preference
+        // (see haxchill-second-room-plan: hiddenVipSet is already a
+        // separate in-memory Set per room, this just persists that same
+        // per-room split). BFF has no !silence at all, so no addSilence/
+        // removeSilence/getAllSilencedPairs here.
+        setHiddenVip: (auth, hidden) => roomDb.setHiddenVip(auth, hidden),
+        getAllHiddenVipAuths: () => roomDb.getAllHiddenVipAuths(),
+
+        // !vipcolor (bff/commands.js) — own file, own independent color map,
+        // same reasoning as setHiddenVip/getAllHiddenVipAuths above.
+        setVipColor: (auth, color) => roomDb.setVipColor(auth, color),
+        getAllVipColors: () => roomDb.getAllVipColors(),
 
         // Explicitly NOT shared — confirmed 2026-08-14: each room keeps its
         // own independent ban list, a player banned in the main room is

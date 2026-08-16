@@ -17,6 +17,7 @@
  * need to know about.
  */
 const { assignBalancedTeams, updateRatingsAfterMatch, computeOrdinal, defaultRating } = require('./rating');
+const { formatRatingDisplay } = require('../utils');
 
 module.exports = function createBffMatchFlow({
     room,
@@ -26,6 +27,7 @@ module.exports = function createBffMatchFlow({
     getAuth,
     getRating,
     saveRating,
+    saveRatingHistory,
     applyLimitsForSize,
     applyTrainingMap,
     teamSize,
@@ -33,6 +35,7 @@ module.exports = function createBffMatchFlow({
     HaxNotification,
     announcementColor,
     infoColor,
+    actionReportCountTeam,
 }) {
     async function ratingFor(auth) {
         return (await getRating(auth)) ?? defaultRating();
@@ -239,14 +242,47 @@ module.exports = function createBffMatchFlow({
             await Promise.all(state.teamRed.map((p, i) => saveRating(getAuth(p), p.name, updatedRed[i].mu, updatedRed[i].sigma)));
             await Promise.all(state.teamBlue.map((p, i) => saveRating(getAuth(p), p.name, updatedBlue[i].mu, updatedBlue[i].sigma)));
 
-            // Rating delta feedback — a ranked result silently changing a
-            // number nobody sees change is invisible progress. Rounded the
-            // same way !me already displays ratingOrdinal (stats/print.js),
-            // so this line and !me's own number always agree.
+            // Personal contribution (requested 2026-08-16: "объедини вклады
+            // и послематчевую статистику") — same [player, goals, assists,
+            // CS] tuples events.js's own recap/MVP are built from, keyed by
+            // player.id for an O(1) per-player lookup below rather than
+            // re-scanning state.game.goals once per player.
+            const goalsByTeam = [[], []];
+            for (const g of state.game.goals) goalsByTeam[g.team - 1].push([g.striker, g.assist]);
+            const personalActions = new Map();
+            for (const team of [Team.RED, Team.BLUE]) {
+                for (const act of actionReportCountTeam(goalsByTeam, team)) {
+                    personalActions.set(act[0].id, { goals: act[1], assists: act[2], CS: act[3] });
+                }
+            }
+            const formatContribution = (playerId) => {
+                const action = personalActions.get(playerId);
+                const parts = [];
+                if (action?.goals > 0) parts.push(`${action.goals}⚽`);
+                if (action?.assists > 0) parts.push(`${action.assists}🅰️`);
+                if (action?.CS > 0) parts.push(`${action.CS}🧤`);
+                return parts.length > 0 ? parts.join(', ') : 'без результативных действий';
+            };
+
+            // Rating delta feedback, merged with the personal-contribution
+            // line above into ONE message — a ranked result silently
+            // changing a number nobody sees change is invisible progress.
+            // Uses the same formatRatingDisplay rescale !me/!tops rating
+            // display (see stats/print.js), so this line and !me's own
+            // number always agree — a linear rescale, so subtracting two
+            // already-rescaled values is exactly as correct as subtracting
+            // the raw ordinals. Also persisted to rating_history (already
+            // in display units) for !sf's "за последние N игр" trend line.
             const reportDelta = (players, before, after) => players.forEach((p, i) => {
-                const delta = Math.round(computeOrdinal(after[i])) - Math.round(computeOrdinal(before[i]));
+                const afterDisplay = formatRatingDisplay(computeOrdinal(after[i]));
+                const beforeDisplay = formatRatingDisplay(computeOrdinal(before[i]));
+                const delta = afterDisplay - beforeDisplay;
                 const sign = delta > 0 ? '+' : '';
-                room.sendAnnouncement(`📊 Рейтинг: ${Math.round(computeOrdinal(after[i]))} (${sign}${delta})`, p.id, infoColor, 'bold', HaxNotification.CHAT);
+                saveRatingHistory(getAuth(p), delta).catch((err) => console.error('[bff/matchFlow] saveRatingHistory failed:', err));
+                room.sendAnnouncement(
+                    `Твой вклад: ${formatContribution(p.id)} | 📊 Рейтинг: ${afterDisplay} (${sign}${delta})`,
+                    p.id, infoColor, 'bold', HaxNotification.CHAT
+                );
             });
             reportDelta(state.teamRed, redRatings, updatedRed);
             reportDelta(state.teamBlue, blueRatings, updatedBlue);

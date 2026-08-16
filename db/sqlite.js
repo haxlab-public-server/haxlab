@@ -217,6 +217,41 @@ function createSqliteDatabase(filePath = path.join(__dirname, 'haxlab.sqlite')) 
         );
     `);
 
+    // One row per ranked BFF match per player (see core/bff/matchFlow.js's
+    // handlePlayersStop) — feeds !sf's "за последние N игр" trend line
+    // (getRecentRatingDelta below). `delta` is stored already in DISPLAY
+    // units (formatRatingDisplay's rescaled points, not raw openskill
+    // ordinal) so a read never needs to know about that rescale at all.
+    // Only ever appended to, never updated — no need to key it by auth,
+    // an autoincrement id plus an index on (auth, id DESC) is enough for
+    // the ORDER BY id DESC LIMIT ? read pattern this exists for (id, not
+    // created_at — see getRecentRatingDelta's own comment on why).
+    const ratingHistoryStatement = database.prepare(`
+        CREATE TABLE IF NOT EXISTS rating_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            auth TEXT NOT NULL,
+            delta REAL NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+    `);
+    // !silence (main room only — see commands/player.js) — a per-VIEWER
+    // chat filter, previously session-only (requested 2026-08-16: survive a
+    // restart). One row per (viewer, target) pair; the pair IS the key, so
+    // no separate id/timestamp is needed.
+    const silencedPairsStatement = database.prepare(`
+        CREATE TABLE IF NOT EXISTS silenced_pairs (
+            viewer_auth TEXT NOT NULL,
+            target_auth TEXT NOT NULL,
+            PRIMARY KEY (viewer_auth, target_auth)
+        );
+    `);
+    // Not database.prepare()'d up here like the CREATE TABLE statements
+    // above — unlike a bare CREATE TABLE, CREATE INDEX references an
+    // existing table by name, and prepare() validates that against the
+    // CURRENT schema immediately, before init() has actually run
+    // ratingHistoryStatement to create the table it indexes. exec()'d
+    // directly inside init() instead, right after that .run() call.
+
     // SQLite has no "ADD COLUMN IF NOT EXISTS" — a DB created before a given
     // feature already has the table without that column, and CREATE TABLE IF
     // NOT EXISTS above is a no-op against an existing table. Catching the
@@ -267,6 +302,16 @@ function createSqliteDatabase(filePath = path.join(__dirname, 'haxlab.sqlite')) 
         clubsStatement.run();
         clubMembersStatement.run();
         clubInvitesStatement.run();
+        ratingHistoryStatement.run();
+        database.exec('CREATE INDEX IF NOT EXISTS idx_rating_history_auth ON rating_history (auth, id DESC)');
+        silencedPairsStatement.run();
+        // !viphide (both rooms — see commands/player.js / bff/commands.js),
+        // same shape/reasoning as hide_custom_colors above (requested
+        // 2026-08-16: survive a restart, keyed by auth rather than the old
+        // player.id — which also happened to be silently broken across a
+        // mere reconnect, not just a restart, since player.id never
+        // survives that either).
+        addColumnIfMissing('player_stats', 'hide_vip_prefix INTEGER NOT NULL DEFAULT 0');
         addColumnIfMissing('clubs', 'emoji TEXT');
         addColumnIfMissing('clubs', 'assistant_auth TEXT');
         addColumnIfMissing('clubs', 'color_unlocked INTEGER NOT NULL DEFAULT 0');
@@ -428,6 +473,37 @@ function createSqliteDatabase(filePath = path.join(__dirname, 'haxlab.sqlite')) 
                  ON CONFLICT(auth) DO UPDATE SET rating_mu = @mu, rating_sigma = @sigma`
             )
             .run({ auth, playerName: playerName ?? '', mu, sigma });
+    }
+
+    // Appends one row per ranked match (see matchFlow.js's handlePlayersStop)
+    // — `delta` already in display-rescaled points, see rating_history's own
+    // table comment above.
+    function saveRatingHistory(auth, delta) {
+        database.prepare('INSERT INTO rating_history (auth, delta) VALUES (?, ?)').run(auth, delta);
+    }
+
+    // Sum of the last `limit` deltas for `auth`, most recent first — null
+    // (not 0) when there's no history at all yet, so a caller can tell
+    // "never played a ranked match" apart from "played some and it netted
+    // to exactly zero." limit is applied inside the subquery, not the outer
+    // SUM, specifically so it only ever sums the LAST N rows, not all of
+    // them. Ordered by `id DESC`, NOT `created_at DESC`: CURRENT_TIMESTAMP
+    // is only second-granularity, and a full match's worth of rating writes
+    // (up to 8 players) routinely lands within the same second, which made
+    // "most recent" ties resolve arbitrarily — confirmed live by a direct
+    // sanity check while building this (a 4th/5th/6th insert in the same
+    // second summed as if it were the 1st/2nd/3rd). `id` is AUTOINCREMENT,
+    // genuinely monotonic with insertion order regardless of timestamp
+    // resolution.
+    function getRecentRatingDelta(auth, limit) {
+        const row = database
+            .prepare(
+                `SELECT COUNT(*) AS cnt, COALESCE(SUM(delta), 0) AS total FROM (
+                    SELECT delta FROM rating_history WHERE auth = ? ORDER BY id DESC LIMIT ?
+                 )`
+            )
+            .get(auth, limit);
+        return row.cnt === 0 ? null : row.total;
     }
 
     // ordinal = mu - 3*sigma, openskill's own default ordinal() formula
@@ -842,6 +918,55 @@ function createSqliteDatabase(filePath = path.join(__dirname, 'haxlab.sqlite')) 
             .map((row) => row.auth);
     }
 
+    // !viphide (see commands/player.js / bff/commands.js) — same upsert
+    // shape as setHideCustomColors above, for the same reason (a VIP may
+    // not have a player_stats row yet the first time they toggle this).
+    function setHiddenVip(auth, hidden) {
+        database
+            .prepare(
+                `INSERT INTO player_stats (auth, player_name, hide_vip_prefix)
+                 VALUES (@auth, '', @hidden)
+                 ON CONFLICT(auth) DO UPDATE SET hide_vip_prefix = @hidden`
+            )
+            .run({ auth, hidden: hidden ? 1 : 0 });
+    }
+
+    // Every auth that has hidden their VIP prefix — loaded once at startup
+    // into hiddenVipSet (see entry.js/bffEntry.js), same in-memory-cache
+    // reasoning as getAllHiddenCustomColors above.
+    function getAllHiddenVipAuths() {
+        return database
+            .prepare('SELECT auth FROM player_stats WHERE hide_vip_prefix = 1')
+            .all()
+            .map((row) => row.auth);
+    }
+
+    // !silence (see commands/player.js) — per-VIEWER chat filter, viewer ->
+    // target. INSERT OR IGNORE rather than an upsert: the pair itself IS
+    // the full row, so a duplicate insert (shouldn't happen — the caller
+    // already checks membership before calling) is simply a no-op, not a
+    // meaningful update.
+    function addSilence(viewerAuth, targetAuth) {
+        database
+            .prepare('INSERT OR IGNORE INTO silenced_pairs (viewer_auth, target_auth) VALUES (?, ?)')
+            .run(viewerAuth, targetAuth);
+    }
+
+    function removeSilence(viewerAuth, targetAuth) {
+        database
+            .prepare('DELETE FROM silenced_pairs WHERE viewer_auth = ? AND target_auth = ?')
+            .run(viewerAuth, targetAuth);
+    }
+
+    // Every persisted (viewer, target) pair — loaded once at startup into
+    // silencedAuths (see entry.js), same in-memory-cache reasoning as
+    // getAllHiddenVipAuths above.
+    function getAllSilencedPairs() {
+        return database
+            .prepare('SELECT viewer_auth AS viewerAuth, target_auth AS targetAuth FROM silenced_pairs')
+            .all();
+    }
+
     // !vipcolor (see commands/player.js) — a VIP's own override for their
     // role's chat color (vipChatColor, see constants.js), which everyone
     // sees the same way (unlike !customcolors' per-viewer club-color
@@ -1252,6 +1377,8 @@ function createSqliteDatabase(filePath = path.join(__dirname, 'haxlab.sqlite')) 
         getRating,
         saveRating,
         getRatingLeaderboard,
+        saveRatingHistory,
+        getRecentRatingDelta,
         getMasters,
         addMaster,
         getAdmins,
@@ -1291,6 +1418,11 @@ function createSqliteDatabase(filePath = path.join(__dirname, 'haxlab.sqlite')) 
         getAllEquippedTrophies,
         setHideCustomColors,
         getAllHiddenCustomColors,
+        setHiddenVip,
+        getAllHiddenVipAuths,
+        addSilence,
+        removeSilence,
+        getAllSilencedPairs,
         setVipColor,
         getAllVipColors,
         getTopPlayers,

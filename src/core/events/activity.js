@@ -223,8 +223,11 @@ module.exports = function createActivityEvents({
         // !viphide (commands/player.js) is the same idea for VIP specifically.
         const role = getRole(player);
         const showAdminPrefix = !hiddenAdminsSet.has(player.id);
-        const showVipPrefix = !hiddenVipSet.has(player.id);
         const auth = authArray[player.id][0];
+        // Keyed by auth, not player.id — hiddenVipSet is now persisted
+        // across restarts (see db.getAllHiddenVipAuths), so id (which
+        // resets on every reconnect, let alone a restart) can't be the key.
+        const showVipPrefix = !hiddenVipSet.has(auth);
         let rolePrefix = null;
         let prefixColor = null;
         if (showAdminPrefix && role == Role.MASTER) {

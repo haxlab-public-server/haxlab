@@ -63,7 +63,7 @@ console.log('--- stats/print.js: !stats shows the full stat block ---');
 
     const bffStats = { ...stats, ratingOrdinal: 27.849 };
     const bffOutput = await printStats.printPlayerStats(bffStats);
-    check('BFF stats (ratingOrdinal set) DO show a rounded rating line', bffOutput.includes('⚔️ Рейтинг: 28'), true);
+    check('BFF stats (ratingOrdinal set) DO show a display-rescaled rating line', bffOutput.includes('⚔️ Рейтинг: 1557'), true);
 
     // Real bug fixed 2026-08-14: getStatRank's own SQL always returns
     // {rank: 1, total: 0} when the whole player_stats table is empty (a
@@ -83,10 +83,24 @@ console.log('--- stats/print.js: !stats shows the full stat block ---');
         { playerName: 'Top', ordinal: 40.6 }, { playerName: 'Second', ordinal: 30.2 }, { playerName: 'Third', ordinal: 20.9 },
         { playerName: 'Fourth', ordinal: 10.1 }, { playerName: 'Fifth', ordinal: 0.4 },
     ];
-    const ratingDbFull = { getRatingLeaderboard: async () => ratingRows };
+    const ratingDbFull = { getRatingLeaderboard: async () => ratingRows, getVips: async () => [] };
     const ratingRankingText = await require(path.join(CORE, 'stats', 'print')).buildRatingRankingString(ratingDbFull);
-    check('buildRatingRankingString shows all 5 at quorum, rounded', ratingRankingText, 'Рейтинг> #1 Top : 41, #2 Second : 30, #3 Third : 21, #4 Fourth : 10, #5 Fifth : 0');
+    check('buildRatingRankingString shows all 5 at quorum, display-rescaled, top-3 medalled', ratingRankingText, 'Рейтинг> 🥇 Top : 1812, 🥈 Second : 1604, 🥉 Third : 1418, #4 Fourth : 1202, #5 Fifth : 1008');
+
+    const ratingRows2 = ratingRows.map((r, i) => ({ ...r, auth: i === 1 ? 'AUTH_SECOND' : `AUTH_${r.playerName}` }));
+    const ratingDbVip2 = { getRatingLeaderboard: async () => ratingRows2, getVips: async () => [{ auth: 'AUTH_SECOND' }] };
+    const ratingRankingTextVip = await require(path.join(CORE, 'stats', 'print')).buildRatingRankingString(ratingDbVip2);
+    check('buildRatingRankingString marks a VIP entry with a star', ratingRankingTextVip.includes('🥈 ⭐Second : 1604'), true);
 })();
+
+console.log('\n--- utils.js: formatStreakText escalation tiers ---');
+{
+    const { formatStreakText } = require(path.join(CORE, 'utils'));
+    check('below 3, plain wording, no fire', formatStreakText(2), 'Текущая серия: 2');
+    check('3-4 is one fire', formatStreakText(3), '🔥 Серия: 3');
+    check('5-9 is two fires', formatStreakText(5), '🔥🔥 Серия: 5');
+    check('10+ is three fires', formatStreakText(10), '🔥🔥🔥 Серия: 10');
+}
 
 console.log('\n--- chat.js: helpers must see state populated AFTER wiring ---');
 {
@@ -504,7 +518,7 @@ console.log('\n--- db + roomStats.js/player.js: player data actually round-trips
 
     const sent = [];
     const room = {
-        sendAnnouncement: (msg, id, color, style) => sent.push({ msg, id, style }),
+        sendAnnouncement: (msg, id, color, style) => sent.push({ msg, id, color, style }),
     };
 
     const HaxStatistics = function (playerName = '') {
@@ -537,7 +551,7 @@ console.log('\n--- db + roomStats.js/player.js: player data actually round-trips
 
     const roomStats = require(path.join(CORE, 'stats', 'roomStats'))({
         room, state, Team, authArray, db, HaxStatistics, HaxNotification,
-        errorColor: 3, infoColor: 5, announcementColor: 1, teamSize: 4,
+        errorColor: 3, infoColor: 5, announcementColor: 1, achievementColor: 99, teamSize: 4,
         getAssistsPlayer: (p) => perPlayerStat[p.id].assists,
         getCSPlayer: (p) => perPlayerStat[p.id].CS,
         getGametimePlayer: (p) => perPlayerStat[p.id].playtime,
@@ -569,7 +583,7 @@ console.log('\n--- db + roomStats.js/player.js: player data actually round-trips
     db.savePlayerStats('AUTH_FILLER2', Object.assign(new HaxStatistics('Filler2'), { goals: 100 }));
     sent.length = 0;
     await roomStats.printRankings('goals', 0);
-    check('leaderboard is announced once 5 players exist, top scorer first', /^Голы> #1 Filler2 : 100/.test(sent[0].msg), true);
+    check('leaderboard is announced once 5 players exist, top scorer first, with a medal not a bare "#1"', /^Голы> 🥇 Filler2 : 100/.test(sent[0].msg), true);
 
     // !tops with no argument (roomStats.printAllRankings) — every category
     // in one message now that all 5 rows exist, not six separate commands.
@@ -587,14 +601,16 @@ console.log('\n--- db + roomStats.js/player.js: player data actually round-trips
     const printRankingsCalls = [];
     const printAllRankingsCalls = [];
     const printClubRankingsCalls = [];
-    const { formatCoins, formatBanRemaining } = require(path.join(CORE, 'utils'));
+    const { formatCoins, formatBanRemaining, renderProgressBar } = require(path.join(CORE, 'utils'));
     const discordBotCalls = [];
     const hiddenVipSetForPlayerTest = new Set();
     const AFKSetForPlayerTest = new Set();
+    const silencedAuthsForPlayerTest = new Map();
     const player = require(path.join(CORE, 'commands', 'player'))({
         room, state, Team, Role: { PLAYER: 0 }, HaxStatistics, authArray, db,
         AFKSet: AFKSetForPlayerTest, AFKMinSet: new Set(), AFKCooldownSet: new Set(),
         hiddenVipSet: hiddenVipSetForPlayerTest,
+        silencedAuths: silencedAuthsForPlayerTest,
         minAFKDuration: 0, maxAFKDuration: 0, AFKCooldown: 0,
         announcementColor: 1, errorColor: 3, infoColor: 5, successColor: 6, HaxNotification,
         getCommand: () => false, getRole: () => 0, handlePlayersJoin: () => {}, handlePlayersLeave: () => {},
@@ -606,6 +622,7 @@ console.log('\n--- db + roomStats.js/player.js: player data actually round-trips
         getCommands: () => ({}),
         formatCoins,
         formatBanRemaining,
+        renderProgressBar,
         discordBot: { sendAdminCall: (playerName) => discordBotCalls.push(playerName), checkVipRoleOnLink: () => {} },
     });
 
@@ -676,6 +693,49 @@ console.log('\n--- db + roomStats.js/player.js: player data actually round-trips
     check('...but what was already earned while a member is untouched, not retroactively removed', afterLeaving.score, 7);
     check('the player\'s OWN personal stats still accumulated normally either way', db.getPlayerStats('AUTH_CLUB_SCORER').goals, 10);
 
+    // !help category grouping (requested 2026-08-16) — separate, minimal
+    // instantiation of commands/player.js (own room/getCommands/getRole)
+    // rather than reusing `player` above, so this doesn't disturb its
+    // shared cooldown/discordBotCalls state used by the tests below.
+    {
+        const helpSent = [];
+        const helpRoom = { sendAnnouncement: (msg, id, color, style) => helpSent.push({ msg, id, style }) };
+        const RoleForHelp = { PLAYER: 0, VIP: 1, ADMIN_TEMP: 2, ADMIN_PERM: 3, MASTER: 4 };
+        const helpPlayer = require(path.join(CORE, 'commands', 'player'))({
+            room: helpRoom, state, Team, Role: RoleForHelp, HaxStatistics, authArray, db,
+            AFKSet: new Set(), AFKMinSet: new Set(), AFKCooldownSet: new Set(),
+            hiddenVipSet: new Set(),
+            minAFKDuration: 0, maxAFKDuration: 0, AFKCooldown: 0,
+            announcementColor: 1, errorColor: 3, infoColor: 5, successColor: 6, HaxNotification,
+            getCommand: () => false,
+            getRole: () => RoleForHelp.VIP,
+            handlePlayersJoin: () => {}, handlePlayersLeave: () => {},
+            printPlayerStats: () => '', printRankings: async () => {}, printAllRankings: async () => {}, printClubRankings: async () => {},
+            updateTeams: () => {},
+            getCommands: () => ({
+                me: { desc: 'x', roles: RoleForHelp.PLAYER, category: 'stats' },
+                tops: { desc: 'x', roles: RoleForHelp.PLAYER, category: 'stats' },
+                shop: { desc: 'x', roles: RoleForHelp.PLAYER, category: 'shop' },
+                bb: { desc: 'x', roles: RoleForHelp.PLAYER, category: 'misc' },
+                legacyNoCat: { desc: 'x', roles: RoleForHelp.PLAYER },
+                vipcolor: { desc: 'x', roles: RoleForHelp.VIP, category: 'vip' },
+            }),
+            formatCoins, formatBanRemaining, renderProgressBar,
+            discordBot: { sendAdminCall: () => {}, checkVipRoleOnLink: () => {} },
+        });
+        helpPlayer.helpCommand({ id: 1 }, '!help');
+        const helpMsg = helpSent[0].msg;
+        check('!help groups player commands by category with an emoji header', helpMsg.includes('📊 Статистика: !me, !tops'), true);
+        check('...category order puts shop before misc', helpMsg.indexOf('🛒 Магазин') < helpMsg.indexOf('🛠 Прочее'), true);
+        check('...a command with no category field still shows, filed under misc', /🛠 Прочее:.*!legacyNoCat/.test(helpMsg), true);
+        check('...VIP tier (for a VIP player) gets its own grouped block', helpMsg.includes('⭐ VIP: !vipcolor'), true);
+
+        helpSent.length = 0;
+        helpPlayer.vipHelpCommand({ id: 1 });
+        check('!viphelp lists the VIP commands', helpSent[0].msg.includes('Команды VIP'), true);
+        check('...styled italic, not bold (requested 2026-08-16, reference text)', helpSent[0].style, 'italic');
+    }
+
     // !report — announces to the room, pings Discord, and enforces its own
     // 1-minute per-player cooldown + any admin-set !restrictcmd restriction.
     sent.length = 0;
@@ -732,7 +792,7 @@ console.log('\n--- db + roomStats.js/player.js: player data actually round-trips
     // UI/UX parity with !mute's own remaining-time line (requested
     // 2026-08-15) — a private follow-up on every successful claim, not
     // just on rejection, so the daily count is never a surprise.
-    check('...plus a private confirmation of how many uses are left today', sent.some((s) => s.id === 1 && /Использований !up сегодня: 1\/3/.test(s.msg)), true);
+    check('...plus a private confirmation of how many uses are left today, as a progress bar', sent.some((s) => s.id === 1 && /Использований !up сегодня: ●○○ 1\/3/.test(s.msg)), true);
 
     // Requested 2026-08-15: the claim-holder re-issuing !up on their OWN
     // already-live claim used to get the exact same "someone else already
@@ -771,7 +831,7 @@ console.log('\n--- db + roomStats.js/player.js: player data actually round-trips
     sent.length = 0;
     player.upCommand({ id: 2, name: 'Bob', team: Team.SPECTATORS }, '!up');
     check('...but a DIFFERENT VIP (no cooldown of their own) can claim the now-free slot', state.priorityCaptainId, 2);
-    check('...and their own daily count starts fresh at 1/3', sent.some((s) => s.id === 2 && /Использований !up сегодня: 1\/3/.test(s.msg)), true);
+    check('...and their own daily count starts fresh at 1/3', sent.some((s) => s.id === 2 && /Использований !up сегодня: ●○○ 1\/3/.test(s.msg)), true);
 
     // AFK auto-exit on a successful claim (requested 2026-08-15) — a fresh
     // auth/id, unrelated to Alice/Bob's own cooldowns above, spectating and
@@ -821,7 +881,7 @@ console.log('\n--- db + roomStats.js/player.js: player data actually round-trips
             announcementColor: 1, errorColor: 3, infoColor: 5, successColor: 6, HaxNotification,
             getCommand: () => false, getRole: () => 0, handlePlayersJoin: () => {}, handlePlayersLeave: () => {},
             printPlayerStats: () => '', printRankings: async () => {}, printAllRankings: async () => {}, printClubRankings: async () => {},
-            updateTeams: updateTeamsRootCause, getCommands: () => ({}), formatCoins, formatBanRemaining,
+            updateTeams: updateTeamsRootCause, getCommands: () => ({}), formatCoins, formatBanRemaining, renderProgressBar,
             discordBot: { sendAdminCall: () => {}, checkVipRoleOnLink: () => {} },
         });
 
@@ -870,7 +930,7 @@ console.log('\n--- db + roomStats.js/player.js: player data actually round-trips
             announcementColor: 1, errorColor: 3, infoColor: 5, successColor: 6, HaxNotification,
             getCommand: () => false, getRole: () => 0, handlePlayersJoin: () => {}, handlePlayersLeave: () => {},
             printPlayerStats: () => '', printRankings: async () => {}, printAllRankings: async () => {}, printClubRankings: async () => {},
-            updateTeams: () => {}, getCommands: () => ({}), formatCoins, formatBanRemaining,
+            updateTeams: () => {}, getCommands: () => ({}), formatCoins, formatBanRemaining, renderProgressBar,
             discordBot: { sendAdminCall: () => {}, checkVipRoleOnLink: () => {} },
             upCooldownMs: 1, // effectively no hourly cooldown for this test
             upDailyMaxUses: 3,
@@ -915,7 +975,7 @@ console.log('\n--- db + roomStats.js/player.js: player data actually round-trips
             announcementColor: 1, errorColor: 3, infoColor: 5, successColor: 6, HaxNotification,
             getCommand: () => false, getRole: () => 0, handlePlayersJoin: () => {}, handlePlayersLeave: () => {},
             printPlayerStats: () => '', printRankings: async () => {}, printAllRankings: async () => {}, printClubRankings: async () => {},
-            updateTeams: () => {}, getCommands: () => ({}), formatCoins, formatBanRemaining,
+            updateTeams: () => {}, getCommands: () => ({}), formatCoins, formatBanRemaining, renderProgressBar,
             discordBot: { sendAdminCall: () => {}, checkVipRoleOnLink: () => {} },
             upCooldownMs: 1,
             upDailyMaxUses: 1,
@@ -938,7 +998,7 @@ console.log('\n--- db + roomStats.js/player.js: player data actually round-trips
     // mocked, for the exact "5г/1а/1с" breakdown format.
     sent.length = 0;
     await roomStats.printClubRankings(0);
-    check('printClubRankings announces the real formatted club leaderboard', sent[0].msg, 'Клубы> #1 [SCR] ScorerClub : 7 (5г/1а/1с)');
+    check('printClubRankings announces the real formatted club leaderboard', sent[0].msg, 'Клубы> 🥇 [SCR] ScorerClub : 7 (5г/1а/1с)');
 
     state.clubMembers = [];
 
@@ -976,18 +1036,56 @@ console.log('\n--- db + roomStats.js/player.js: player data actually round-trips
     check('the reset is cleared from state', state.vipColors['AUTH_NEW_PLAYER'], undefined);
 
     // !viphide: same shape as commands/admin.js's !hide, but VIP-only and
-    // with no native badge to also toggle.
-    check('AUTH_NEW_PLAYER starts visible (not in hiddenVipSet)', hiddenVipSetForPlayerTest.has(3), false);
+    // with no native badge to also toggle. Keyed by auth (requested
+    // 2026-08-16, persisted — see hiddenVipSet's own declaration in
+    // entry.js), not player.id.
+    check('AUTH_NEW_PLAYER starts visible (not in hiddenVipSet)', hiddenVipSetForPlayerTest.has('AUTH_NEW_PLAYER'), false);
     sent.length = 0;
-    player.vipHideCommand({ id: 3, name: 'NewPlayer' });
+    await player.vipHideCommand({ id: 3, name: 'NewPlayer' });
     check('vipHideCommand confirms hiding', /Скрытность включена/.test(sent[0].msg), true);
-    check('the player is recorded as hidden', hiddenVipSetForPlayerTest.has(3), true);
+    check('the player is recorded as hidden', hiddenVipSetForPlayerTest.has('AUTH_NEW_PLAYER'), true);
+    check('...and persisted to the db', db.getAllHiddenVipAuths().includes('AUTH_NEW_PLAYER'), true);
 
     sent.length = 0;
-    player.vipHideCommand({ id: 3, name: 'NewPlayer' });
+    await player.vipHideCommand({ id: 3, name: 'NewPlayer' });
     check('vipHideCommand again confirms un-hiding', /Скрытность отключена/.test(sent[0].msg), true);
-    check('the hidden flag is cleared', hiddenVipSetForPlayerTest.has(3), false);
+    check('the hidden flag is cleared', hiddenVipSetForPlayerTest.has('AUTH_NEW_PLAYER'), false);
     check('the reset is cleared from the db', db.getAllVipColors(), []);
+
+    // !silence #<id> — per-viewer chat filter, now persisted (requested
+    // 2026-08-16: survive a restart) via db.addSilence/removeSilence
+    // alongside the in-memory Map that's still the hot path onPlayerChat
+    // checks on every message.
+    room.getPlayer = (id) => (id === 1 ? { id: 1, name: 'Alice' } : id === 2 ? { id: 2, name: 'Bob' } : null);
+    sent.length = 0;
+    await player.silenceCommand({ id: 1, name: 'Alice' }, '!silence #2');
+    check('silenceCommand confirms silencing', /теперь заглушен только для вас/.test(sent[0].msg), true);
+    check('the target is recorded in the in-memory Map', silencedAuthsForPlayerTest.get('AUTH_ALICE')?.has('AUTH_BOB'), true);
+    check('...and persisted to the db', db.getAllSilencedPairs(), [{ viewerAuth: 'AUTH_ALICE', targetAuth: 'AUTH_BOB' }]);
+
+    sent.length = 0;
+    await player.silenceCommand({ id: 1, name: 'Alice' }, '!silence #2');
+    check('the same command again confirms un-silencing', /больше не заглушен для вас/.test(sent[0].msg), true);
+    check('the target is removed from the in-memory Map', silencedAuthsForPlayerTest.get('AUTH_ALICE')?.has('AUTH_BOB'), false);
+    check('...and removed from the db too', db.getAllSilencedPairs(), []);
+
+    // Boot-time hydration (entry.js: rebuilds the Map from db.getAllSilencedPairs()
+    // on startup) — same reconstruction loop, exercised directly here against
+    // multiple viewers/targets (including one viewer with 2 silenced targets)
+    // to confirm the round trip actually produces the right Map<auth, Set<auth>> shape.
+    db.addSilence('AUTH_ALICE', 'AUTH_BOB');
+    db.addSilence('AUTH_ALICE', 'AUTH_CLUB_SCORER');
+    db.addSilence('AUTH_NEW_PLAYER', 'AUTH_BOB');
+    const rehydrated = new Map();
+    for (const { viewerAuth, targetAuth } of db.getAllSilencedPairs()) {
+        if (!rehydrated.has(viewerAuth)) rehydrated.set(viewerAuth, new Set());
+        rehydrated.get(viewerAuth).add(targetAuth);
+    }
+    check('boot hydration rebuilds a multi-target viewer correctly', [...rehydrated.get('AUTH_ALICE')].sort(), ['AUTH_BOB', 'AUTH_CLUB_SCORER']);
+    check('...and a second, independent viewer', [...rehydrated.get('AUTH_NEW_PLAYER')], ['AUTH_BOB']);
+    db.removeSilence('AUTH_ALICE', 'AUTH_BOB');
+    db.removeSilence('AUTH_ALICE', 'AUTH_CLUB_SCORER');
+    db.removeSilence('AUTH_NEW_PLAYER', 'AUTH_BOB');
 
     sent.length = 0;
     await player.linkDiscordCommand({ id: 1, name: 'Alice' }, '!discord 123456789012345678');
@@ -1169,12 +1267,71 @@ console.log('\n--- db + roomStats.js/player.js: player data actually round-trips
     sent.length = 0;
     await roomStats.updatePlayerStats({ id: 9, name: 'Grinder' }, Team.BLUE);
     check('crossing a milestone (49 -> 50) announces it publicly', sent.some((s) => s.id === null && /Grinder сыграл\(а\) 50-й матч/.test(s.msg)), true);
+    check('...in the dedicated achievement color (requested 2026-08-16), not the routine announcementColor', sent.find((s) => /сыграл\(а\)/.test(s.msg))?.color, 99);
 
     sent.length = 0;
     await roomStats.updatePlayerStats({ id: 9, name: 'Grinder' }, Team.BLUE);
     check('the very next (non-milestone) game, 51, announces nothing', sent.some((s) => /сыграл\(а\)/.test(s.msg)), false);
 
     db.close();
+})();
+
+console.log('\n--- stats/roomStats.js: private top-5 entry ping (requested 2026-08-16) ---');
+(async () => {
+    const { createSqliteDatabase } = require(path.join(__dirname, '..', 'db', 'sqlite'));
+    const db2 = createSqliteDatabase(':memory:');
+    db2.init();
+    const HaxStatistics2 = function (playerName = '') {
+        this.playerName = playerName; this.games = 0; this.wins = 0; this.winrate = '0.00%';
+        this.playtime = 0; this.goals = 0; this.assists = 0; this.CS = 0; this.ownGoals = 0;
+    };
+    // 4 pre-seeded rows — deliberately ONE short of the 5-existing-player
+    // quorum buildRankingString's own top-5 tables require.
+    for (let i = 0; i < 4; i++) {
+        db2.savePlayerStats(`AUTH_F${i}`, Object.assign(new HaxStatistics2(`F${i}`), { goals: i + 1 }));
+    }
+    const sent2 = [];
+    const room2 = { sendAnnouncement: (msg, id, color, style) => sent2.push({ msg, id, color, style }) };
+    const authArray2 = { 5: ['AUTH_RISER'], 6: ['AUTH_RISER2'] };
+    const state2 = { lastWinner: Team.RED, clubMembers: [] };
+    const perPlayerStat2 = { 5: { goals: 50, assists: 0, CS: 0, playtime: 0 }, 6: { goals: 200, assists: 0, CS: 0, playtime: 0 } };
+    const roomStats2 = require(path.join(CORE, 'stats', 'roomStats'))({
+        room: room2, state: state2, Team, authArray: authArray2, db: db2, HaxStatistics: HaxStatistics2, HaxNotification,
+        errorColor: 3, infoColor: 5, announcementColor: 1, achievementColor: 99, teamSize: 4,
+        getAssistsPlayer: (p) => perPlayerStat2[p.id].assists,
+        getCSPlayer: (p) => perPlayerStat2[p.id].CS,
+        getGametimePlayer: (p) => perPlayerStat2[p.id].playtime,
+        getGoalsPlayer: (p) => perPlayerStat2[p.id].goals,
+        getOwnGoalsPlayer: () => 0,
+        getPlayerComp: (player) => player,
+        getTimeStats: (s) => `${s}s`,
+    });
+
+    // Only 4 EXISTING rows before this match (Riser's own row doesn't
+    // exist yet) — no ping despite the huge score, quorum not met.
+    await roomStats2.updatePlayerStats({ id: 5, name: 'Riser' }, Team.RED);
+    check('no top-5 ping below the 5-existing-player quorum', sent2.some((s) => /📈/.test(s.msg)), false);
+
+    // Now 5 existing rows (F0-3 + Riser) — Riser2 vaults from no row at all
+    // straight into #1 in one match. This is also the real regression test
+    // for the self-row-pollution bug caught while writing this: the ping
+    // helper reads getStatRank BEFORE the match's own db.savePlayerStats,
+    // so Riser2's own not-yet-written row can't inflate its own "how many
+    // are ahead of me" count.
+    sent2.length = 0;
+    await roomStats2.updatePlayerStats({ id: 6, name: 'Riser2' }, Team.RED);
+    const pingMsg = sent2.find((s) => /📈/.test(s.msg));
+    check('a fresh player who vaults straight into top-5 in one match gets pinged', pingMsg?.msg, '📈 Ты теперь в топ-5 по категории «Голы» !');
+    check('...sent privately to them, not broadcast to the room', pingMsg?.id, 6);
+    check('...in the dedicated achievement color, not the routine announcementColor (requested 2026-08-16)', pingMsg?.color, 99);
+
+    // Already top-5 (rank 1, from the match above): scoring even more
+    // shouldn't re-ping — oldRank was already <= 5.
+    sent2.length = 0;
+    await roomStats2.updatePlayerStats({ id: 6, name: 'Riser2' }, Team.RED);
+    check('no repeat ping for a player already inside the top-5', sent2.some((s) => /📈/.test(s.msg)), false);
+
+    db2.close();
 })();
 
 console.log('\n--- stats/roomStats.js: VIP lottery — 0.5% roll per WINNING-team player on a genuine 4v4 ---');
@@ -1186,7 +1343,7 @@ console.log('\n--- stats/roomStats.js: VIP lottery — 0.5% roll per WINNING-tea
         this.playtime = 0; this.goals = 0; this.assists = 0; this.CS = 0; this.ownGoals = 0;
     };
     const sent = [];
-    const room = { sendAnnouncement: (msg, id) => sent.push({ msg, id }) };
+    const room = { sendAnnouncement: (msg, id, color) => sent.push({ msg, id, color }) };
     const grantCalls = [];
     const { createSqliteDatabase } = require(path.join(__dirname, '..', 'db', 'sqlite'));
     const db = createSqliteDatabase(':memory:');
@@ -1213,7 +1370,7 @@ console.log('\n--- stats/roomStats.js: VIP lottery — 0.5% roll per WINNING-tea
     let randomValue = 0;
     const roomStats = require(path.join(CORE, 'stats', 'roomStats'))({
         room, state, Team, authArray, db, HaxStatistics, HaxNotification: HaxNotificationMock,
-        errorColor: 2, infoColor: 1, announcementColor: 5, teamSize: 1,
+        errorColor: 2, infoColor: 1, announcementColor: 5, achievementColor: 99, teamSize: 1,
         getAssistsPlayer: () => 0, getCSPlayer: () => 0, getGametimePlayer: () => 0, getGoalsPlayer: () => 0,
         getOwnGoalsPlayer: () => 0, getPlayerComp: (p) => p, getTimeStats: (s) => `${s}s`,
         applyVipGrant: async (auth, name, expiresAt) => {
@@ -1261,7 +1418,7 @@ console.log('\n--- core/commands/club.js: create/invite/join/kick/leave/disband/
     db.init();
 
     const sent = [];
-    const room = { sendAnnouncement: (msg, id, color, style) => sent.push({ msg, id, color }) };
+    const room = { sendAnnouncement: (msg, id, color, style) => sent.push({ msg, id, color, style }) };
     const authArray = { 1: ['AUTH_OWNER'], 2: ['AUTH_MEMBER'], 3: ['AUTH_OUTSIDER'] };
     const state = {
         playersAll: [{ id: 1, name: 'Alice' }, { id: 2, name: 'Bob' }, { id: 3, name: 'Carol' }],
@@ -1376,7 +1533,7 @@ console.log('\n--- core/commands/club.js: create/invite/join/kick/leave/disband/
     sent.length = 0;
     await club.clubColorCommand(alice, '!clubcolor buy');
     check('clubcolor buy fails without enough coins', /Недостаточно монет/.test(sent[0].msg), true);
-    check('the cost mentioned is 10000', /10000/.test(sent[0].msg), true);
+    check('the cost mentioned is 10000, grouped with a thousands separator', /10 000/.test(sent[0].msg), true);
     check('an unsuccessful unlock does not flip the flag', state.clubs[0].colorUnlocked, false);
 
     db.addCoins('AUTH_OWNER', 'Alice', 10000);
@@ -1400,6 +1557,13 @@ console.log('\n--- core/commands/club.js: create/invite/join/kick/leave/disband/
     check('clubcolor accepts a valid hex value once unlocked', /обновлен/.test(sent[0].msg), true);
     check('the color is cached in state', state.clubs[0].color, 0xff8800);
     check('the color is persisted to the db', db.getClub(clubId).color, 0xff8800);
+
+    // !club (show) uses the club's own unlocked color (requested
+    // 2026-08-16), not the flat announcementColor every other announcement
+    // in this file uses.
+    sent.length = 0;
+    club.clubInfoCommand(alice, '!club');
+    check('"!club" (show) is announced in the club\'s own custom color', sent[0].color, 0xff8800);
 
     sent.length = 0;
     await club.clubEmojiCommand(bob, '!clubemoji 🔥');
@@ -1564,6 +1728,7 @@ console.log('\n--- core/commands/club.js: create/invite/join/kick/leave/disband/
     club.clubHelpCommand(alice, '!clubhelp');
     check('!clubhelp lists the club commands', /Команды клуба/.test(sent[0].msg), true);
     check('!clubhelp documents the slot price', /500 монеток/.test(sent[0].msg), true);
+    check('!clubhelp is styled italic, not bold (requested 2026-08-16, reference text)', sent[0].style, 'italic');
 
     db.close();
 })();
@@ -2121,12 +2286,13 @@ console.log('\n--- core/voteBan.js: !voteban — 61% of ALL eligible voters, top
     db.savePlayerStats('AUTH_EVE', { playerName: 'Eve', games: 11, goals: 5 });
 
     const voteBanNotifications = [];
-    const { formatBanRemaining } = require(path.join(CORE, 'utils'));
+    const { formatBanRemaining, renderProgressBar } = require(path.join(CORE, 'utils'));
     const voteBan = require(path.join(CORE, 'voteBan'))({
         room, state, authArray, db, Role, getRole, HaxNotification: HaxNotificationMock,
         errorColor: 2, warningColor: 3, successColor: 4, announcementColor: 5,
         discordBot: { sendVoteBanNotification: (data) => voteBanNotifications.push(data) },
         formatBanRemaining,
+        renderProgressBar,
     });
 
     // !restrictcmd (commands/master.js) blocking !voteban for a specific
@@ -2204,7 +2370,7 @@ console.log('\n--- core/voteBan.js: !voteban — 61% of ALL eligible voters, top
     check('...and confirmed privately', /против/.test(sent[0].msg), true);
     // item #18: a live tally is also broadcast room-wide right after, so
     // everyone watching sees the count update as votes come in.
-    check('...plus a live room-wide tally (id: null)', sent.some((s) => s.id == null && /📊.*1 за, 1 против.*нужно 3/.test(s.msg)), true);
+    check('...plus a live room-wide tally, as a progress bar toward the threshold (id: null)', sent.some((s) => s.id == null && /📊.*●○○ 1\/3 за \(1 против\)/.test(s.msg)), true);
 
     sent.length = 0;
     voteBan.handleVoteBanMessage({ id: 2, name: 'Bob' }, '1');
@@ -2514,10 +2680,10 @@ console.log('\n--- discord.js: message/interaction-handling logic (no live Disco
     for (let i = 1; i <= 4; i++) {
         db.savePlayerStats(`AUTH_FILLER${i}`, { playerName: `Filler${i}`, games: 1, wins: 0, goals: i, assists: 0, ownGoals: 0, CS: 0, playtime: 0 });
     }
-    check('!tops goals shows the real leaderboard once the quorum is met', await handleIncomingMessage(msg('U1', '!tops goals'), deps), 'Голы> #1 Xara : 7, #2 Filler4 : 4, #3 Filler3 : 3, #4 Filler2 : 2, #5 Filler1 : 1');
+    check('!tops goals shows the real leaderboard once the quorum is met, top-3 medalled', await handleIncomingMessage(msg('U1', '!tops goals'), deps), 'Голы> 🥇 Xara : 7, 🥈 Filler4 : 4, 🥉 Filler3 : 3, #4 Filler2 : 2, #5 Filler1 : 1');
     check('!tops pt resolves the "pt" alias to "playtime"', await handleIncomingMessage(msg('U1', '!tops pt'), deps), await handleIncomingMessage(msg('U1', '!tops playtime'), deps));
     const topsSlashReply = await handleSlashCommand(interaction('U1', 'tops', { stat: 'goals' }), deps);
-    check('/tops <stat> matches !tops <stat> exactly', topsSlashReply, { content: 'Голы> #1 Xara : 7, #2 Filler4 : 4, #3 Filler3 : 3, #4 Filler2 : 2, #5 Filler1 : 1', ephemeral: true });
+    check('/tops <stat> matches !tops <stat> exactly', topsSlashReply, { content: 'Голы> 🥇 Xara : 7, 🥈 Filler4 : 4, 🥉 Filler3 : 3, #4 Filler2 : 2, #5 Filler1 : 1', ephemeral: true });
     // Leader-only per category since 2026-08-15 (real wall-of-text fix) —
     // 6 categories + 1 trailing "!tops <category>" hint line.
     check('!tops with no argument now shows every category combined (leader-only)', (await handleIncomingMessage(msg('U1', '!tops'), deps)).split('\n').length, 7);
@@ -2805,13 +2971,15 @@ console.log('\n--- events/activity.js: every chat message goes through room.send
     check('a hidden MASTER gets no prefix and the normal style', sent[0], { msg: 'Boss: sneaky', id: null, style: 'normal' });
     hiddenAdminsSetMock.delete(1);
 
-    // !viphide (commands/player.js) — same idea, VIP-specific.
-    hiddenVipSetMock.add(3);
+    // !viphide (commands/player.js) — same idea, VIP-specific. Keyed by
+    // auth now (requested 2026-08-16, persisted — see hiddenVipSet's own
+    // declaration in entry.js), not player.id.
+    hiddenVipSetMock.add('AUTH_VIP');
     sent.length = 0;
     const hiddenVipResult = activity.onPlayerChat({ id: 3, name: 'Donor', team: Team.SPECTATORS, admin: false }, 'sneaky vip');
     check('a hidden VIP is still intercepted', hiddenVipResult, false);
     check('a hidden VIP gets no prefix and the normal style', sent[0], { msg: 'Donor: sneaky vip', id: null, style: 'normal' });
-    hiddenVipSetMock.delete(3);
+    hiddenVipSetMock.delete('AUTH_VIP');
 
     // Club prefix (core/commands/club.js) — a regular player in a club gets
     // intercepted just like a VIP/ADMIN/MASTER would, but with the club's
@@ -3322,6 +3490,19 @@ console.log('\n--- events/movement.js: auth-bans block a join regardless of conn
     // Onboarding nudge (requested 2026-08-15): a brand new player has no
     // other signal !help even exists.
     check('the welcome message points a new player at !help', sent.some((s) => s.msg.includes('!help')), true);
+
+    // New-vs-returning wording (requested 2026-08-16): a player_stats row
+    // (from db.savePlayerStats, same as a real finished match would leave
+    // behind) flips the welcome text to the lighter "С возвращением" one,
+    // with no !help nudge (they already know it).
+    const { HaxStatistics } = require(path.join(CORE, 'models'));
+    db.savePlayerStats('AUTH_RETURNING', new HaxStatistics('Regular'));
+    roomCalls.length = 0;
+    sent.length = 0;
+    state.playersAll = [{ id: 9, name: 'Regular' }];
+    await movement.onPlayerJoin({ id: 9, name: 'Regular', auth: 'AUTH_RETURNING', conn: 'CONN9' });
+    check('a returning player (existing player_stats row) gets the lighter welcome-back wording', sent.some((s) => s.msg.includes('С возвращением')), true);
+    check('...and is NOT shown the new-player !help nudge', sent.some((s) => s.msg.includes('!help')), false);
 
     // Season-close notice (item #22) — entry.js sets these two together at
     // boot when the persisted lastAnnouncedSeason differs from the freshly-
@@ -6425,6 +6606,18 @@ console.log('\n--- core/economy.js: coin awards, playtime ticker, shop/inventory
                 return Promise.resolve();
             },
             getEquipped: (auth) => Promise.resolve(equipped.get(auth) ?? { form: null, goalAnimation: null, avatar: null, size: null }),
+            // Real streak/day bookkeeping is already covered directly
+            // against db/sqlite.js's own claimDailyBonus above (see "Daily
+            // login bonus streak") — this mock only needs to prove economy.js
+            // itself passes the right `coinsPerStreak` through, doubled for
+            // a current VIP (requested 2026-08-16). Deliberately does NOT
+            // touch `balances` — this shares the same map every other check
+            // in this block asserts exact running totals against.
+            claimDailyBonusCalls: [],
+            claimDailyBonus(auth, name, coinsPerStreak, maxStreak) {
+                this.claimDailyBonusCalls.push({ auth, coinsPerStreak, maxStreak });
+                return Promise.resolve({ amount: coinsPerStreak, streak: 1, newBalance: balances.get(auth) ?? 0 });
+            },
             _balances: balances,
         };
     }
@@ -6556,6 +6749,19 @@ console.log('\n--- core/economy.js: coin awards, playtime ticker, shop/inventory
     await new Promise((resolve) => setTimeout(resolve, 0));
     check('a current VIP also earns double on a playtime payout (1 -> 2)', await db.getBalance('AUTH_VIP_EARNER'), 20 + 2);
 
+    // A current VIP's daily login bonus is doubled too (requested
+    // 2026-08-16) — same VIP_EARNINGS_MULTIPLIER as match payouts above,
+    // just applied by scaling the per-day RATE passed into
+    // db.claimDailyBonus (which credits atomically in one call) rather than
+    // a second pass over its result.
+    db.claimDailyBonusCalls.length = 0;
+    await economy.claimDailyBonus({ id: 9, name: 'VipEarner' });
+    check('a current VIP\'s daily bonus rate is doubled (5 -> 10)', db.claimDailyBonusCalls[0].coinsPerStreak, 10);
+
+    db.claimDailyBonusCalls.length = 0;
+    await economy.claimDailyBonus({ id: 6, name: 'Solo' });
+    check('a non-VIP still gets the plain daily rate', db.claimDailyBonusCalls[0].coinsPerStreak, 5);
+
     // A lapsed VIP drops straight back to the plain rate on the very next
     // payout — no different from any other VIP perk in this file (goal
     // animations, vipOnly forms): nothing here is cached from when they
@@ -6674,7 +6880,7 @@ console.log('\n--- core/economy.js: coin awards, playtime ticker, shop/inventory
 
     sentLocal.length = 0;
     await economy.inventoryCommand({ id: 15, name: 'RelicOwner' }, '!inventory');
-    check('!inventory shows a retired item as "снят с продажи", not a price', /relic — Реликвия \(снят с продажи\) \[надето\]/.test(sentLocal[0].msg), true);
+    check('!inventory shows a retired item as "снят с продажи", not a price, with the ✅-equipped marker', /relic — Реликвия \(снят с продажи\) ✅ \[надето\]/.test(sentLocal[0].msg), true);
 
     sentLocal.length = 0;
     await economy.shopCommand({ id: 2, name: 'Blue1' }, '!shop nope');
@@ -6790,7 +6996,7 @@ console.log('\n--- core/economy.js: coin awards, playtime ticker, shop/inventory
     await economy.inventoryCommand({ id: 19, name: 'VipEquipTest' }, '!inventory');
     check('a current VIP sees every goalAnimation item in !inventory despite owning none', /fireworks — Фейерверк/.test(sentLocal[0].msg), true);
     check('...every smoke color too', /smoke-red — Дым \(красный\)/.test(sentLocal[0].msg), true);
-    check('VIP-granted entries are tagged [VIP], not [куплено]', /fireworks — Фейерверк \(50000 монеток\) \[VIP\]/.test(sentLocal[0].msg), true);
+    check('VIP-granted entries are tagged [VIP], not [куплено]', /fireworks — Фейерверк \(50 000 монеток\) \[VIP\]/.test(sentLocal[0].msg), true);
     check('a VIP\'s !inventory never lists the smoke bundle id itself (never ownable/equippable)', /^smoke —/m.test(sentLocal[0].msg), false);
     check('avatar items (fire/star/skull/crown) are never VIP-granted — no access tier above plain ownership', /star —/.test(sentLocal[0].msg), false);
 
@@ -6806,7 +7012,7 @@ console.log('\n--- core/economy.js: coin awards, playtime ticker, shop/inventory
     rolesLocal[19] = Role.VIP;
     sentLocal.length = 0;
     await economy.inventoryCommand({ id: 19, name: 'VipEquipTest' }, '!inventory');
-    check('an item actually owned by a current VIP is tagged [куплено], not [VIP]', /fireworks — Фейерверк \(50000 монеток\) \[куплено\]/.test(sentLocal[0].msg), true);
+    check('an item actually owned by a current VIP is tagged [куплено], not [VIP]', /fireworks — Фейерверк \(50 000 монеток\) \[куплено\]/.test(sentLocal[0].msg), true);
     check('a sibling not actually owned is still tagged [VIP]', /smoke-blue — Дым \(синий\) \(300 монеток\) \[VIP\]/.test(sentLocal[0].msg), true);
     rolesLocal[19] = Role.PLAYER;
 
@@ -9139,7 +9345,15 @@ console.log('--- core/bff/matchFlow.js: rating-driven match assembly (no captain
     const ratingsDb = new Map();
     const limitCalls = [];
     let trainingMapCalls = 0;
-    const stateLocal = { gameState: StateEnum.STOP, teamSpec: [], teamRed: [], teamBlue: [], specQueueSince: new Map() };
+    const stateLocal = { gameState: StateEnum.STOP, teamSpec: [], teamRed: [], teamBlue: [], specQueueSince: new Map(), game: { goals: [] } };
+    // Stubbed rather than the real stats/playerStats.js implementation
+    // (heavy setup — see the identical reasoning already used for BFF's
+    // own events.js test) — mutable per-scenario data so the ONE "full 4v4
+    // with a real winner" test below (the only scenario that cares about
+    // personal-contribution content) can populate it, while every other
+    // scenario in this file gets the harmless default (empty both sides).
+    let actionReportCountTeamData = { red: [], blue: [] };
+    const ratingHistoryCalls = [];
     const matchFlow = createBffMatchFlow({
         room: roomMock,
         state: stateLocal,
@@ -9148,6 +9362,7 @@ console.log('--- core/bff/matchFlow.js: rating-driven match assembly (no captain
         getAuth: (p) => p.auth,
         getRating: (auth) => ratingsDb.get(auth) ?? null,
         saveRating: (auth, name, mu, sigma) => ratingsDb.set(auth, { mu, sigma }),
+        saveRatingHistory: (auth, delta) => { ratingHistoryCalls.push({ auth, delta }); return Promise.resolve(); },
         applyLimitsForSize: (maxSide) => limitCalls.push(maxSide),
         applyTrainingMap: () => { trainingMapCalls++; },
         teamSize: 4,
@@ -9155,6 +9370,7 @@ console.log('--- core/bff/matchFlow.js: rating-driven match assembly (no captain
         HaxNotification: HaxNotificationMock,
         announcementColor: 1,
         infoColor: 3,
+        actionReportCountTeam: (goalsByTeam, team) => (team === TeamLocal.RED ? actionReportCountTeamData.red : actionReportCountTeamData.blue),
     });
 
     // --- zero players: genuinely nothing to do ---
@@ -9421,6 +9637,10 @@ console.log('--- core/bff/matchFlow.js: rating-driven match assembly (no captain
     stateLocal.teamRed = redPlayers;
     stateLocal.teamBlue = bluePlayers;
     stateLocal.teamSpec = [];
+    // Red1 (id 1) scored twice, Red2 (id 2) got 1 assist — everyone else on
+    // both teams recorded nothing this match.
+    actionReportCountTeamData = { red: [[{ id: 1, name: 'Red1', team: TeamLocal.RED }, 2, 0, 0], [{ id: 2, name: 'Red2', team: TeamLocal.RED }, 0, 1, 0]], blue: [] };
+    ratingHistoryCalls.length = 0;
     roomCallsLocal.length = 0;
     announcementsLocal.length = 0;
     await matchFlow.handlePlayersStop(null, 'red');
@@ -9432,15 +9652,20 @@ console.log('--- core/bff/matchFlow.js: rating-driven match assembly (no captain
     check('reassembly (new team assignments) has NOT happened yet — still inside the pause window', roomCallsLocal.filter((c) => c.fn === 'setPlayerTeam' && c.team !== TeamLocal.SPECTATORS).length, 0);
     check('...and all 8 get a fresh fairness-queue timestamp (sent to the back of the line for next time)', [1, 2, 3, 4, 5, 6, 7, 8].every((id) => stateLocal.specQueueSince.get(id) >= fairnessNow), true);
 
-    // --- item #14: each of the 8 players gets a private rating-delta line,
-    // winners positive, losers negative ---
-    const deltaMsgs = announcementsLocal.filter((a) => /^📊 Рейтинг:/.test(a.msg));
-    check('all 8 just-finished players get a rating-delta message', deltaMsgs.length, 8);
+    // --- item #14, merged with the personal-contribution line 2026-08-16
+    // ("объедини вклады и послематчевую статистику"): each of the 8
+    // players gets ONE private message combining both ---
+    const deltaMsgs = announcementsLocal.filter((a) => /^Твой вклад:.*📊 Рейтинг:/.test(a.msg));
+    check('all 8 just-finished players get a combined contribution+rating-delta message', deltaMsgs.length, 8);
     check('...each one sent privately (not id: null)', deltaMsgs.every((a) => a.id != null), true);
     const redDeltaMsgs = deltaMsgs.filter((a) => [1, 2, 3, 4].includes(a.id));
     const blueDeltaMsgs = deltaMsgs.filter((a) => [5, 6, 7, 8].includes(a.id));
     check('winning (red) players show a non-negative delta', redDeltaMsgs.every((a) => !/\(-/.test(a.msg)), true);
     check('losing (blue) players show a negative delta', blueDeltaMsgs.every((a) => /\(-/.test(a.msg)), true);
+    check('Red1 (2 goals) sees their own contribution in their own message', deltaMsgs.find((a) => a.id === 1).msg.includes('Твой вклад: 2⚽'), true);
+    check('Red2 (1 assist) sees theirs', deltaMsgs.find((a) => a.id === 2).msg.includes('Твой вклад: 1🅰️'), true);
+    check('a player with no actions this match sees the same "без результативных действий" wording as the room recap', deltaMsgs.find((a) => a.id === 3).msg.includes('Твой вклад: без результативных действий'), true);
+    check('every player\'s delta is also persisted to rating_history (via saveRatingHistory)', ratingHistoryCalls.length, 8);
 
     // --- item #21: a room-wide countdown announcement precedes the
     // reassembleDelayMs pause on a natural end ---
@@ -9862,8 +10087,12 @@ console.log('--- core/bff/commands.js: !me/!tops/!help, no economy/clubs ---');
         printRankings: async (key, id) => printRankingsCalls.push({ key, id }),
     };
     const { computeOrdinal } = require(path.join(CORE, 'bff', 'rating'));
+    const { formatRatingDisplay } = require(path.join(CORE, 'utils'));
     const hiddenVipSetLocal = new Set();
-    const stateLocal = { teamSpec: [], specQueueSince: new Map() };
+    const stateLocal = { teamSpec: [], specQueueSince: new Map(), vipColors: {} };
+    const assembleMatchCalls = [];
+    const matchFlowMockForCommands = { assembleMatch: async () => { assembleMatchCalls.push(1); } };
+    const { formatBanRemaining } = require(path.join(CORE, 'utils'));
 
     const bffCommands = require(path.join(CORE, 'bff', 'commands'))({
         room: roomMock, state: stateLocal, authArray: authArrayLocal, db, HaxStatistics: HaxStatisticsLocal,
@@ -9874,20 +10103,64 @@ console.log('--- core/bff/commands.js: !me/!tops/!help, no economy/clubs ---');
         bffRoomStats: bffRoomStatsMock,
         hiddenVipSet: hiddenVipSetLocal,
         teamSize: 4,
+        matchFlow: matchFlowMockForCommands,
+        formatBanRemaining,
+        // Shrunk from the real 1h/24h defaults so the cap test below doesn't
+        // need to wait out real time — same reasoning as the main room's own
+        // !up test factory.
+        upCooldownMs: 50,
+        upDailyMaxUses: 2,
+        upDailyWindowMs: 200,
     });
 
-    // --- !me: existing stats + rating ---
+    // --- !me: compact one-liner (requested 2026-08-16) — name, rating,
+    // win rate, nothing else. Replaces the old full-detail-by-default
+    // behavior, which moved to !sf below.
     sentLocal.length = 0;
     await bffCommands.meCommand({ id: 1, name: 'Player1', auth: 'AUTH_1' });
-    check('!me shows existing stats', sentLocal[0].msg.includes('🕹️ 5 игр'), true);
-    check('!me shows a rating line when the player has one', sentLocal[0].msg.includes('⚔️ Рейтинг:'), true);
-    check('...matching computeOrdinal for the saved 30/4 rating', sentLocal[0].msg.includes(`${Math.round(computeOrdinal({ mu: 30, sigma: 4 }))}`), true);
+    check('!me shows the player name', sentLocal[0].msg.startsWith('Player1'), true);
+    check('!me shows the display-rescaled rating', sentLocal[0].msg.includes(`⚔️ ${formatRatingDisplay(computeOrdinal({ mu: 30, sigma: 4 }))}`), true);
+    check('!me shows winrate and wins/games, not the old full-detail block', sentLocal[0].msg.includes('🏆 60.0% (3/5)'), true);
+    check('!me does NOT show the per-stat rank breakdown (that is !sf\'s job now)', sentLocal[0].msg.includes('Ранг по голам'), false);
 
-    // --- !me: a player with no stats/rating yet gets a fresh blank block, not an error ---
+    // ⭐ VIP badge (requested 2026-08-16) — !tops already marked VIP entries
+    // this way, !me/!sf previously showed no VIP indicator at all.
+    authArrayLocal[30] = ['AUTH_VIP'];
+    sentLocal.length = 0;
+    await bffCommands.meCommand({ id: 30, name: 'Donor', auth: 'AUTH_VIP' });
+    check('!me shows a ⭐ badge for a current VIP', sentLocal[0].msg.startsWith('⭐ Donor'), true);
+
+    // --- !me: a player with no stats/rating yet gets a fresh blank
+    // compact line, not an error ---
     sentLocal.length = 0;
     await bffCommands.meCommand({ id: 2, name: 'Newbie', auth: 'AUTH_NEW' });
-    check('!me for a brand new player shows 0 games rather than erroring', sentLocal[0].msg.includes('🕹️ 0 игр'), true);
+    check('!me for a brand new player never played shows a placeholder instead of a rating number', sentLocal[0].msg.includes('⚔️ ещё не оценён'), true);
+    check('...and 0/0 for wins/games rather than erroring', sentLocal[0].msg.includes('(0/0)'), true);
+
+    // --- !sf (!ыа): the full detailed block !me used to always show ---
+    sentLocal.length = 0;
+    await bffCommands.statsFullCommand({ id: 1, name: 'Player1', auth: 'AUTH_1' });
+    check('!sf shows the full per-stat-rank block', sentLocal[0].msg.includes('🕹️ 5 игр'), true);
+    check('!sf shows a rating line when the player has one', sentLocal[0].msg.includes('⚔️ Рейтинг:'), true);
+    check('...matching the display-rescaled computeOrdinal for the saved 30/4 rating', sentLocal[0].msg.includes(`${formatRatingDisplay(computeOrdinal({ mu: 30, sigma: 4 }))}`), true);
+    check('!sf has no rating-trend line yet for a player with no rating_history rows', sentLocal[0].msg.includes('За последние'), false);
+
+    sentLocal.length = 0;
+    await bffCommands.statsFullCommand({ id: 30, name: 'Donor', auth: 'AUTH_VIP' });
+    check('!sf shows a ⭐ badge for a current VIP too', sentLocal[0].msg.startsWith('⭐ Donor'), true);
+
+    sentLocal.length = 0;
+    await bffCommands.statsFullCommand({ id: 2, name: 'Newbie', auth: 'AUTH_NEW' });
+    check('!sf for a brand new player shows 0 games rather than erroring', sentLocal[0].msg.includes('🕹️ 0 игр'), true);
     check('...and no rating line at all (never played a ranked match)', sentLocal[0].msg.includes('Рейтинг'), false);
+
+    // --- !sf: rating trend line, once rating_history has rows (see
+    // matchFlow.js's own saveRatingHistory call after every ranked match) ---
+    await db.saveRatingHistory('AUTH_1', 20);
+    await db.saveRatingHistory('AUTH_1', -5);
+    sentLocal.length = 0;
+    await bffCommands.statsFullCommand({ id: 1, name: 'Player1', auth: 'AUTH_1' });
+    check('!sf shows the rating trend once there is history, summing available rows', sentLocal[0].msg.includes('За последние 5 игр: +15'), true);
 
     // --- !tops: dispatch ---
     printAllRankingsCalls.length = 0;
@@ -9926,17 +10199,75 @@ console.log('--- core/bff/commands.js: !me/!tops/!help, no economy/clubs ---');
     check('!bb kicks the calling player specifically', kickCallsLocal, [{ id: 1, reason: 'Пока !', ban: false }]);
 
     // --- !viphide: same shape as the main room's own, VIP-only, no native
-    // badge to also toggle ---
-    check('AUTH_VIP starts visible (not in hiddenVipSet)', hiddenVipSetLocal.has(1), false);
+    // badge to also toggle. Keyed by auth (requested 2026-08-16, persisted
+    // — see hiddenVipSet's own declaration in bffEntry.js), not player.id —
+    // vipHideCommand reads it via authArrayLocal[player.id], NOT the
+    // player.auth field the mock player objects below also happen to carry,
+    // so id 1 needs a real authArrayLocal entry (id 1's earlier "AUTH_1"
+    // mapping is done being used by this point, !bb/!rename above already
+    // ran). ---
+    authArrayLocal[1] = ['AUTH_VIP'];
+    check('AUTH_VIP starts visible (not in hiddenVipSet)', hiddenVipSetLocal.has('AUTH_VIP'), false);
     sentLocal.length = 0;
-    bffCommands.vipHideCommand({ id: 1, name: 'Donor', auth: 'AUTH_VIP' });
+    await bffCommands.vipHideCommand({ id: 1, name: 'Donor', auth: 'AUTH_VIP' });
     check('vipHideCommand confirms hiding', sentLocal[0].msg.includes('Скрытность включена'), true);
-    check('the player is recorded as hidden', hiddenVipSetLocal.has(1), true);
+    check('the player is recorded as hidden', hiddenVipSetLocal.has('AUTH_VIP'), true);
+    check('...and persisted to the db', (await db.getAllHiddenVipAuths()).includes('AUTH_VIP'), true);
 
     sentLocal.length = 0;
-    bffCommands.vipHideCommand({ id: 1, name: 'Donor', auth: 'AUTH_VIP' });
+    await bffCommands.vipHideCommand({ id: 1, name: 'Donor', auth: 'AUTH_VIP' });
     check('vipHideCommand again confirms un-hiding', sentLocal[0].msg.includes('Скрытность отключена'), true);
-    check('the hidden flag is cleared', hiddenVipSetLocal.has(1), false);
+    check('the hidden flag is cleared', hiddenVipSetLocal.has('AUTH_VIP'), false);
+
+    // --- !vipcolor: forked verbatim from the main room's own (requested
+    // 2026-08-16, real parity gap — BFF VIPs could !viphide but never
+    // actually picked a color). Own file, own independent color map. ---
+    sentLocal.length = 0;
+    await bffCommands.vipColorCommand({ id: 1, name: 'Donor', auth: 'AUTH_VIP' }, '!vipcolor zz');
+    check('vipcolor rejects a non-hex value', sentLocal[0].msg.includes('Использование'), true);
+
+    sentLocal.length = 0;
+    await bffCommands.vipColorCommand({ id: 1, name: 'Donor', auth: 'AUTH_VIP' }, '!vipcolor ff8800');
+    check('vipcolor accepts a valid hex value', sentLocal[0].msg.includes('обновлен'), true);
+    check('the color is cached in state', stateLocal.vipColors.AUTH_VIP, 0xff8800);
+    check('...and persisted to the db', (await db.getAllVipColors()).find((v) => v.auth === 'AUTH_VIP')?.color, 0xff8800);
+
+    sentLocal.length = 0;
+    await bffCommands.vipColorCommand({ id: 1, name: 'Donor', auth: 'AUTH_VIP' }, '!vipcolor');
+    check('vipcolor with no argument resets to default', sentLocal[0].msg.includes('сброшен'), true);
+    check('the reset is cleared from state', stateLocal.vipColors.AUTH_VIP, undefined);
+
+    // --- !up: jumps the caller to the front of the fairness queue
+    // (requested 2026-08-16, BFF's equivalent of the main room's own !up —
+    // adapted to BFF's queue-based, not captain-pick, assembly). ---
+    sentLocal.length = 0;
+    await bffCommands.upCommand({ id: 1, name: 'Donor', auth: 'AUTH_VIP' });
+    check('!up refuses a caller who is not currently spectating', sentLocal[0].msg.includes('доступен только зрителям'), true);
+
+    stateLocal.teamSpec = [{ id: 1 }, { id: 5 }, { id: 6 }];
+    stateLocal.specQueueSince.set(1, 5000);
+    stateLocal.specQueueSince.set(5, 1000);
+    stateLocal.specQueueSince.set(6, 2000);
+    assembleMatchCalls.length = 0;
+    sentLocal.length = 0;
+    await bffCommands.upCommand({ id: 1, name: 'Donor', auth: 'AUTH_VIP' });
+    check('!up confirms the jump', sentLocal[0].msg.includes('в начале очереди'), true);
+    check('the caller\'s queue timestamp is now earlier than everyone else\'s', stateLocal.specQueueSince.get(1) < Math.min(stateLocal.specQueueSince.get(5), stateLocal.specQueueSince.get(6)), true);
+    check('assembleMatch is triggered immediately, not left for the next join/leave', assembleMatchCalls, [1]);
+
+    sentLocal.length = 0;
+    await bffCommands.upCommand({ id: 1, name: 'Donor', auth: 'AUTH_VIP' });
+    check('a 2nd use inside the 1h cooldown is rejected', sentLocal[0].msg.includes('раз в час'), true);
+
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    sentLocal.length = 0;
+    await bffCommands.upCommand({ id: 1, name: 'Donor', auth: 'AUTH_VIP' });
+    check('once the cooldown elapses, a 2nd use succeeds (2/2 daily uses now)', sentLocal[0].msg.includes('в начале очереди'), true);
+
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    sentLocal.length = 0;
+    await bffCommands.upCommand({ id: 1, name: 'Donor', auth: 'AUTH_VIP' });
+    check('a 3rd use exceeds the 2-per-window daily cap', sentLocal[0].msg.includes('не больше 2 раз в день'), true);
 
     // --- !help: the "VIP:" section is Role.VIP-gated ---
     sentLocal.length = 0;
@@ -10014,6 +10345,7 @@ console.log('--- core/bff/commands.js: !me/!tops/!help, no economy/clubs ---');
     check('!rules explains team assembly is rating-based', sentLocal[0].msg.includes('рейтингу'), true);
     check('...mentions the max match size (4x4 for teamSize=4)', sentLocal[0].msg.includes('4x4'), true);
     check('...and points to !queue', sentLocal[0].msg.includes('!queue'), true);
+    check('...styled italic, not bold (requested 2026-08-16, reference text)', sentLocal[0].style, 'italic');
 
     db.close();
 })();
@@ -10063,6 +10395,7 @@ console.log('--- core/bff/events.js: room.onXxx handlers, trimmed of economy/pok
         playersAll: [], adminList: [], gameState: StateLocal.PLAY, endGameVariable: false, playSituation: SituationLocal.PLAY,
         lastWinner: TeamLocal.SPECTATORS, teamRed: [], teamBlue: [], teamRedStats: [], teamBlueStats: [], banList: [],
         lastTouches: [null, null], lastTeamTouched: undefined, game: { scores: {} }, specQueueSince: new Map(),
+        streak: 2,
     };
     const ghostKicks = [];
     const lineupCalls = [];
@@ -10095,6 +10428,7 @@ console.log('--- core/bff/events.js: room.onXxx handlers, trimmed of economy/pok
         actionReportCountTeam: (goalsByTeam, team) => (team === TeamLocal.RED
             ? [[{ id: 1, name: 'Red1', team: TeamLocal.RED }, 2, 0, 0], [{ id: 2, name: 'Red2', team: TeamLocal.RED }, 0, 1, 0]]
             : []),
+        formatStreakText: require(path.join(CORE, 'utils')).formatStreakText,
     });
 
     // --- join: banned auth is kicked, never joins ---
@@ -10112,6 +10446,16 @@ console.log('--- core/bff/events.js: room.onXxx handlers, trimmed of economy/pok
     // Onboarding nudge (requested 2026-08-15): a brand new player has no
     // other signal !help even exists.
     check('the welcome message points a new player at !help', sentLocal.some((s) => s.msg.includes('!help')), true);
+
+    // New-vs-returning wording (requested 2026-08-16) — same as the main
+    // room's own movement.js.
+    const { HaxStatistics: HaxStatisticsLocal } = require(path.join(CORE, 'models'));
+    db.savePlayerStats('AUTH_RETURNING', new HaxStatisticsLocal('Regular'));
+    roomCallsLocal.length = 0; sentLocal.length = 0;
+    stateLocal.playersAll = [{ id: 4, name: 'Regular' }];
+    await events.onPlayerJoin({ id: 4, name: 'Regular', auth: 'AUTH_RETURNING', conn: 'C4' });
+    check('a returning player (existing player_stats row) gets the lighter welcome-back wording', sentLocal.some((s) => s.msg.includes('С возвращением')), true);
+    check('...and is NOT shown the new-player !help nudge', sentLocal.some((s) => s.msg.includes('!help')), false);
 
     // --- join: master gets the admin badge + owner announcement ---
     roomCallsLocal.length = 0; sentLocal.length = 0;
@@ -10202,10 +10546,13 @@ console.log('--- core/bff/events.js: room.onXxx handlers, trimmed of economy/pok
     check('onGameStop sets playSituation back to STOP', stateLocal.playSituation, SituationLocal.STOP);
     check('onGameStop stops the recording (state.game.rec updated)', stateLocal.game.rec, 'STOPPED_REC');
     check('...and posts a match-report embed to Discord', fetchSummaryEmbedCalls.length, 1);
-    // item #15: the SAME natural end also posts a plain-text recap IN the
-    // room itself, not just to Discord.
-    const recapMsg = sentLocal.find((s) => /^🏁 Матч окончен:/.test(s.msg));
-    check('a natural end posts an in-room recap with the final score', recapMsg?.msg.includes(`${currentScores.red} - ${currentScores.blue}`), true);
+    // item #15/2026-08-16 rework: win/streak line (matching the main room's
+    // own wording), team recap, and MVP are now ONE consolidated message,
+    // not a separate "🏁 Матч окончен" line.
+    const recapMsg = sentLocal.find((s) => /^✨ Красная команда выиграла/.test(s.msg));
+    check('a natural end announces the winner with the main-room-style wording', recapMsg?.msg.includes(`${currentScores.red} - ${currentScores.blue}`), true);
+    check('...including the current streak', recapMsg?.msg.includes('Текущая серия: 2'), true);
+    check('...and an MVP line (highest goals+assists+CS across both teams)', recapMsg?.msg.includes('⭐ MVP: Red1'), true);
     check('...listing red\'s scorer/assister by name with goal/assist markers', recapMsg?.msg.includes('Red1 (2⚽)') && recapMsg?.msg.includes('Red2 (1🅰️)'), true);
     check('...and blue, with no actions this game, shown as such rather than blank', recapMsg?.msg.includes('без результативных действий'), true);
     check('...broadcast to the whole room (id: null)', recapMsg?.id, null);

@@ -95,6 +95,12 @@ function formatVipRemaining(expiresAt) {
 
 // Russian noun pluralization for the coin economy (!shop/!inventory/etc.) —
 // монетка (1, 21, 31...), монетки (2-4, 22-24...), монеток (0, 5-20, 25-30...).
+// The amount itself is grouped with 'ru-RU' thousands separators (requested
+// 2026-08-16 — some shop items price into the tens of thousands, e.g.
+// shopItems.js's smoke/fireworks/blackhole, hard to read as one long run of
+// digits). Uses a real non-breaking space (U+00A0, what 'ru-RU' actually
+// produces), not a plain ASCII one — matters if anything ever regex-matches
+// this output looking for a literal " ".
 function formatCoins(amount) {
     const mod10 = amount % 10;
     const mod100 = amount % 100;
@@ -102,7 +108,58 @@ function formatCoins(amount) {
     if (mod10 === 1 && mod100 !== 11) word = 'монетка';
     else if (mod10 >= 2 && mod10 <= 4 && !(mod100 >= 12 && mod100 <= 14)) word = 'монетки';
     else word = 'монеток';
-    return `${amount} ${word}`;
+    return `${amount.toLocaleString('ru-RU')} ${word}`;
+}
+
+// Medal for a top-3 leaderboard position, "#N" otherwise — same 🥇🥈🥉 set
+// formatTrophyLabel's own TROPHY_MEDALS already uses, reused here (not
+// re-defined) so a rank-1 medal always means the same thing everywhere it
+// appears. Requested 2026-08-16 for !tops' own leaderboard lines, which
+// used to be bare "#1"/"#2"/etc. for every position, top-3 included.
+function formatRankPrefix(rank) {
+    return TROPHY_MEDALS[rank] ?? `#${rank}`;
+}
+
+// BFF's rating (core/bff/rating.js's computeOrdinal) is openskill's own
+// ordinal = mu - 3*sigma, using the library's default constants (mu=25,
+// sigma=25/3) — so a brand new player's ordinal is EXACTLY 0, and it only
+// creeps into single digits over the first few games as sigma shrinks.
+// Mathematically correct (it's a deliberately pessimistic mu-minus-3-sigma
+// estimate, not a bug), but reads as broken next to the "starts around
+// 1000" ELO/chess-rating convention everyone actually expects (reported
+// live 2026-08-16: "у людей по 5-3 ело"). Purely a DISPLAY rescale — never
+// touches the stored mu/sigma, matchmaking (assignBalancedTeams runs on the
+// raw rating objects), or rating updates (updateRatingsAfterMatch likewise)
+// — just where an ordinal value is about to be shown to a player. Linear,
+// so a delta computed by subtracting two already-transformed values is
+// still exactly right (see matchFlow.js's own post-match delta message).
+const RATING_DISPLAY_BASELINE = 1000;
+const RATING_DISPLAY_SCALE = 20;
+function formatRatingDisplay(ordinal) {
+    return Math.round(RATING_DISPLAY_BASELINE + ordinal * RATING_DISPLAY_SCALE);
+}
+
+// Small progress indicator for a bounded counter (e.g. !up's daily-use cap
+// — requested 2026-08-16). Filled/hollow circles rather than the block
+// characters (▓░) this originally used — those rendered badly in HaxBall's
+// own chat font; ●/○ is the much more standard, widely-supported choice for
+// this exact kind of indicator. `max` doubles as the bar's width in
+// characters, so this is only meant for small, human-scale limits (single
+// digits) — not a general-purpose N-of-M renderer for arbitrary large M.
+function renderProgressBar(current, max) {
+    const filled = '●'.repeat(Math.max(0, Math.min(current, max)));
+    const empty = '○'.repeat(Math.max(0, max - current));
+    return `${filled}${empty} ${current}/${max}`;
+}
+
+// Win-streak display (requested 2026-08-16) — below 3 it's just the plain
+// "Текущая серия: N" wording both rooms already used; from 3 up it gets a
+// 🔥 escalation instead, since a 2-game "streak" barely means anything but a
+// long one is worth calling out visually.
+function formatStreakText(streak) {
+    if (streak < 3) return `Текущая серия: ${streak}`;
+    const fire = streak >= 10 ? '🔥🔥🔥' : streak >= 5 ? '🔥🔥' : '🔥';
+    return `${fire} Серия: ${streak}`;
 }
 
 const TROPHY_MEDALS = { 1: '🥇', 2: '🥈', 3: '🥉' };
@@ -171,6 +228,10 @@ module.exports = {
     formatBanRemaining,
     formatVipRemaining,
     formatCoins,
+    formatRatingDisplay,
+    formatRankPrefix,
+    renderProgressBar,
+    formatStreakText,
     formatTrophyLabel,
     parseEquippedTrophy,
     encodeLegacyTrophyKey,

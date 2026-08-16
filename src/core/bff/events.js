@@ -48,20 +48,28 @@ module.exports = function createBffEvents({
     fetchSummaryEmbed,
     fetchRecording,
     actionReportCountTeam,
+    formatStreakText,
 }) {
+    // Shared by buildRoomRecapText/buildMvpLine below — both need the same
+    // [striker, assist] pairs per team, computed once per match end rather
+    // than twice.
+    function bucketGoalsByTeam(game) {
+        const goalsByTeam = [[], []];
+        for (const g of game.goals) {
+            goalsByTeam[g.team - 1].push([g.striker, g.assist]);
+        }
+        return goalsByTeam;
+    }
+
     // In-room match recap (item #15) — previously the only per-player
     // goals/assists breakdown went to Discord (fetchSummaryEmbed); players
     // actually in the room never saw who did what beyond the bare score.
     // Reuses the exact same [player, goals, assists, CS] tuples report.js's
     // own Discord embed builds from (actionReportCountTeam), just rendered
     // as plain chat text instead of an embed field.
-    function buildRoomRecapText(game) {
-        const goals = [[], []];
-        for (const g of game.goals) {
-            goals[g.team - 1].push([g.striker, g.assist]);
-        }
+    function buildRoomRecapText(goalsByTeam) {
         const formatTeam = (team) => {
-            const actions = actionReportCountTeam(goals, team);
+            const actions = actionReportCountTeam(goalsByTeam, team);
             if (actions.length === 0) return 'без результативных действий';
             return actions.map((act) => {
                 const parts = [];
@@ -73,6 +81,47 @@ module.exports = function createBffEvents({
             }).join(', ');
         };
         return `🔴 ${formatTeam(Team.RED)}\n🔵 ${formatTeam(Team.BLUE)}`;
+    }
+
+    // MVP (requested 2026-08-16) — same goals+assists+CS weighting
+    // actionReportCountTeam's own internal sort already uses (see
+    // stats/playerStats.js), just picked as a max instead of used for
+    // display order. Ties broken toward the winning team — an MVP pick from
+    // the losing side reads oddly even when their raw tally happens to
+    // match. null when literally nobody recorded any action (shouldn't
+    // happen for a completed match, kept defensive rather than assumed).
+    function buildMvpLine(goalsByTeam) {
+        const allActions = [...actionReportCountTeam(goalsByTeam, Team.RED), ...actionReportCountTeam(goalsByTeam, Team.BLUE)];
+        if (allActions.length === 0) return null;
+        let best = null;
+        for (const act of allActions) {
+            const score = act[1] + act[2] + act[3];
+            const onWinningTeam = act[0].team === state.lastWinner;
+            if (best == null || score > best.score || (score === best.score && onWinningTeam && !best.onWinningTeam)) {
+                best = { name: act[0].name, score, onWinningTeam };
+            }
+        }
+        return `⭐ MVP: ${best.name}`;
+    }
+
+    // Consolidated post-match message (requested 2026-08-16: "приведи
+    // послематчевое сообщение к тому, как выглядит он на основном
+    // сервере... объедини вклады и послематчевую статистику") — win/streak
+    // line now matches the main room's own exact wording (see entry.js's
+    // endGame()), team recap (item #15) and MVP folded into the SAME
+    // message instead of separate ones. state.lastWinner/state.streak are
+    // already set by bffEntry.js's endGame(), which always runs before
+    // onGameStop (called from onTeamGoal/checkTime, both strictly before
+    // the room.stopGame() that triggers this).
+    function buildMatchEndText(game) {
+        const goalsByTeam = bucketGoalsByTeam(game);
+        const headerLine = state.lastWinner === Team.RED
+            ? `✨ Красная команда выиграла ${game.scores.red} - ${game.scores.blue} ! ${formatStreakText(state.streak)}`
+            : state.lastWinner === Team.BLUE
+                ? `✨ Синяя команда выиграла ${game.scores.blue} - ${game.scores.red} ! ${formatStreakText(state.streak)}`
+                : '💤 Ничья !'; // dead branch — draws are unreachable, see endGame()'s own comment; kept defensively
+        const mvpLine = buildMvpLine(goalsByTeam);
+        return `${headerLine}\n${buildRoomRecapText(goalsByTeam)}${mvpLine ? '\n' + mvpLine : ''}`;
     }
     async function onPlayerJoin(player) {
         authArray[player.id] = [player.auth, player.conn];
@@ -90,8 +139,16 @@ module.exports = function createBffEvents({
             `${player.name}** [${authArray[player.id][0]}] {${authArray[player.id][1]}}`
         );
         room.sendAnnouncement(`${player.name} [${player.auth}]`, null, infoColor, 'small', null);
+        // New vs returning wording (requested 2026-08-16) — a player_stats
+        // row only ever exists once they've actually finished a match here,
+        // so "no row yet" reliably means "never played", not "just hasn't
+        // been seen in a while" (there's no separate lastSeen/expiry to mix
+        // this up with).
+        const isReturning = (await db.getPlayerStats(player.auth)) != null;
         room.sendAnnouncement(
-            `👋 Добро пожаловать ${player.name} !\n Введите !help, чтобы увидеть список команд.`,
+            isReturning
+                ? `👋 С возвращением, ${player.name} !`
+                : `👋 Добро пожаловать ${player.name} !\n Введите !help, чтобы увидеть список команд.`,
             player.id,
             welcomeColor,
             'bold',
@@ -244,8 +301,10 @@ module.exports = function createBffEvents({
             // house, per matchFlow.js's own teamSize check).
             fetchSummaryEmbed(state.game);
             room.sendAnnouncement(
-                `🏁 Матч окончен: 🔴 ${state.game.scores.red} - ${state.game.scores.blue} 🔵\n${buildRoomRecapText(state.game)}`,
-                null, announcementColor, 'bold', HaxNotification.CHAT
+                buildMatchEndText(state.game),
+                null,
+                state.lastWinner === Team.RED ? redColor : state.lastWinner === Team.BLUE ? blueColor : announcementColor,
+                'bold', HaxNotification.CHAT
             );
             setTimeout((gameEnd) => { fetchRecording(gameEnd, discordBot); }, 500, state.game);
             await matchFlow.handlePlayersStop(null, outcome);

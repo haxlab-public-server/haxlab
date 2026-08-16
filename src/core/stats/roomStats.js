@@ -4,7 +4,41 @@
  * Mutable room state is reached through `state`, never captured by value:
  * those bindings are reassigned on every room event.
  */
-const { buildRankingString, buildAllRankingsText, buildClubRankingString } = require('./print');
+const { buildRankingString, buildAllRankingsText, buildClubRankingString, STAT_LABELS } = require('./print');
+
+// !tops categories a fresh top-5 entry is worth privately pinging a player
+// about (requested 2026-08-16) — same 6 columns !tops/voteBan.js's own
+// protected-top-3 already use (db/sqlite.js's LEADERBOARD_COLUMNS).
+const RANK_PING_CATEGORIES = ['games', 'wins', 'goals', 'assists', 'CS', 'playtime'];
+// Same 5-player quorum buildRankingString's own top-5 tables require before
+// showing anything real — a ping before that many players even have a stats
+// row would be meaningless ("congrats, you're #1 of 2").
+const RANK_PING_QUORUM = 5;
+
+// Compares each changed stat's rank BEFORE this match's increment against
+// AFTER, and privately pings the player the moment one of them crosses from
+// outside the top 5 into it. `before`/`after` are the same 6 columns, read
+// straight off the HaxStatistics object pre/post-increment — no separate
+// DB round trip needed for the "did it even change" check.
+async function announceTopFiveEntries(room, db, HaxNotification, achievementColor, player, before, after) {
+    for (const key of RANK_PING_CATEGORIES) {
+        if (before[key] === after[key]) continue;
+        const { rank: oldRank, total } = await db.getStatRank(key, before[key]);
+        if (total < RANK_PING_QUORUM || oldRank <= 5) continue;
+        const { rank: newRank } = await db.getStatRank(key, after[key]);
+        if (newRank > 5) continue;
+        room.sendAnnouncement(
+            `📈 Ты теперь в топ-5 по категории «${STAT_LABELS[key]}» !`,
+            player.id,
+            achievementColor,
+            'bold',
+            // MENTION (requested 2026-08-16), not the usual CHAT — a rare
+            // personal achievement deserves the louder ping, same reasoning
+            // as achievementColor's own distinct color.
+            HaxNotification.MENTION
+        );
+    }
+}
 
 module.exports = function createRoomStats({
     room,
@@ -17,6 +51,7 @@ module.exports = function createRoomStats({
     errorColor,
     infoColor,
     announcementColor,
+    achievementColor,
     teamSize,
     getAssistsPlayer,
     getCSPlayer,
@@ -72,15 +107,16 @@ module.exports = function createRoomStats({
         room.sendAnnouncement(
             `🎰 ${player.name} выиграл(а) VIP на ${VIP_LOTTERY_DAYS} ${pluralizeDays(VIP_LOTTERY_DAYS)} по счастливому билету за победу в матче 4х4 !`,
             null,
-            announcementColor,
+            achievementColor,
             'bold',
-            HaxNotification.CHAT
+            HaxNotification.MENTION
         );
     }
     async function updatePlayerStats(player, teamStats) {
         const auth = authArray[player.id][0];
         const pComp = getPlayerComp(player);
         const stats = (await db.getPlayerStats(auth)) ?? new HaxStatistics(player.name);
+        const before = { games: stats.games, wins: stats.wins, goals: stats.goals, assists: stats.assists, CS: stats.CS, playtime: stats.playtime };
         stats.games++;
         if (state.lastWinner == teamStats) stats.wins++;
         stats.winrate = ((100 * stats.wins) / (stats.games || 1)).toFixed(1) + `%`;
@@ -92,6 +128,18 @@ module.exports = function createRoomStats({
         stats.ownGoals += getOwnGoalsPlayer(pComp);
         stats.CS += CS;
         stats.playtime += getGametimePlayer(pComp);
+
+        // Must run BEFORE the save below: both getStatRank queries it makes
+        // (one for `before[key]`, one for `after[key]`) rely on this
+        // player's OWN row in the DB still holding the OLD value (or not
+        // existing at all yet) at query time — a stat only ever goes UP in
+        // a single match, so that old/absent row is guaranteed <= both
+        // thresholds and never miscounts itself as "another player ahead of
+        // me". Querying after the save would let a player's own freshly-
+        // written new value inflate their own "how many people are ahead of
+        // me" count by one.
+        await announceTopFiveEntries(room, db, HaxNotification, achievementColor, player, before, stats);
+
         await db.savePlayerStats(auth, stats);
 
         // Round-number games-played milestone (item #24) — deliberately
@@ -105,7 +153,7 @@ module.exports = function createRoomStats({
         if (GAMES_MILESTONES.includes(stats.games)) {
             room.sendAnnouncement(
                 `🎉 ${stats.playerName} сыграл(а) ${stats.games}-й матч в этой комнате !`,
-                null, announcementColor, 'bold', HaxNotification.CHAT
+                null, achievementColor, 'bold', HaxNotification.MENTION
             );
         }
 
@@ -157,7 +205,12 @@ module.exports = function createRoomStats({
     }
 
     async function printRankings(statKey, id = 0) {
-        const rankingString = await buildRankingString(db, getTimeStats, statKey);
+        // Item #2 (requested 2026-08-16) — only resolved for a real asking
+        // player (id=0 is the "no specific asker" sentinel default), so
+        // buildRankingString's own self-position line only ever shows up
+        // for someone who actually asked.
+        const auth = id !== 0 ? authArray[id]?.[0] : undefined;
+        const rankingString = await buildRankingString(db, getTimeStats, statKey, auth);
         if (rankingString == null) {
             if (id != 0) {
                 room.sendAnnouncement(

@@ -8,7 +8,33 @@
  * confirmed by reading their factory signatures before deciding to share
  * them rather than fork them too.
  */
-const { buildRankingString, buildRatingRankingString, buildTopLeaderLine, buildRatingLeaderLine, RANKING_STAT_KEYS } = require('../stats/print');
+const { buildRankingString, buildRatingRankingString, buildTopLeaderLine, buildRatingLeaderLine, RANKING_STAT_KEYS, STAT_LABELS } = require('../stats/print');
+
+// Same top-5-entry ping as the main room's own stats/roomStats.js (requested
+// 2026-08-16, see its own comment for the rank-crossing logic) — kept as an
+// exact duplicate rather than a shared import since this file already forks
+// stats/roomStats.js wholesale for BFF's own (club/lottery-free) stat flow.
+const RANK_PING_CATEGORIES = ['games', 'wins', 'goals', 'assists', 'CS', 'playtime'];
+const RANK_PING_QUORUM = 5;
+
+async function announceTopFiveEntries(room, db, HaxNotification, achievementColor, player, before, after) {
+    for (const key of RANK_PING_CATEGORIES) {
+        if (before[key] === after[key]) continue;
+        const { rank: oldRank, total } = await db.getStatRank(key, before[key]);
+        if (total < RANK_PING_QUORUM || oldRank <= 5) continue;
+        const { rank: newRank } = await db.getStatRank(key, after[key]);
+        if (newRank > 5) continue;
+        room.sendAnnouncement(
+            `📈 Ты теперь в топ-5 по категории «${STAT_LABELS[key]}» !`,
+            player.id,
+            achievementColor,
+            'bold',
+            // MENTION (requested 2026-08-16) — see stats/roomStats.js's own
+            // announceTopFiveEntries for why.
+            HaxNotification.MENTION
+        );
+    }
+}
 
 module.exports = function createBffRoomStats({
     room,
@@ -20,6 +46,7 @@ module.exports = function createBffRoomStats({
     HaxNotification,
     errorColor,
     announcementColor,
+    achievementColor,
     teamSize,
     getAssistsPlayer,
     getCSPlayer,
@@ -35,6 +62,7 @@ module.exports = function createBffRoomStats({
         const auth = authArray[player.id][0];
         const pComp = getPlayerComp(player);
         const stats = (await db.getPlayerStats(auth)) ?? new HaxStatistics(player.name);
+        const before = { games: stats.games, wins: stats.wins, goals: stats.goals, assists: stats.assists, CS: stats.CS, playtime: stats.playtime };
         stats.games++;
         if (state.lastWinner == teamStats) stats.wins++;
         stats.winrate = ((100 * stats.wins) / (stats.games || 1)).toFixed(1) + `%`;
@@ -43,6 +71,11 @@ module.exports = function createBffRoomStats({
         stats.ownGoals += getOwnGoalsPlayer(pComp);
         stats.CS += getCSPlayer(pComp);
         stats.playtime += getGametimePlayer(pComp);
+
+        // Must run BEFORE the save — see stats/roomStats.js's own
+        // updatePlayerStats for why (self-row pollution otherwise).
+        await announceTopFiveEntries(room, db, HaxNotification, achievementColor, player, before, stats);
+
         await db.savePlayerStats(auth, stats);
 
         // Round-number games-played milestone (item #24) — same narrow
@@ -51,7 +84,7 @@ module.exports = function createBffRoomStats({
         if (GAMES_MILESTONES.includes(stats.games)) {
             room.sendAnnouncement(
                 `🎉 ${stats.playerName} сыграл(а) ${stats.games}-й матч в этой комнате !`,
-                null, announcementColor, 'bold', HaxNotification.CHAT
+                null, achievementColor, 'bold', HaxNotification.MENTION
             );
         }
     }
@@ -78,9 +111,12 @@ module.exports = function createBffRoomStats({
     }
 
     async function printRankings(statKey, id = 0) {
+        // Item #2 (requested 2026-08-16) — see stats/roomStats.js's own
+        // identical comment.
+        const auth = id !== 0 ? authArray[id]?.[0] : undefined;
         const rankingString = statKey === 'rating'
-            ? await buildRatingRankingString(db)
-            : await buildRankingString(db, getTimeStats, statKey);
+            ? await buildRatingRankingString(db, auth)
+            : await buildRankingString(db, getTimeStats, statKey, auth);
         if (rankingString == null) {
             if (id != 0) {
                 room.sendAnnouncement('Недостаточно игр сыграно !', id, errorColor, 'bold', HaxNotification.CHAT);

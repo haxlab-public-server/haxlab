@@ -69,6 +69,7 @@ module.exports = function createCommands({
     help: {
         aliases: ['commands', 'рудз'],
         roles: Role.PLAYER,
+        category: 'misc',
         desc: `
 	Эта команда показывает все доступные вам команды. Она также может показать описание конкретной команды.
 Например: !help bb покажет описание команды bb.`,
@@ -77,6 +78,7 @@ module.exports = function createCommands({
     afk: {
         aliases: ['афк', 'фал'],
         roles: Role.PLAYER,
+        category: 'misc',
         desc: `
         Эта команда делает вас AFK.
     Она имеет определенные ограничения: 1 минута минимального AFK времени, 15 минут максимальное (25 для VIP) и 10 минут перезарядки.
@@ -87,6 +89,7 @@ module.exports = function createCommands({
     afks: {
         aliases: ['afklist', 'фалы'],
         roles: Role.PLAYER,
+        category: 'misc',
         desc: `
         Эта команда показывает всех игроков, которые находятся AFK.`,
         function: afkListCommand,
@@ -94,6 +97,7 @@ module.exports = function createCommands({
     silence: {
         aliases: ['ignore'],
         roles: Role.PLAYER,
+        category: 'misc',
         desc: `
         Эта команда заглушает игрока ТОЛЬКО ДЛЯ ВАС — вы больше не будете видеть его сообщения в чате, но все остальные продолжат их видеть как обычно. Повторный ввод команды на того же игрока снимает заглушение.
     Нельзя заглушить самого себя, а также администраторов и модераторов.
@@ -105,6 +109,7 @@ module.exports = function createCommands({
     bb: {
         aliases: ['bye', 'gn', 'cya', 'ии'],
         roles: Role.PLAYER,
+        category: 'misc',
         desc: `
 	Эта команда мгновенно выводит вас из комнаты (рекомендуется использовать).`,
         function: leaveCommand,
@@ -112,6 +117,7 @@ module.exports = function createCommands({
     me: {
         aliases: ['stat', 'stats', 'ы', 's'],
         roles: Role.PLAYER,
+        category: 'stats',
         desc: `
         Эта команда показывает ваши глобальные статистики в комнате.`,
         function: globalStatsCommand,
@@ -119,6 +125,7 @@ module.exports = function createCommands({
     rename: {
         aliases: [],
         roles: Role.PLAYER,
+        category: 'stats',
         desc: `
         Эта команда позволяет вам переименовать себя для таблицы лидеров.`,
         function: renameCommand,
@@ -126,6 +133,7 @@ module.exports = function createCommands({
     customcolors: {
         aliases: [],
         roles: Role.PLAYER,
+        category: 'misc',
         desc: `
         Эта команда переключает, видите ли ВЫ кастомные цвета клубов в чате. Не влияет на то, что видят другие игроки.`,
         function: customColorsCommand,
@@ -133,6 +141,7 @@ module.exports = function createCommands({
     vipcolor: {
         aliases: [],
         roles: Role.VIP,
+        category: 'vip',
         desc: `
         Эта команда позволяет вам изменить цвет вашего VIP-префикса в чате.
     Она принимает 1 аргумент (опционально):
@@ -143,6 +152,7 @@ module.exports = function createCommands({
     viphide: {
         aliases: [],
         roles: Role.VIP,
+        category: 'vip',
         desc: `
         Эта команда скрывает (или снова показывает) ваш VIP-префикс в чате. Права доступа не меняются, только видимость.`,
         function: vipHideCommand,
@@ -150,6 +160,7 @@ module.exports = function createCommands({
     viphelp: {
         aliases: [],
         roles: Role.VIP,
+        category: 'vip',
         desc: `
         Эта команда показывает все команды VIP и как ими пользоваться.`,
         function: vipHelpCommand,
@@ -157,6 +168,7 @@ module.exports = function createCommands({
     up: {
         aliases: [],
         roles: Role.VIP,
+        category: 'vip',
         desc: `
         Эта команда позволяет вам стать капитаном раньше остальных зрителей, когда в следующий раз потребуется выбрать капитана.
     Недоступна, пока капитаны прямо сейчас выбирают игроков. Только 1 VIP может занять очередь одновременно — остальные ждут следующей итерации.
@@ -166,6 +178,7 @@ module.exports = function createCommands({
     discord: {
         aliases: [],
         roles: Role.PLAYER,
+        category: 'misc',
         desc: `
         Эта команда связывает ваш аккаунт Discord, чтобы "!stats" в Discord показывал ваши статистики без необходимости вводить ваше имя. За первую привязку начисляется бонус 100 монет.
     Она требует 1 аргумент:
@@ -176,6 +189,7 @@ module.exports = function createCommands({
     tops: {
         aliases: [],
         roles: Role.PLAYER,
+        category: 'stats',
         desc: `
         Эта команда показывает таблицы лидеров (топ 5 игроков) комнаты.
     Без аргумента показывает все таблицы сразу: игры, победы, голы, ассисты, сухие матчи, время игры и клубы.
@@ -188,6 +202,7 @@ module.exports = function createCommands({
     x: {
         aliases: ['ч'],
         roles: Role.PLAYER,
+        category: 'chat',
         desc: `
         Эта команда отправляет сообщение только вашей команде (работает так же, как обычный командный чат — набрать "t <сообщение>", "т <сообщение>" или "ч <сообщение>" без "!").
     Пример: !x привет отправит "привет" только вашей команде.`,
@@ -196,6 +211,7 @@ module.exports = function createCommands({
     cc: {
         aliases: ['сс'],
         roles: Role.PLAYER,
+        category: 'chat',
         desc: `
         Эта команда отправляет сообщение всем участникам вашего клуба, которые сейчас на сервере (работает так же, как !x, только для клуба вместо команды).
     Пример: !cc привет отправит "привет" всем участникам вашего клуба онлайн.`,
@@ -204,6 +220,7 @@ module.exports = function createCommands({
     shop: {
         aliases: [],
         roles: Role.PLAYER,
+        category: 'shop',
         desc: `
         Без аргументов показывает список категорий и ваш баланс монеток.
     Она принимает 1 аргумент (опционально):
@@ -215,6 +232,7 @@ module.exports = function createCommands({
     inventory: {
         aliases: ['inv'],
         roles: Role.PLAYER,
+        category: 'shop',
         desc: `
         Эта команда показывает купленные вами аксессуары.`,
         function: inventoryCommand,
@@ -222,6 +240,7 @@ module.exports = function createCommands({
     balance: {
         aliases: ['bal', 'coins'],
         roles: Role.PLAYER,
+        category: 'shop',
         desc: `
         Эта команда показывает ваш баланс монеток.`,
         function: balanceCommand,
@@ -229,6 +248,7 @@ module.exports = function createCommands({
     equip: {
         aliases: [],
         roles: Role.PLAYER,
+        category: 'shop',
         desc: `
         Эта команда надевает (или заменяет) купленный аксессуар. Повторный ввод той же команды на уже надетый аксессуар снимает его.
     Она принимает 1 аргумент:
@@ -239,6 +259,7 @@ module.exports = function createCommands({
     training: {
         aliases: ['tr'],
         roles: Role.ADMIN_TEMP,
+        category: 'arena',
         desc: `
         Эта команда загружает классическую тренировочную арену.`,
         function: stadiumCommand,
@@ -246,6 +267,7 @@ module.exports = function createCommands({
     classic: {
         aliases: ['cl'],
         roles: Role.ADMIN_TEMP,
+        category: 'arena',
         desc: `
         Эта команда загружает классическую арену.`,
         function: stadiumCommand,
@@ -253,6 +275,7 @@ module.exports = function createCommands({
     big: {
         aliases: ['bg'],
         roles: Role.ADMIN_TEMP,
+        category: 'arena',
         desc: `
         Эта команда загружает большую арену.`,
         function: stadiumCommand,
@@ -260,6 +283,7 @@ module.exports = function createCommands({
     rr: {
         aliases: [],
         roles: Role.ADMIN_TEMP,
+        category: 'arena',
         desc: `
     Эта команда перезапускает игру.`,
         function: restartCommand,
@@ -267,6 +291,7 @@ module.exports = function createCommands({
     rrs: {
         aliases: [],
         roles: Role.ADMIN_TEMP,
+        category: 'arena',
         desc: `
     Эта команда меняет команды местами и перезапускает игру.`,
         function: restartSwapCommand,
@@ -274,6 +299,7 @@ module.exports = function createCommands({
     swap: {
         aliases: ['s'],
         roles: Role.ADMIN_TEMP,
+        category: 'arena',
         desc: `
     Эта команда меняет команды местами, когда игра остановлена.`,
         function: swapCommand,
@@ -281,6 +307,7 @@ module.exports = function createCommands({
     kickred: {
         aliases: ['kickr'],
         roles: Role.ADMIN_TEMP,
+        category: 'moderation',
         desc: `
     Эта команда выгоняет всех игроков из красной команды, включая игрока, который ввел команду. Вы можете указать причину выгона в качестве аргумента.`,
         function: kickTeamCommand,
@@ -288,6 +315,7 @@ module.exports = function createCommands({
     kickblue: {
         aliases: ['kickb'],
         roles: Role.ADMIN_TEMP,
+        category: 'moderation',
         desc: `
     Эта команда выгоняет всех игроков из синей команды, включая игрока, который ввел команду. Вы можете указать причину выгона в качестве аргумента.`,
         function: kickTeamCommand,
@@ -295,6 +323,7 @@ module.exports = function createCommands({
     kickspec: {
         aliases: ['kicks'],
         roles: Role.ADMIN_TEMP,
+        category: 'moderation',
         desc: `
     Эта команда выгоняет всех игроков из команды наблюдателей, включая игрока, который ввел команду. Вы можете указать причину выгона в качестве аргумента.`,
         function: kickTeamCommand,
@@ -302,6 +331,7 @@ module.exports = function createCommands({
     mute: {
         aliases: ['m'],
         roles: Role.ADMIN_TEMP,
+        category: 'moderation',
         desc: `
         Эта команда позволяет заглушить игрока. Он не сможет говорить в течение определенного времени, и может быть разглушен в любое время администраторами.
     Она принимает 2 аргумента:
@@ -313,6 +343,7 @@ module.exports = function createCommands({
     unmute: {
         aliases: ['um'],
         roles: Role.ADMIN_TEMP,
+        category: 'moderation',
         desc: `
         Эта команда позволяет разглушить игрока.
     Она принимает 1 аргумент:
@@ -326,6 +357,7 @@ module.exports = function createCommands({
     mutes: {
         aliases: [],
         roles: Role.ADMIN_TEMP,
+        category: 'moderation',
         desc: `
         Эта команда показывает список заглушенных игроков.`,
         function: muteListCommand,
@@ -333,6 +365,7 @@ module.exports = function createCommands({
     hide: {
         aliases: [],
         roles: Role.ADMIN_TEMP,
+        category: 'moderation',
         desc: `
         Эта команда скрывает (или снова показывает) ваш бейдж администратора и префикс в чате. Права доступа не меняются, только видимость.`,
         function: hideCommand,
@@ -340,6 +373,7 @@ module.exports = function createCommands({
     clearbans: {
         aliases: [],
         roles: Role.MASTER,
+        category: 'moderation',
         desc: `
 	Эта команда разбанивает всех игроков, которые были забанены.`,
         function: clearbansCommand,
@@ -347,6 +381,7 @@ module.exports = function createCommands({
     bans: {
         aliases: ['banlist'],
         roles: Role.ADMIN_TEMP,
+        category: 'moderation',
         desc: `
     Эта команда показывает всех игроков, которые были забанены, и их IDs.`,
         function: banListCommand,
@@ -354,6 +389,7 @@ module.exports = function createCommands({
     admins: {
         aliases: ['adminlist'],
         roles: Role.MASTER,
+        category: 'moderation',
         desc: `
     Эта команда показывает всех игроков, которые являются постоянными администраторами.`,
         function: adminListCommand,
@@ -361,6 +397,7 @@ module.exports = function createCommands({
     setadmin: {
         aliases: ['admin'],
         roles: Role.MASTER,
+        category: 'moderation',
         desc: `
     Эта команда позволяет установить кого-то в качестве администратора. Он сможет подключаться как администратор и может быть удален в любое время мастерами.
     Она принимает 1 аргумент:
@@ -371,6 +408,7 @@ module.exports = function createCommands({
     removeadmin: {
         aliases: ['unadmin'],
         roles: Role.MASTER,
+        category: 'moderation',
         desc: `
 	Эта команда позволяет удалить кого-то из администраторов.
     Она принимает 1 аргумент:
@@ -384,6 +422,7 @@ module.exports = function createCommands({
     setvip: {
         aliases: [],
         roles: Role.MASTER,
+        category: 'vip',
         desc: `
     Эта команда делает кого-то VIP. Это не дает никаких прав — только префикс "VIP" в чате.
     Она принимает от 1 до 2 аргументов:
@@ -397,6 +436,7 @@ module.exports = function createCommands({
     removevip: {
         aliases: [],
         roles: Role.MASTER,
+        category: 'vip',
         desc: `
 	Эта команда убирает у кого-то VIP.
     Она принимает 1 аргумент:
@@ -413,6 +453,7 @@ module.exports = function createCommands({
     vips: {
         aliases: ['viplist'],
         roles: Role.MASTER,
+        category: 'vip',
         desc: `
     Эта команда показывает всех игроков, у которых есть VIP.`,
         function: vipListCommand,
@@ -420,6 +461,7 @@ module.exports = function createCommands({
     banauth: {
         aliases: [],
         roles: Role.MASTER,
+        category: 'moderation',
         desc: `
     Эта команда банит по auth — работает даже если игрок сейчас не в комнате, и переживает переподключение под тем же auth (в отличие от обычного бана).
     Она принимает от 2 до 3 аргументов:
@@ -432,6 +474,7 @@ module.exports = function createCommands({
     ban: {
         aliases: [],
         roles: Role.ADMIN_TEMP,
+        category: 'moderation',
         desc: `
     То же самое, что '!banauth', но доступно администраторам, а не только владельцам.
     Она принимает от 2 до 3 аргументов:
@@ -444,6 +487,7 @@ module.exports = function createCommands({
     unbanauth: {
         aliases: [],
         roles: Role.MASTER,
+        category: 'moderation',
         desc: `
     Эта команда снимает бан по auth, выданный командой '!banauth'.
     Она принимает 1 аргумент:
@@ -453,6 +497,7 @@ module.exports = function createCommands({
     authbans: {
         aliases: [],
         roles: Role.MASTER,
+        category: 'moderation',
         desc: `
     Эта команда показывает список игроков, забаненных по auth командой '!banauth'.`,
         function: authBanListCommand,
@@ -460,6 +505,7 @@ module.exports = function createCommands({
     restrictcmd: {
         aliases: [],
         roles: Role.ADMIN_TEMP,
+        category: 'moderation',
         desc: `
     Эта команда запрещает игроку использовать !voteban или !report — на время или навсегда. Работает по auth (переживает выход/переподключение), даже если игрок сейчас не в комнате.
     Она принимает от 3 до 4 аргументов:
@@ -474,6 +520,7 @@ module.exports = function createCommands({
     unrestrictcmd: {
         aliases: [],
         roles: Role.ADMIN_TEMP,
+        category: 'moderation',
         desc: `
     Эта команда снимает запрет, выданный командой '!restrictcmd'.
     Она принимает 2 аргумента:
@@ -485,6 +532,7 @@ module.exports = function createCommands({
     cmdrestrictions: {
         aliases: [],
         roles: Role.ADMIN_TEMP,
+        category: 'moderation',
         desc: `
     Эта команда показывает список всех текущих запретов, выданных командой '!restrictcmd'.`,
         function: cmdRestrictionsCommand,
@@ -492,6 +540,7 @@ module.exports = function createCommands({
     players: {
         aliases: [],
         roles: Role.MASTER,
+        category: 'moderation',
         desc: `
     Эта команда показывает список всех игроков в комнате вместе с их auth — удобно, чтобы затем забанить кого-то по auth командой '!banauth'.`,
         function: playersListCommand,
@@ -499,6 +548,7 @@ module.exports = function createCommands({
     password: {
         aliases: ['pw'],
         roles: Role.MASTER,
+        category: 'arena',
         desc: `
         Эта команда позволяет добавить пароль к комнате.
     Она принимает 1 аргумент:
@@ -510,6 +560,7 @@ module.exports = function createCommands({
     addcoins: {
         aliases: [],
         roles: Role.MASTER,
+        category: 'shop',
         desc: `
     Тестовая команда: начисляет (или списывает) монетки игроку напрямую.
     Она принимает 2 аргумента:
@@ -521,6 +572,7 @@ module.exports = function createCommands({
     gift: {
         aliases: ['подарить'],
         roles: Role.ADMIN_TEMP,
+        category: 'shop',
         desc: `
         Эта команда дарит игроку монеты — они списываются с ВАШЕГО баланса, а не создаются из ниоткуда (в отличие от !addcoins).
     Она принимает 2 аргумента:
@@ -532,6 +584,7 @@ module.exports = function createCommands({
     club: {
         aliases: [],
         roles: Role.PLAYER,
+        category: 'club',
         desc: `
         Команда клуба — принимает подкоманду первым аргументом.
     Введите "!club help" для полного списка подкоманд (create/invite/join/leave/kick/assistant/disband/color/colors/emoji/slots).
@@ -541,6 +594,7 @@ module.exports = function createCommands({
     trophy: {
         aliases: [],
         roles: Role.PLAYER,
+        category: 'stats',
         desc: `
         Эта команда показывает ваши трофеи (за топ-3 место в статистике) и позволяет экипировать один из них в качестве префикса в чате.
     Она принимает до 2 аргументов (оба опциональны):
@@ -553,6 +607,7 @@ module.exports = function createCommands({
     votepause: {
         aliases: ['голос'],
         roles: Role.PLAYER,
+        category: 'votes',
         desc: `
         Эта команда позволяет игрокам на поле начать голосование команды за паузу.
     Доступно только в полных матчах 4х4 (с капитан-модом) и только на кикоффе (пока мяч не тронут).
@@ -564,6 +619,7 @@ module.exports = function createCommands({
     voteban: {
         aliases: [],
         roles: Role.PLAYER,
+        category: 'votes',
         desc: `
         Эта команда начинает голосование ВСЕЙ комнаты за временный бан игрока (60 минут).
     Голосовать могут только игроки, сыгравшие от 10 игр — это же требование и для того, кто начинает голосование.
@@ -578,6 +634,7 @@ module.exports = function createCommands({
     report: {
         aliases: ['админ'],
         roles: Role.PLAYER,
+        category: 'misc',
         desc: `
         Эта команда зовет администрацию в комнату — объявление увидят все, а в Discord придет пинг @here в специальном канале.
     Доступна раз в минуту (на игрока).
@@ -587,6 +644,7 @@ module.exports = function createCommands({
     minigames: {
         aliases: ['mg', 'мини'],
         roles: Role.PLAYER,
+        category: 'minigames',
         desc: `
         Эта команда вызывает другого зрителя на мини-игру на ставку монет. Доступно только зрителям (не участвующим в матче).
     Она принимает до 3 аргументов:
@@ -603,6 +661,7 @@ module.exports = function createCommands({
     play: {
         aliases: [],
         roles: Role.PLAYER,
+        category: 'minigames',
         desc: `
         Эта команда принимает вызов на мини-игру, полученный командой "!minigames".
     Также, "!play #<id>" (где id — любой игрок, УЖЕ сидящий за открытым покерным столом) подсаживает вас за этот стол со следующей раздачи, даже если вас никто не вызывал лично.`,
@@ -611,6 +670,7 @@ module.exports = function createCommands({
     hit: {
         aliases: [],
         roles: Role.PLAYER,
+        category: 'minigames',
         desc: `
         В активной игре блэкджек (!minigames blackjack/bj) берет еще одну карту.`,
         function: hitCommand,
@@ -618,6 +678,7 @@ module.exports = function createCommands({
     stand: {
         aliases: [],
         roles: Role.PLAYER,
+        category: 'minigames',
         desc: `
         В активной игре блэкджек (!minigames blackjack/bj) останавливается с текущей рукой.`,
         function: standCommand,
@@ -628,6 +689,7 @@ module.exports = function createCommands({
     bet: {
         aliases: [],
         roles: Role.PLAYER,
+        category: 'minigames',
         desc: `
         В активной игре покер (!minigames poker/покер) ставит монеты в этом раунде торгов.
     Она принимает 1 аргумент:
@@ -638,6 +700,7 @@ module.exports = function createCommands({
     call: {
         aliases: ['колл'],
         roles: Role.PLAYER,
+        category: 'minigames',
         desc: `
         В активной игре покер (!minigames poker/покер) уравнивает текущую ставку за столом.`,
         function: callCommand,
@@ -645,6 +708,7 @@ module.exports = function createCommands({
     check: {
         aliases: ['чек'],
         roles: Role.PLAYER,
+        category: 'minigames',
         desc: `
         В активной игре покер (!minigames poker/покер) пропускает ход без ставки (доступно только если никто ещё не ставил в этом раунде).`,
         function: checkCommand,
@@ -652,6 +716,7 @@ module.exports = function createCommands({
     pass: {
         aliases: ['фолд', 'fold'],
         roles: Role.PLAYER,
+        category: 'minigames',
         desc: `
         В активной игре покер (!minigames poker/покер) сбрасывает карты и выходит из текущей раздачи.`,
         function: passCommand,
@@ -659,6 +724,7 @@ module.exports = function createCommands({
     leavetable: {
         aliases: ['встать'],
         roles: Role.PLAYER,
+        category: 'minigames',
         desc: `
         Встаёт из-за покерного стола, оставаясь зрителем — в отличие от "!pass", убирает вас со стола насовсем, а не только из текущей раздачи.
     Если вы были в раздаче — ваша ставка в ней возвращается.`,
@@ -667,6 +733,7 @@ module.exports = function createCommands({
     table: {
         aliases: ['стол'],
         roles: Role.PLAYER,
+        category: 'minigames',
         desc: `
         Показывает, кто сидит за покерным столом (и кто подсядет со следующей раздачи).
     Без аргумента — ваш собственный стол. С аргументом #<id> — стол, за которым сидит игрок с этим id (удобно перед "!play #<id>").`,

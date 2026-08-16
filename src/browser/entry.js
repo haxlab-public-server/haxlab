@@ -69,6 +69,7 @@ const {
     warningColor,
     errorColor,
     successColor,
+    achievementColor,
     defaultColor,
     masterChatColor,
     adminChatColor,
@@ -103,6 +104,8 @@ const {
     formatBanRemaining,
     formatVipRemaining,
     formatCoins,
+    renderProgressBar,
+    formatStreakText,
     formatTrophyLabel,
     encodeLegacyTrophyKey,
     resolveTrophyRank,
@@ -524,15 +527,22 @@ const hiddenAdminsSet = new Set();
 
 // !viphide toggle (VIP only) — same shape as hiddenAdminsSet above, but
 // simpler: VIP has no native room badge to also suppress, only the chat
-// prefix events/activity.js's onPlayerChat already checks.
-const hiddenVipSet = new Set();
+// prefix events/activity.js's onPlayerChat already checks. Persisted
+// (requested 2026-08-16: survive a restart) and keyed by AUTH — same
+// in-memory-cache reasoning as hiddenCustomColorsSet above, and same
+// "player.id resets on reconnect" fix !up's cooldown already needed.
+const hiddenVipSet = new Set(await db.getAllHiddenVipAuths());
 
 // !silence #<id> — per-VIEWER chat filter: viewerAuth -> Set<targetAuth> of
-// players that viewer no longer sees chat from. Session-only like AFKSet
-// above, not persisted — nobody else's view is affected, enforced in
-// events/activity.js's onPlayerChat by skipping delivery to viewers who
+// players that viewer no longer sees chat from. Persisted (requested
+// 2026-08-16: survive a restart) — nobody else's view is affected, enforced
+// in events/activity.js's onPlayerChat by skipping delivery to viewers who
 // silenced this speaker, never by blocking the message itself.
 const silencedAuths = new Map();
+for (const { viewerAuth, targetAuth } of await db.getAllSilencedPairs()) {
+    if (!silencedAuths.has(viewerAuth)) silencedAuths.set(viewerAuth, new Set());
+    silencedAuths.get(viewerAuth).add(targetAuth);
+}
 
 const muteArray = new MuteList();
 const muteDuration = 5;
@@ -814,23 +824,33 @@ async function endGame(winner) {
     // surplus to hand off to a captain, not defensively here before that's
     // known. It's also called from balanceTeams()'s ordinary-growth branch
     // for a full house reached via joins DURING an ongoing match.
+    // Real bug fixed here (found 2026-08-16 while porting this same streak
+    // display to BFF): the streak counter only ever incremented on a RED
+    // win and reset to a flat 1 on every BLUE win, regardless of whether
+    // the SAME team had actually just won again — so a blue team on a real
+    // 3-win streak displayed "Текущая серия: 1" for every one of those
+    // wins, and a red win immediately after ANY blue win kept incrementing
+    // from blue's stale count instead of restarting at 1. Captured BEFORE
+    // state.lastWinner is overwritten below, so it still holds who won
+    // last time.
+    const previousWinner = state.lastWinner;
     const scores = room.getScores();
     state.game.scores = scores;
     state.lastWinner = winner;
     state.endGameVariable = true;
     if (winner == Team.RED) {
-        state.streak++;
+        state.streak = previousWinner === Team.RED ? state.streak + 1 : 1;
         room.sendAnnouncement(
-            `✨ Красная команда выиграла ${scores.red} - ${scores.blue} ! Текущая серия: ${state.streak}`,
+            `✨ Красная команда выиграла ${scores.red} - ${scores.blue} ! ${formatStreakText(state.streak)}`,
             null,
             redColor,
             'bold',
             HaxNotification.CHAT
         );
     } else if (winner == Team.BLUE) {
-        state.streak = 1;
+        state.streak = previousWinner === Team.BLUE ? state.streak + 1 : 1;
         room.sendAnnouncement(
-            `✨ Синяя команда выиграла ${scores.blue} - ${scores.red} ! Текущая серия: ${state.streak}`,
+            `✨ Синяя команда выиграла ${scores.blue} - ${scores.red} ! ${formatStreakText(state.streak)}`,
             null,
             blueColor,
             'bold',
@@ -1166,6 +1186,7 @@ const {
     errorColor,
     infoColor,
     announcementColor,
+    achievementColor,
     teamSize,
     getAssistsPlayer,
     getCSPlayer,
@@ -1309,6 +1330,7 @@ const {
     formatCoins,
     discordBot,
     formatBanRemaining,
+    renderProgressBar,
 });
 
 /* PAUSE VOTE */
@@ -1346,6 +1368,7 @@ const { votebanCommand, handleVoteBanMessage } = createVoteBan({
     announcementColor,
     discordBot,
     formatBanRemaining,
+    renderProgressBar,
 });
 
 /* CLUBS */

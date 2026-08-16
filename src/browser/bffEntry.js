@@ -43,6 +43,7 @@ const {
     warningColor,
     errorColor,
     successColor,
+    achievementColor,
     privateMessageColor,
     masterChatColor,
     adminChatColor,
@@ -70,6 +71,8 @@ const {
     getSecondsReport,
     getTimeEmbed,
     findFirstNumberCharString,
+    renderProgressBar,
+    formatStreakText,
 } = require('../core/utils');
 const { getIdReport, getRecordingName, fetchRecording } = require('../core/reports');
 const wrapEventHandlers = require('../core/safeEventHandlers');
@@ -188,6 +191,14 @@ state.adminList = (await db.getAdmins()).map((a) => [a.auth, a.playerName]);
 state.vipList = (await db.getVips()).map((v) => [v.auth, v.playerName, v.expiresAt]);
 const masterList = await db.getMasters();
 
+// !vipcolor (requested 2026-08-16 — parity with the main room's own
+// entry.js) — own file, own independent color map (same per-room-
+// independent shape as hiddenVipSet above), auth -> color.
+state.vipColors = (await db.getAllVipColors()).reduce((acc, row) => {
+    acc[row.auth] = row.color;
+    return acc;
+}, {});
+
 /* GAME */
 // Not displayed anywhere in BFF (no possession%/action-zone% report line —
 // see core/bff/report.js's own doc comment), but stats/global.js's
@@ -211,10 +222,16 @@ state.checkTimeVariable = false;
 state.checkStadiumVariable = true;
 state.endGameVariable = false;
 state.goldenGoal = false;
+// Win streak (item requested 2026-08-16, matching the main room's own
+// "Текущая серия" — see entry.js's endGame()). Tracks whichever team most
+// recently won; reset to 1 whenever the OTHER team interrupts it.
+state.streak = 0;
 const hiddenAdminsSet = new Set();
 // !viphide toggle (VIP only) — same shape as hiddenAdminsSet above, just
 // for the VIP chat prefix specifically (no native badge to also suppress).
-const hiddenVipSet = new Set();
+// Persisted (requested 2026-08-16: survive a restart), keyed by AUTH — own
+// file, own independent preference from the main room's own hiddenVipSet.
+const hiddenVipSet = new Set(await db.getAllHiddenVipAuths());
 const AFKSet = new Map();
 
 const emptyPlayer = { id: 0 };
@@ -415,7 +432,7 @@ const { getGoalsPlayer, getAssistsPlayer, getOwnGoalsPlayer, getCSPlayer, getGam
 /* BFF ROOM STATS (trimmed fork — see core/bff/roomStats.js) */
 const createBffRoomStats = require('../core/bff/roomStats');
 const bffRoomStats = createBffRoomStats({
-    room, state, Team, authArray, db, HaxStatistics, HaxNotification, errorColor, announcementColor, teamSize,
+    room, state, Team, authArray, db, HaxStatistics, HaxNotification, errorColor, announcementColor, achievementColor, teamSize,
     getAssistsPlayer, getCSPlayer, getGametimePlayer, getGoalsPlayer, getOwnGoalsPlayer,
     getPlayerComp, getTimeStats,
 });
@@ -443,18 +460,30 @@ const { fetchSummaryEmbed } = createBffReport({
  * via checkTime, but left intact — core/bff/rating.js's 'draw' outcome and
  * matchFlow.js's outcome derivation both still technically support it,
  * kept as harmless defensive code rather than ripped out for a case that
- * simply never triggers anymore. */
+ * simply never triggers anymore.
+ *
+ * No room.sendAnnouncement calls here (requested 2026-08-16, "приведи
+ * послематчевое сообщение к тому, как выглядит он на основном сервере... и
+ * объедини вклады и послематчевую статистику") — the win/streak line, team
+ * recap, and MVP used to be 2-3 separate messages; now built as ONE by
+ * core/bff/events.js's onGameStop, which fires shortly after this (via
+ * room.stopGame()) and reads state.lastWinner/state.streak/state.game.scores,
+ * all already set here by the time it runs. This function's only remaining
+ * job is updating that state — same "streak tracks whichever team most
+ * recently won, resets to 1 when interrupted" fix as entry.js's own
+ * endGame() (see its comment for the exact bug this replaced). */
 async function endGame(winner) {
+    const previousWinner = state.lastWinner;
     const scores = room.getScores();
     state.game.scores = scores;
     state.lastWinner = winner;
     state.endGameVariable = true;
     if (winner == Team.RED) {
-        room.sendAnnouncement(`✨ Красная команда выиграла ${scores.red} - ${scores.blue} !`, null, redColor, 'bold', HaxNotification.CHAT);
+        state.streak = previousWinner === Team.RED ? state.streak + 1 : 1;
     } else if (winner == Team.BLUE) {
-        room.sendAnnouncement(`✨ Синяя команда выиграла ${scores.blue} - ${scores.red} !`, null, blueColor, 'bold', HaxNotification.CHAT);
+        state.streak = previousWinner === Team.BLUE ? state.streak + 1 : 1;
     } else {
-        room.sendAnnouncement('💤 Ничья !', null, announcementColor, 'bold', HaxNotification.CHAT);
+        state.streak = 0;
     }
 }
 
@@ -493,8 +522,10 @@ const matchFlow = createBffMatchFlow({
     getAuth: (p) => authArray[p.id][0],
     getRating: (auth) => db.getRating(auth),
     saveRating: (auth, playerName, mu, sigma) => db.saveRating(auth, playerName, mu, sigma),
+    saveRatingHistory: (auth, delta) => db.saveRatingHistory(auth, delta),
     applyLimitsForSize, applyTrainingMap, teamSize, reassembleDelayMs,
     HaxNotification, announcementColor, infoColor,
+    actionReportCountTeam,
 });
 
 const createBffAfk = require('../core/bff/afk');
@@ -516,6 +547,7 @@ Object.assign(room, wrapEventHandlers(createBffEvents({
     ghostKickHandle, updateTeams, calculateStadiumVariables, checkOverflowPassword, endGame,
     matchFlow, bffRoomStats, teamSize,
     fetchSummaryEmbed, fetchRecording, actionReportCountTeam,
+    formatStreakText,
 })));
 
 /* MISCELLANEOUS — events/misc.js is genuinely reused as-is, confirmed
@@ -585,10 +617,10 @@ Object.assign(room, wrapEventHandlers({ onPlayerActivity }));
 /* COMMANDS */
 const { computeOrdinal } = require('../core/bff/rating');
 const createBffCommands = require('../core/bff/commands');
-const { meCommand, topsCommand, renameCommand, helpCommand, leaveCommand, vipHideCommand, queueCommand, rulesCommand } = createBffCommands({
+const { meCommand, statsFullCommand, topsCommand, renameCommand, helpCommand, leaveCommand, vipColorCommand, vipHideCommand, queueCommand, upCommand, rulesCommand } = createBffCommands({
     room, state, authArray, db, HaxStatistics, HaxNotification, Role,
     infoColor, errorColor, successColor, getTimeStats, getRole, computeOrdinal, bffRoomStats,
-    hiddenVipSet, teamSize,
+    hiddenVipSet, teamSize, matchFlow, formatBanRemaining,
 });
 
 // Master-level moderation (bans/admins/VIPs/password/restrictions) — reused
@@ -621,6 +653,7 @@ const createVoteBan = require('../core/voteBan');
 const { votebanCommand, handleVoteBanMessage } = createVoteBan({
     room, state, authArray, db, Role, getRole, HaxNotification,
     errorColor, warningColor, successColor, announcementColor, discordBot, formatBanRemaining,
+    renderProgressBar,
 });
 
 // !report — reused logic from commands/player.js's reportCommand, forked
@@ -645,13 +678,16 @@ const { getCommand, getTeamArray, teamChat, playerChat } = createChatHelpers({
 // gating already documented there.
 const commands = {
     me: { aliases: ['stat', 'stats', 'ы', 's'], roles: Role.PLAYER, function: meCommand },
+    sf: { aliases: ['ыа'], roles: Role.PLAYER, function: statsFullCommand },
     tops: { aliases: ['top'], roles: Role.PLAYER, function: topsCommand },
     rename: { aliases: [], roles: Role.PLAYER, function: renameCommand },
     queue: { aliases: ['q', 'очередь'], roles: Role.PLAYER, function: queueCommand },
     rules: { aliases: ['info', 'правила'], roles: Role.PLAYER, function: rulesCommand },
     help: { aliases: ['commands', 'рудз'], roles: Role.PLAYER, function: helpCommand },
     bb: { aliases: ['bye', 'gn', 'cya', 'ии'], roles: Role.PLAYER, function: leaveCommand },
+    vipcolor: { aliases: [], roles: Role.VIP, function: vipColorCommand },
     viphide: { aliases: [], roles: Role.VIP, function: vipHideCommand },
+    up: { aliases: [], roles: Role.VIP, function: upCommand },
     t: { aliases: [], roles: Role.PLAYER, function: teamChat },
     p: { aliases: [], roles: Role.PLAYER, function: playerChat },
     voteban: { aliases: [], roles: Role.PLAYER, function: votebanCommand },
@@ -761,8 +797,12 @@ room.onPlayerChat = wrapEventHandlers({
         // rerouting those messages through sendAnnouncement only replaced
         // working native behavior with a redundant, worse reimplementation.
         const role = getRole(player);
+        const auth = authArray[player.id][0];
         const showAdminPrefix = !hiddenAdminsSet.has(player.id);
-        const showVipPrefix = !hiddenVipSet.has(player.id);
+        // Keyed by auth, not player.id — see the main room's own
+        // events/activity.js for why (hiddenVipSet now persists across
+        // restarts, so player.id can't be the key).
+        const showVipPrefix = !hiddenVipSet.has(auth);
         let rolePrefix = null;
         let prefixColor = null;
         if (showAdminPrefix && role == Role.MASTER) {
@@ -773,7 +813,10 @@ room.onPlayerChat = wrapEventHandlers({
             prefixColor = adminChatColor;
         } else if (showVipPrefix && role == Role.VIP) {
             rolePrefix = '[⭐ВИП]';
-            prefixColor = vipChatColor;
+            // !vipcolor (requested 2026-08-16 — parity with the main room's
+            // own commands/player.js) — falls back to the shared default
+            // when the VIP hasn't set one.
+            prefixColor = state.vipColors[auth] ?? vipChatColor;
         }
         if (rolePrefix == null) return true;
         room.sendAnnouncement(`${rolePrefix} ${player.name}: ${message}`, null, prefixColor, 'bold', null);

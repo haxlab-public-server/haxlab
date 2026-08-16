@@ -43,6 +43,7 @@ module.exports = function createVoteBan({
     announcementColor,
     discordBot,
     formatBanRemaining,
+    renderProgressBar,
 }) {
     const VOTE_DURATION_MS = 60000;
     const BAN_DURATION_MINUTES = 60;
@@ -253,11 +254,19 @@ module.exports = function createVoteBan({
         // vote object, not a stale echo after the vote already resolved.
         if (state.votebanSession === vote) {
             const { votesFor, votesAgainst } = tally(vote);
+            // Progress bar toward the threshold (requested 2026-08-16) —
+            // votesFor is guaranteed < vote.threshold here: checkVote() just
+            // above already ended the vote (endVoteban) the instant it
+            // would have reached it, and the state.votebanSession === vote
+            // guard above skips this block entirely once that happens.
+            // 'small' (not 'bold', unlike every other message here) — a
+            // live status ping fired on every single vote cast shouldn't
+            // shout as loud as the vote actually starting/resolving.
             room.sendAnnouncement(
-                `📊 Голосование за бан ${vote.targetName}: ${votesFor} за, ${votesAgainst} против (нужно ${vote.threshold} за из ${vote.voterIds.size}).`,
+                `📊 Голосование за бан ${vote.targetName}: ${renderProgressBar(votesFor, vote.threshold)} за (${votesAgainst} против).`,
                 null,
                 announcementColor,
-                'bold',
+                'small',
                 null
             );
         }

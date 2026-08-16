@@ -247,7 +247,15 @@ module.exports = function createEconomy({
     // spams the same player with "already claimed" noise.
     async function claimDailyBonus(player) {
         const auth = getAuth(player);
-        const result = await db.claimDailyBonus(auth, player.name, DAILY_BONUS_STEP, DAILY_MAX_STREAK);
+        // A current VIP's daily bonus is doubled too (requested 2026-08-16)
+        // — same VIP_EARNINGS_MULTIPLIER match payouts already get
+        // (applyVipBonus above), just applied here by scaling the per-day
+        // rate itself rather than the result afterward: db.claimDailyBonus
+        // computes AND credits `streak * coinsPerStreak` atomically in one
+        // call, so the multiplier has to go into that input, not a
+        // second pass over its output.
+        const coinsPerStreak = getRole(player) >= Role.VIP ? DAILY_BONUS_STEP * VIP_EARNINGS_MULTIPLIER : DAILY_BONUS_STEP;
+        const result = await db.claimDailyBonus(auth, player.name, coinsPerStreak, DAILY_MAX_STREAK);
         if (!result) return;
         room.sendAnnouncement(
             `🎁 Ежедневный бонус: день ${result.streak}/${DAILY_MAX_STREAK}, +${formatCoins(result.amount)} ! Баланс: ${formatCoins(result.newBalance)}`,
@@ -517,7 +525,11 @@ module.exports = function createEconomy({
     // addition to shopItems.js can just set `isNew: true` and have it show
     // up distinctly without any further code changes.
     function formatItemLine(item, owned, equippedId, level, viaVip, balance) {
-        const tag = !owned ? '' : item.id === equippedId ? ' [надето]' : viaVip ? ' [VIP]' : ' [куплено]';
+        // ✅ specifically marks EQUIPPED, not just owned (requested
+        // 2026-08-16) — "owned" and "worn right now" used to read as the
+        // same weight of text ([надето] vs [куплено]), even though only one
+        // of them is what's actually active on the player this instant.
+        const tag = !owned ? '' : item.id === equippedId ? ' ✅ [надето]' : viaVip ? ' [VIP]' : ' [куплено]';
         const newTag = item.isNew ? '🆕 ' : '';
         if (item.retired) {
             return `${newTag}${item.id} — ${item.name} (снят с продажи)${tag}`;
@@ -753,8 +765,17 @@ module.exports = function createEconomy({
         const equipped = await db.getEquipped(auth);
         const allItems = allIds.map((id) => itemsById.get(id)).filter(Boolean);
         const levels = await getUpgradeableLevels(auth, allItems);
-        const lines = allItems.map((item) => formatItemLine(item, true, equipped[item.type], levels[item.id], vipGranted.includes(item.id)));
-        room.sendAnnouncement(`🎒 Ваши аксессуары:\n${lines.join('\n')}`, player.id, announcementColor, 'bold', HaxNotification.CHAT);
+        // Grouped by category (requested 2026-08-16), same as !shop's own
+        // per-category sections — a long inventory used to be one flat
+        // list, exactly the wall-of-text problem !shop itself had before
+        // its own category split.
+        const sections = SHOP_CATEGORY_KEYS.map((category) => {
+            const categoryItems = allItems.filter((item) => item.type === category);
+            if (categoryItems.length === 0) return null;
+            const lines = categoryItems.map((item) => formatItemLine(item, true, equipped[item.type], levels[item.id], vipGranted.includes(item.id)));
+            return `${CATEGORY_LABELS[category]}:\n${lines.join('\n')}`;
+        }).filter(Boolean);
+        room.sendAnnouncement(`🎒 Ваши аксессуары:\n${sections.join('\n')}`, player.id, announcementColor, 'bold', HaxNotification.CHAT);
     }
 
     // Toggle: running this again on whatever's currently equipped for that

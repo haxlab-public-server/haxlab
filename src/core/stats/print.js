@@ -6,6 +6,8 @@
  * own process (see discordProcess.js), which has no `room`/`state` to give
  * a full stats/roomStats.js factory instantiation.
  */
+const { formatRatingDisplay, formatRankPrefix } = require('../utils');
+
 const STAT_LABELS = { games: 'Игры', wins: 'Победы', goals: 'Голы', assists: 'Ассисты', CS: 'Сухие матчи', playtime: 'Время игры' };
 const CLUB_STAT_LABEL = 'Клубы';
 
@@ -18,19 +20,44 @@ const RANKING_STAT_KEYS = ['games', 'wins', 'goals', 'assists', 'CS', 'playtime'
 // stats yet (the same quorum every individual category always required) —
 // null rather than throwing, so a combined "show everything" view (see
 // buildAllRankingsText below) can just skip whichever categories aren't
-// ready instead of erroring the whole thing.
-async function buildRankingString(db, getTimeStats, statKey) {
+// ready instead of erroring the whole thing. Top-3 positions get a medal
+// (formatRankPrefix) instead of a bare "#1"/"#2"/"#3" (requested
+// 2026-08-16, same medal set !trophy already uses).
+//
+// `auth`, if given, is the asking player's own — when they're not already
+// in the shown top-5, a second line reports their real position (also
+// requested 2026-08-16: the leaderboard used to be a dead end for anyone
+// not already on it). Silently skipped if they have no player_stats row at
+// all yet (nothing to rank).
+async function buildRankingString(db, getTimeStats, statKey, auth) {
     const key = statKey == 'cs' ? 'CS' : statKey;
     const leaderboard = await db.getLeaderboard(key, 5);
     if (leaderboard.length < 5) return null;
+    // ⭐ next to a currently-VIP entry's name (requested 2026-08-16) — one
+    // extra getVips() round trip per render, same "cheap enough for a
+    // chat command" tradeoff as the getStatRank/getPlayerStats calls below.
+    // getVips() itself sweeps expired grants, so this is always live, never
+    // a stale badge on a grant that already lapsed.
+    const vipAuths = new Set((await db.getVips()).map((v) => v.auth));
     let rankingString = `${STAT_LABELS[key] ?? key}> `;
     for (let i = 0; i < 5; i++) {
         let playerName = leaderboard[i].playerName;
         let playerStat = leaderboard[i].value;
         if (key == 'playtime') playerStat = getTimeStats(playerStat);
-        rankingString += `#${i + 1} ${playerName} : ${playerStat}, `;
+        const vipBadge = vipAuths.has(leaderboard[i].auth) ? '⭐' : '';
+        rankingString += `${formatRankPrefix(i + 1)} ${vipBadge}${playerName} : ${playerStat}, `;
     }
-    return rankingString.substring(0, rankingString.length - 2);
+    rankingString = rankingString.substring(0, rankingString.length - 2);
+    if (auth && !leaderboard.some((row) => row.auth === auth)) {
+        const stats = await db.getPlayerStats(auth);
+        if (stats) {
+            const rankInfo = await db.getStatRank(key, stats[key]);
+            if (rankInfo.total > 0) {
+                rankingString += `\nТы: #${rankInfo.rank} из ${rankInfo.total}`;
+            }
+        }
+    }
+    return rankingString;
 }
 
 // BFF-only leaderboard (see core/bff/rating.js/dbBridge.js) — the main
@@ -38,15 +65,29 @@ async function buildRankingString(db, getTimeStats, statKey) {
 // db.getRatingLeaderboard always comes back empty there and this always
 // returns null; harmless, just never shows up in the main room's !tops.
 // Same 5-player quorum as buildRankingString, for the same reason (an
-// early leaderboard with 1-2 entries looks artificially prestigious).
-async function buildRatingRankingString(db) {
+// early leaderboard with 1-2 entries looks artificially prestigious). Same
+// medal/self-position treatment as buildRankingString above — no dedicated
+// "rating rank" SQL query exists, so this fetches the WHOLE rated
+// leaderboard and finds the caller's own index instead; fine at BFF's
+// actual scale (room cap is 14 concurrent players, see roomConstants.js).
+async function buildRatingRankingString(db, auth) {
     const leaderboard = await db.getRatingLeaderboard(5);
     if (leaderboard.length < 5) return null;
+    const vipAuths = new Set((await db.getVips()).map((v) => v.auth));
     let rankingString = `Рейтинг> `;
     for (let i = 0; i < 5; i++) {
-        rankingString += `#${i + 1} ${leaderboard[i].playerName} : ${Math.round(leaderboard[i].ordinal)}, `;
+        const vipBadge = vipAuths.has(leaderboard[i].auth) ? '⭐' : '';
+        rankingString += `${formatRankPrefix(i + 1)} ${vipBadge}${leaderboard[i].playerName} : ${formatRatingDisplay(leaderboard[i].ordinal)}, `;
     }
-    return rankingString.substring(0, rankingString.length - 2);
+    rankingString = rankingString.substring(0, rankingString.length - 2);
+    if (auth) {
+        const fullLeaderboard = await db.getRatingLeaderboard(9999);
+        const index = fullLeaderboard.findIndex((row) => row.auth === auth);
+        if (index >= 5) {
+            rankingString += `\nТы: #${index + 1} из ${fullLeaderboard.length}`;
+        }
+    }
+    return rankingString;
 }
 
 // Condensed, leader-only versions of the three builders above — real bug
@@ -72,7 +113,7 @@ async function buildTopLeaderLine(db, getTimeStats, statKey) {
 async function buildRatingLeaderLine(db) {
     const leaderboard = await db.getRatingLeaderboard(5);
     if (leaderboard.length < 5) return null;
-    return `Рейтинг: ${leaderboard[0].playerName} (${Math.round(leaderboard[0].ordinal)})`;
+    return `Рейтинг: ${leaderboard[0].playerName} (${formatRatingDisplay(leaderboard[0].ordinal)})`;
 }
 
 async function buildClubLeaderLine(db) {
@@ -94,7 +135,7 @@ async function buildClubRankingString(db) {
     let rankingString = `${CLUB_STAT_LABEL}> `;
     topClubs.forEach((club, i) => {
         const tag = `${club.emoji ?? ''}${club.prefix}`;
-        rankingString += `#${i + 1} [${tag}] ${club.name} : ${club.score} (${club.goals}г/${club.assists}а/${club.cleanSheets}с), `;
+        rankingString += `${formatRankPrefix(i + 1)} [${tag}] ${club.name} : ${club.score} (${club.goals}г/${club.assists}а/${club.cleanSheets}с), `;
     });
     return rankingString.substring(0, rankingString.length - 2);
 }
@@ -135,7 +176,13 @@ module.exports = function createPrintStats({
         const assistsRank = await db.getStatRank('assists', stats.assists);
         const csRank = await db.getStatRank('CS', stats.CS);
         const playtimeRank = await db.getStatRank('playtime', stats.playtime);
-        let text = `${stats.playerName} ` +
+        // ⭐ prefix for a current VIP (requested 2026-08-16) — same idea as
+        // ratingOrdinal below: an optional field the caller attaches to the
+        // stats object right before calling this, not derived here (this
+        // module deliberately has no `getRole`/`room` access at all — see
+        // this file's own header comment).
+        const vipBadge = stats.isVip ? '⭐ ' : '';
+        let text = `${vipBadge}${stats.playerName} ` +
             `[🏆 ${stats.winrate} побед, 🕹️ ${stats.games} игр] ` +
             `[🏅 Ранг по голам: ${formatRank(goalsRank)}(${stats.goals}), ` +
             `ассистам: ${formatRank(assistsRank)}(${stats.assists}), ` +
@@ -146,7 +193,7 @@ module.exports = function createPrintStats({
         // unchanged there. Rounded for display; the DB keeps the real
         // precision for actual balancing.
         if (stats.ratingOrdinal != null) {
-            text += ` [⚔️ Рейтинг: ${Math.round(stats.ratingOrdinal)}]`;
+            text += ` [⚔️ Рейтинг: ${formatRatingDisplay(stats.ratingOrdinal)}]`;
         }
         return text;
     }
@@ -163,3 +210,4 @@ module.exports.buildClubRankingString = buildClubRankingString;
 module.exports.buildRatingRankingString = buildRatingRankingString;
 module.exports.buildRatingLeaderLine = buildRatingLeaderLine;
 module.exports.RANKING_STAT_KEYS = RANKING_STAT_KEYS;
+module.exports.STAT_LABELS = STAT_LABELS;

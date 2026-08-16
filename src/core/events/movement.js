@@ -68,7 +68,13 @@ module.exports = function createMovementEvents({
             'small',
             null
         );
-        let welcomeText = `👋 Добро пожаловать ${player.name} !\n Следите за новостями в Discord: dsc.gg/haxlab\n Введите !help, чтобы увидеть список команд.`;
+        // New vs returning wording (requested 2026-08-16) — no player_stats
+        // row yet reliably means "never finished a match here", same
+        // reasoning as bff/events.js's own onPlayerJoin.
+        const isReturning = (await db.getPlayerStats(player.auth)) != null;
+        let welcomeText = isReturning
+            ? `👋 С возвращением, ${player.name} !`
+            : `👋 Добро пожаловать ${player.name} !\n Следите за новостями в Discord: dsc.gg/haxlab\n Введите !help, чтобы увидеть список команд.`;
         // Season-close notice (item #22, see entry.js's own boot-time
         // comparison) — every joiner sees it for the rest of this process's
         // lifetime, not just whoever happened to join first right after

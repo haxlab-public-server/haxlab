@@ -41,6 +41,7 @@ module.exports = function createPlayerCommands({
     formatCoins,
     discordBot,
     formatBanRemaining,
+    renderProgressBar,
     upCooldownMs = 60 * 60 * 1000,
     upDailyMaxUses = 3,
     upDailyWindowMs = 24 * 60 * 60 * 1000,
@@ -91,41 +92,53 @@ module.exports = function createPlayerCommands({
         room.kickPlayer(player.id, 'Пока !', false);
     }
 
+    // !help category headers (requested 2026-08-16) — grouping is purely
+    // cosmetic on top of the existing per-role command list: role gating
+    // itself is untouched, this only reorganizes each role tier's own flat
+    // comma dump into labeled sub-groups. A command with no `category` in
+    // commands.js falls back to 'misc' rather than being dropped.
+    const HELP_CATEGORY_LABELS = {
+        stats: '📊 Статистика',
+        shop: '🛒 Магазин',
+        club: '🏛 Клуб',
+        chat: '💬 Чат',
+        minigames: '🎮 Мини-игры',
+        votes: '🗳 Голосования',
+        vip: '⭐ VIP',
+        moderation: '🛡 Модерация',
+        arena: '🏟 Арена',
+        misc: '🛠 Прочее',
+    };
+    const HELP_CATEGORY_ORDER = ['stats', 'shop', 'club', 'chat', 'minigames', 'votes', 'vip', 'moderation', 'arena', 'misc'];
+
+    function buildHelpCategoryBlock(role) {
+        const byCategory = new Map();
+        for (const [key, value] of Object.entries(getCommands())) {
+            if (!value.desc || value.roles != role) continue;
+            const category = value.category ?? 'misc';
+            if (!byCategory.has(category)) byCategory.set(category, []);
+            byCategory.get(category).push(`!${key}`);
+        }
+        return HELP_CATEGORY_ORDER
+            .filter((category) => byCategory.has(category))
+            .map((category) => `${HELP_CATEGORY_LABELS[category]}: ${byCategory.get(category).join(', ')}`)
+            .join('\n');
+    }
+
     function helpCommand(player, message) {
         const msgArray = message.split(/ +/).slice(1);
         if (msgArray.length == 0) {
-            let commandString = 'Доступные команды игрока :';
-            for (const [key, value] of Object.entries(getCommands())) {
-                if (value.desc && value.roles == Role.PLAYER) commandString += ` !${key},`;
-            }
-            commandString = commandString.substring(0, commandString.length - 1) + '.\n';
+            let commandString = `Доступные команды игрока :\n${buildHelpCategoryBlock(Role.PLAYER)}`;
             if (getRole(player) >= Role.VIP) {
-                commandString += `Доступные команды VIP :`;
-                for (const [key, value] of Object.entries(getCommands())) {
-                    if (value.desc && value.roles == Role.VIP) commandString += ` !${key},`;
-                }
-                if (commandString.slice(commandString.length - 1) == ':')
-                    commandString += ` None,`;
-                commandString = commandString.substring(0, commandString.length - 1) + '.\n';
+                commandString += `\n\nДоступные команды VIP :\n${buildHelpCategoryBlock(Role.VIP) || 'None'}`;
             }
             if (getRole(player) >= Role.ADMIN_TEMP) {
-                commandString += `Доступные команды администратора :`;
-                for (const [key, value] of Object.entries(getCommands())) {
-                    if (value.desc && value.roles == Role.ADMIN_TEMP) commandString += ` !${key},`;
-                }
-                if (commandString.slice(commandString.length - 1) == ':')
-                    commandString += ` None,`;
-                commandString = commandString.substring(0, commandString.length - 1) + '.\n';
+                commandString += `\n\nДоступные команды администратора :\n${buildHelpCategoryBlock(Role.ADMIN_TEMP) || 'None'}`;
             }
             if (getRole(player) >= Role.MASTER) {
-                commandString += `Доступные команды владельца :`;
-                for (const [key, value] of Object.entries(getCommands())) {
-                    if (value.desc && value.roles == Role.MASTER) commandString += ` !${key},`;
-                }
-                if (commandString.slice(commandString.length - 1) == ':') commandString += ` None,`;
-                commandString = commandString.substring(0, commandString.length - 1) + '.\n';
+                commandString += `\n\nДоступные команды владельца :\n${buildHelpCategoryBlock(Role.MASTER) || 'None'}`;
             }
-            commandString += "\nДля получения информации о конкретной команде, введите '!help <имя команды>'.";
+            commandString += "\n\nДля получения информации о конкретной команде, введите '!help <имя команды>'.";
             // Unified index pointer (requested 2026-08-15): !club and !vip*
             // are each their OWN multi-command group with a separate help
             // entry point (!club help / !viphelp) that nothing in this list
@@ -163,6 +176,9 @@ module.exports = function createPlayerCommands({
 
     async function globalStatsCommand(player, message) {
         const stats = (await db.getPlayerStats(authArray[player.id][0])) ?? new HaxStatistics(player.name);
+        // ⭐ badge (requested 2026-08-16) — !tops already marks VIP entries
+        // this way, !me previously didn't show VIP status at all.
+        stats.isVip = getRole(player) >= Role.VIP;
         const statsString = await printPlayerStats(stats);
         room.sendAnnouncement(
             statsString,
@@ -268,12 +284,17 @@ module.exports = function createPlayerCommands({
     // admin does, so there's no room.setPlayerAdmin/onPlayerAdminChange
     // interaction to worry about, just the one Set events/activity.js's
     // chat-prefix logic already checks.
-    function vipHideCommand(player) {
-        if (hiddenVipSet.has(player.id)) {
-            hiddenVipSet.delete(player.id);
+    // Persisted (requested 2026-08-16: survive a restart) and keyed by auth,
+    // not player.id — see hiddenVipSet's own declaration in entry.js.
+    async function vipHideCommand(player) {
+        const auth = authArray[player.id][0];
+        if (hiddenVipSet.has(auth)) {
+            hiddenVipSet.delete(auth);
+            await db.setHiddenVip(auth, false);
             room.sendAnnouncement(`👁️ Скрытность отключена — VIP-префикс снова виден.`, player.id, successColor, 'bold', HaxNotification.CHAT);
         } else {
-            hiddenVipSet.add(player.id);
+            hiddenVipSet.add(auth);
+            await db.setHiddenVip(auth, true);
             room.sendAnnouncement(`🕶️ Скрытность включена — VIP-префикс скрыт.`, player.id, successColor, 'bold', HaxNotification.CHAT);
         }
     }
@@ -287,7 +308,9 @@ module.exports = function createPlayerCommands({
             '',
             '⭐ Также, пока у вас есть VIP: анимации "Дым", "Фейерверк" и "Черная дыра" после гола доступны бесплатно — просто наденьте их через "!equip smoke-<цвет>", "!equip fireworks" или "!equip blackhole", без покупки.',
         ].join('\n');
-        room.sendAnnouncement(text, player.id, announcementColor, 'bold', HaxNotification.CHAT);
+        // 'italic' (requested 2026-08-16) — reference text, not an event or
+        // a warning, same reasoning as !club help / bff's own !rules.
+        room.sendAnnouncement(text, player.id, announcementColor, 'italic', HaxNotification.CHAT);
     }
 
     async function linkDiscordCommand(player, message) {
@@ -605,7 +628,10 @@ module.exports = function createPlayerCommands({
     // Nobody else's view changes, unlike !mute (commands/admin.js), which
     // blocks the message for everyone. Admins/moderators are exempt so a
     // player can't silence their way out of a moderation call made in chat.
-    function silenceCommand(player, message) {
+    // Persisted (requested 2026-08-16: survive a restart) via db.addSilence/
+    // removeSilence, alongside the in-memory Map (still the hot path
+    // onPlayerChat checks on every message).
+    async function silenceCommand(player, message) {
         const msgArray = message.split(/ +/).slice(1);
         if (msgArray.length == 0 || msgArray[0][0] != '#' || room.getPlayer(parseInt(msgArray[0].substring(1))) == null) {
             room.sendAnnouncement(
@@ -643,6 +669,7 @@ module.exports = function createPlayerCommands({
         let silenced = silencedAuths.get(viewerAuth);
         if (silenced && silenced.has(targetAuth)) {
             silenced.delete(targetAuth);
+            await db.removeSilence(viewerAuth, targetAuth);
             room.sendAnnouncement(
                 `✔️ ${target.name} больше не заглушен для вас !`,
                 player.id,
@@ -656,6 +683,7 @@ module.exports = function createPlayerCommands({
                 silencedAuths.set(viewerAuth, silenced);
             }
             silenced.add(targetAuth);
+            await db.addSilence(viewerAuth, targetAuth);
             room.sendAnnouncement(
                 `🔇 ${target.name} теперь заглушен только для вас ! Введите "!silence #${target.id}" еще раз, чтобы отменить.`,
                 player.id,
@@ -807,9 +835,10 @@ module.exports = function createPlayerCommands({
         // !mute's own remaining-time line (see events/activity.js's
         // announceMuted) — a private follow-up so the claimant knows
         // exactly how many uses they have left today, not just that this
-        // one worked.
+        // one worked. Rendered as a small block-bar (requested 2026-08-16)
+        // rather than a bare "N/3" fraction.
         room.sendAnnouncement(
-            `Использований !up сегодня: ${dailyUses.length}/${upDailyMaxUses}.`,
+            `Использований !up сегодня: ${renderProgressBar(dailyUses.length, upDailyMaxUses)}`,
             player.id,
             infoColor,
             'bold',

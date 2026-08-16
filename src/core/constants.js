@@ -26,6 +26,11 @@ module.exports = {
     warningColor: 0xffa135,
     errorColor: 0xa40000,
     successColor: 0x75ff75,
+    // Personal-achievement announcements only (games milestone, VIP lottery
+    // win, top-5 entry ping — requested 2026-08-16) — distinct from the
+    // neutral announcementColor every routine round-outcome message already
+    // uses, so a player's own accomplishment visually stands out from them.
+    achievementColor: 0xffd166,
     defaultColor: null,
     masterChatColor: 0xffd700,
     adminChatColor: 0x00bfff,
