@@ -104,6 +104,13 @@ const BRIDGED_METHODS = [
     'buyClubSlot',
     'addClubStats',
     'getTopClubs',
+    // core/stats/analytics/ + !rating (requested 2026-08-17) — missed on
+    // the first pass (real bug, caught live: !me/!rating threw "db.
+    // getLatestMatchAnalyticsReport is not a function" in production,
+    // because this allowlist — not api/database.js — is what actually
+    // decides which db methods the in-page bundle can reach at all).
+    'saveMatchAnalyticsReport',
+    'getLatestMatchAnalyticsReport',
 ];
 
 function createBridgedDb() {
