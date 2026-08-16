@@ -86,6 +86,29 @@ function createSqliteDatabase(filePath = path.join(__dirname, 'haxlab.sqlite')) 
         );
     `);
 
+    // Telegram account linking (requested 2026-08-17, see core/telegram.js) —
+    // same shape as discord_links, but two-way: a link can be INITIATED from
+    // either side (the room via !telegram, or Telegram via /start), so a
+    // pending code doesn't yet know both halves of the pair. Exactly one of
+    // auth/telegram_chat_id is set at creation; redemption fills in the
+    // other and upserts telegram_links.
+    const telegramLinksStatement = database.prepare(`
+        CREATE TABLE IF NOT EXISTS telegram_links (
+            auth TEXT PRIMARY KEY,
+            telegram_chat_id TEXT NOT NULL,
+            linked_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+    `);
+    const telegramLinkCodesStatement = database.prepare(`
+        CREATE TABLE IF NOT EXISTS telegram_link_codes (
+            code TEXT PRIMARY KEY,
+            auth TEXT,
+            telegram_chat_id TEXT,
+            expires_at TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+    `);
+
     // HaxBall's own ban (the checkbox on the native client kick dialog) only
     // blocks the current CONNECTION — it can't stop someone who isn't in the
     // room right now, and doesn't survive them reconnecting on a fresh
@@ -245,6 +268,40 @@ function createSqliteDatabase(filePath = path.join(__dirname, 'haxlab.sqlite')) 
             PRIMARY KEY (viewer_auth, target_auth)
         );
     `);
+    // Pairwise match history (requested 2026-08-17, "!vs"/rivalry-hype/
+    // same-day-rematch) — one row per unordered pair of auths, keyed with
+    // auth_a < auth_b (lexicographic) so a pair is never stored twice under
+    // swapped order; recordHeadToHead below normalizes on write,
+    // getHeadToHead on read. Only tracks time spent on OPPOSING TEAMS
+    // specifically (see recordHeadToHead's own doc comment) — two people
+    // who only ever played AS teammates never get a row at all. `games` is
+    // its own counter, NOT wins_a+wins_b — a draw increments it without
+    // moving either win count.
+    const headToHeadStatement = database.prepare(`
+        CREATE TABLE IF NOT EXISTS head_to_head (
+            auth_a TEXT NOT NULL,
+            auth_b TEXT NOT NULL,
+            games INTEGER NOT NULL DEFAULT 0,
+            wins_a INTEGER NOT NULL DEFAULT 0,
+            wins_b INTEGER NOT NULL DEFAULT 0,
+            last_played_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (auth_a, auth_b)
+        );
+    `);
+    // Room-wide "best ever" records (requested 2026-08-17) — one row per
+    // tracked category (currently just 'winStreak'), overwritten wholesale
+    // whenever a new value beats it. Deliberately generic (category as a
+    // free-text key) rather than one dedicated column per record, so a
+    // future record category doesn't need its own migration.
+    const roomRecordsStatement = database.prepare(`
+        CREATE TABLE IF NOT EXISTS room_records (
+            category TEXT PRIMARY KEY,
+            value INTEGER NOT NULL,
+            holder_auth TEXT NOT NULL,
+            holder_name TEXT NOT NULL,
+            achieved_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+    `);
     // Not database.prepare()'d up here like the CREATE TABLE statements
     // above — unlike a bare CREATE TABLE, CREATE INDEX references an
     // existing table by name, and prepare() validates that against the
@@ -274,6 +331,8 @@ function createSqliteDatabase(filePath = path.join(__dirname, 'haxlab.sqlite')) 
         vipsStatement.run();
         addColumnIfMissing('vips', 'expires_at TEXT');
         discordLinksStatement.run();
+        telegramLinksStatement.run();
+        telegramLinkCodesStatement.run();
         authBansStatement.run();
         addColumnIfMissing('auth_bans', 'expires_at TEXT');
         commandRestrictionsStatement.run();
@@ -305,6 +364,8 @@ function createSqliteDatabase(filePath = path.join(__dirname, 'haxlab.sqlite')) 
         ratingHistoryStatement.run();
         database.exec('CREATE INDEX IF NOT EXISTS idx_rating_history_auth ON rating_history (auth, id DESC)');
         silencedPairsStatement.run();
+        headToHeadStatement.run();
+        roomRecordsStatement.run();
         // !viphide (both rooms — see commands/player.js / bff/commands.js),
         // same shape/reasoning as hide_custom_colors above (requested
         // 2026-08-16: survive a restart, keyed by auth rather than the old
@@ -312,6 +373,11 @@ function createSqliteDatabase(filePath = path.join(__dirname, 'haxlab.sqlite')) 
         // mere reconnect, not just a restart, since player.id never
         // survives that either).
         addColumnIfMissing('player_stats', 'hide_vip_prefix INTEGER NOT NULL DEFAULT 0');
+        // Classic ELO (main room only — see core/stats/elo.js) — a plain
+        // always-present metric alongside games/wins/goals/etc, NOT the
+        // nullable BFF-style rating_mu/rating_sigma above: every player has
+        // an ELO from the moment their row exists, same as `games`.
+        addColumnIfMissing('player_stats', 'elo_rating INTEGER NOT NULL DEFAULT 1000');
         addColumnIfMissing('clubs', 'emoji TEXT');
         addColumnIfMissing('clubs', 'assistant_auth TEXT');
         addColumnIfMissing('clubs', 'color_unlocked INTEGER NOT NULL DEFAULT 0');
@@ -357,10 +423,11 @@ function createSqliteDatabase(filePath = path.join(__dirname, 'haxlab.sqlite')) 
             assists: row.assists,
             CS: row.clean_sheets,
             ownGoals: row.own_goals,
+            elo: row.elo_rating,
         };
     }
 
-    const PLAYER_STATS_COLUMNS = 'player_name, games, wins, goals, assists, own_goals, clean_sheets, playtime';
+    const PLAYER_STATS_COLUMNS = 'player_name, games, wins, goals, assists, own_goals, clean_sheets, playtime, elo_rating';
 
     function getPlayerStats(auth) {
         const row = database
@@ -384,9 +451,9 @@ function createSqliteDatabase(filePath = path.join(__dirname, 'haxlab.sqlite')) 
         database
             .prepare(
                 `INSERT INTO player_stats
-                    (auth, player_name, games, wins, goals, assists, own_goals, clean_sheets, playtime, updated_at)
+                    (auth, player_name, games, wins, goals, assists, own_goals, clean_sheets, playtime, elo_rating, updated_at)
                  VALUES
-                    (@auth, @playerName, @games, @wins, @goals, @assists, @ownGoals, @CS, @playtime, CURRENT_TIMESTAMP)
+                    (@auth, @playerName, @games, @wins, @goals, @assists, @ownGoals, @CS, @playtime, @elo, CURRENT_TIMESTAMP)
                  ON CONFLICT(auth) DO UPDATE SET
                     player_name = excluded.player_name,
                     games = excluded.games,
@@ -396,6 +463,7 @@ function createSqliteDatabase(filePath = path.join(__dirname, 'haxlab.sqlite')) 
                     own_goals = excluded.own_goals,
                     clean_sheets = excluded.clean_sheets,
                     playtime = excluded.playtime,
+                    elo_rating = excluded.elo_rating,
                     updated_at = CURRENT_TIMESTAMP`
             )
             .run({
@@ -408,6 +476,7 @@ function createSqliteDatabase(filePath = path.join(__dirname, 'haxlab.sqlite')) 
                 ownGoals: stats.ownGoals ?? 0,
                 CS: stats.CS ?? 0,
                 playtime: stats.playtime ?? 0,
+                elo: stats.elo ?? 1000,
             });
         return stats;
     }
@@ -421,7 +490,26 @@ function createSqliteDatabase(filePath = path.join(__dirname, 'haxlab.sqlite')) 
         assists: 'assists',
         CS: 'clean_sheets',
         playtime: 'playtime',
+        elo: 'elo_rating',
     };
+
+    // One-off backfill support (scripts/backfill-elo.js) — bulk read for
+    // every player with enough games for a trustworthy per-game rate,
+    // and a narrow single-column setter so the backfill never risks
+    // zeroing out unrelated columns the way a partial savePlayerStats call
+    // would.
+    function getPlayerStatsForSeed(minGames) {
+        return database
+            .prepare(
+                `SELECT auth, player_name AS playerName, games, wins, goals, assists, clean_sheets AS CS
+                 FROM player_stats WHERE games >= ?`
+            )
+            .all(minGames);
+    }
+
+    function setEloRating(auth, elo) {
+        database.prepare('UPDATE player_stats SET elo_rating = ? WHERE auth = ?').run(elo, auth);
+    }
 
     // `auth` is included alongside the display fields specifically so a
     // caller can check "is THIS auth in the top N" reliably (see
@@ -609,6 +697,54 @@ function createSqliteDatabase(filePath = path.join(__dirname, 'haxlab.sqlite')) 
     // "who is this Discord user in-game", not an identity guarantee.
     function getAuthByDiscordId(discordId) {
         const row = database.prepare('SELECT auth FROM discord_links WHERE discord_id = ? ORDER BY linked_at ASC LIMIT 1').get(discordId);
+        return row ? row.auth : null;
+    }
+
+    // `target` is `{ auth }` (issued from the room via !telegram) or
+    // `{ telegramChatId }` (issued from Telegram via /start) — exactly one,
+    // the other stays NULL until redemption fills it in.
+    function createTelegramLinkCode(code, target, expiresAt) {
+        database
+            .prepare(
+                `INSERT INTO telegram_link_codes (code, auth, telegram_chat_id, expires_at)
+                 VALUES (@code, @auth, @telegramChatId, @expiresAt)`
+            )
+            .run({
+                code,
+                auth: target.auth ?? null,
+                telegramChatId: target.telegramChatId ?? null,
+                expiresAt,
+            });
+    }
+
+    // Looks up and deletes in one call — a code is single-use either way
+    // (redeemed or expired). Expired codes are swept lazily here first, same
+    // style as getClubInvites' own sweep, rather than a separate cron.
+    // Returns the pending row (or null if the code doesn't exist/expired),
+    // leaving it to the caller to decide which half was already set.
+    function redeemTelegramLinkCode(code) {
+        const nowIso = new Date().toISOString();
+        database.prepare('DELETE FROM telegram_link_codes WHERE expires_at <= ?').run(nowIso);
+        const row = database.prepare('SELECT auth, telegram_chat_id AS telegramChatId FROM telegram_link_codes WHERE code = ?').get(code);
+        if (!row) return null;
+        database.prepare('DELETE FROM telegram_link_codes WHERE code = ?').run(code);
+        return row;
+    }
+
+    // Upsert, same shape as linkDiscordId — a player may relink to a
+    // different Telegram account (e.g. switched phones) rather than being
+    // stuck with the first one forever.
+    function linkTelegramId(auth, telegramChatId) {
+        database
+            .prepare(
+                `INSERT INTO telegram_links (auth, telegram_chat_id, linked_at) VALUES (@auth, @telegramChatId, CURRENT_TIMESTAMP)
+                 ON CONFLICT(auth) DO UPDATE SET telegram_chat_id = excluded.telegram_chat_id, linked_at = CURRENT_TIMESTAMP`
+            )
+            .run({ auth, telegramChatId });
+    }
+
+    function getAuthByTelegramId(telegramChatId) {
+        const row = database.prepare('SELECT auth FROM telegram_links WHERE telegram_chat_id = ?').get(telegramChatId);
         return row ? row.auth : null;
     }
 
@@ -965,6 +1101,76 @@ function createSqliteDatabase(filePath = path.join(__dirname, 'haxlab.sqlite')) 
         return database
             .prepare('SELECT viewer_auth AS viewerAuth, target_auth AS targetAuth FROM silenced_pairs')
             .all();
+    }
+
+    // Records one match's OUTCOME between two auths who were on OPPOSING
+    // teams (see head_to_head's own doc comment — teammates never call
+    // this). `winnerAuth` is one of authA/authB, or null for a draw (a draw
+    // still touches last_played_at/creates the row, just doesn't move
+    // either win count — see #13's same-day-rematch check, which only
+    // needs last_played_at, not a winner). Normalizes the pair to
+    // auth_a < auth_b internally so the caller never has to know or care
+    // which order they passed them in.
+    function recordHeadToHead(authA, authB, winnerAuth) {
+        const [a, b] = authA < authB ? [authA, authB] : [authB, authA];
+        const winsAIncrement = winnerAuth === a ? 1 : 0;
+        const winsBIncrement = winnerAuth === b ? 1 : 0;
+        database
+            .prepare(
+                `INSERT INTO head_to_head (auth_a, auth_b, games, wins_a, wins_b, last_played_at)
+                 VALUES (@a, @b, 1, @winsAIncrement, @winsBIncrement, CURRENT_TIMESTAMP)
+                 ON CONFLICT(auth_a, auth_b) DO UPDATE SET
+                    games = games + 1,
+                    wins_a = wins_a + @winsAIncrement,
+                    wins_b = wins_b + @winsBIncrement,
+                    last_played_at = CURRENT_TIMESTAMP`
+            )
+            .run({ a, b, winsAIncrement, winsBIncrement });
+    }
+
+    // Returns null if this pair has never faced each other as opponents.
+    // winsFor/winsAgainst are already reoriented to the CALLER's own
+    // authA/authB argument order — the caller never needs to know about
+    // the internal auth_a < auth_b storage normalization. `games` is its
+    // own counter (not winsA+winsB — a draw touches games but moves
+    // neither win count, so summing wins alone would silently undercount
+    // every draw this pair has ever played).
+    function getHeadToHead(authA, authB) {
+        const [a, b] = authA < authB ? [authA, authB] : [authB, authA];
+        const row = database
+            .prepare('SELECT games, wins_a AS winsA, wins_b AS winsB, last_played_at AS lastPlayedAt FROM head_to_head WHERE auth_a = ? AND auth_b = ?')
+            .get(a, b);
+        if (!row) return null;
+        const flipped = a !== authA;
+        return {
+            winsFor: flipped ? row.winsB : row.winsA,
+            winsAgainst: flipped ? row.winsA : row.winsB,
+            games: row.games,
+            lastPlayedAt: row.lastPlayedAt,
+        };
+    }
+
+    // Room-wide "best ever" record for one category — see room_records'
+    // own doc comment. null if the category has never been set at all.
+    function getRecord(category) {
+        return database
+            .prepare('SELECT value, holder_auth AS holderAuth, holder_name AS holderName, achieved_at AS achievedAt FROM room_records WHERE category = ?')
+            .get(category) ?? null;
+    }
+
+    // Unconditional overwrite — the caller (whoever tracks the live value,
+    // e.g. state.streak) is the one that already checked this beats the
+    // current record before calling, same "caller decides, this just
+    // writes" division of responsibility as setClubColor.
+    function setRecord(category, value, holderAuth, holderName) {
+        database
+            .prepare(
+                `INSERT INTO room_records (category, value, holder_auth, holder_name)
+                 VALUES (@category, @value, @holderAuth, @holderName)
+                 ON CONFLICT(category) DO UPDATE SET
+                    value = @value, holder_auth = @holderAuth, holder_name = @holderName, achieved_at = CURRENT_TIMESTAMP`
+            )
+            .run({ category, value, holderAuth, holderName });
     }
 
     // !vipcolor (see commands/player.js) — a VIP's own override for their
@@ -1374,6 +1580,8 @@ function createSqliteDatabase(filePath = path.join(__dirname, 'haxlab.sqlite')) 
         getStatRank,
         savePlayerStats,
         getLeaderboard,
+        getPlayerStatsForSeed,
+        setEloRating,
         getRating,
         saveRating,
         getRatingLeaderboard,
@@ -1390,6 +1598,10 @@ function createSqliteDatabase(filePath = path.join(__dirname, 'haxlab.sqlite')) 
         linkDiscordId,
         getDiscordIdByAuth,
         getAuthByDiscordId,
+        createTelegramLinkCode,
+        redeemTelegramLinkCode,
+        linkTelegramId,
+        getAuthByTelegramId,
         banAuth,
         unbanAuth,
         getAuthBan,
@@ -1423,6 +1635,10 @@ function createSqliteDatabase(filePath = path.join(__dirname, 'haxlab.sqlite')) 
         addSilence,
         removeSilence,
         getAllSilencedPairs,
+        recordHeadToHead,
+        getHeadToHead,
+        getRecord,
+        setRecord,
         setVipColor,
         getAllVipColors,
         getTopPlayers,

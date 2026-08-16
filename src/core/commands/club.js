@@ -511,9 +511,15 @@ module.exports = function createClubCommands({
         );
     }
 
-    // "<название> (игроки/лимит): <капитан> (c), <ассистент> (a), <игрок1>..."
+    // "<название> (игроки/лимит): <капитан>[id] (c), <ассистент>[id] (a), <игрок1>[id]..."
     // — captain and assistant (if any) always listed first, in that order,
-    // the rest in join order.
+    // the rest in join order. [id] (requested 2026-08-17 — captains kept
+    // asking the owner for player ids to plug into "!club kick #<id>",
+    // which already accepted that exact format) is the CURRENT room id of
+    // whichever member is online right now — omitted for anyone offline,
+    // since there's no live id to show them and "!club kick #<id>" couldn't
+    // target them that way anyway (it still accepts a raw auth for that
+    // case, just not surfaced here).
     function clubInfoCommand(player, message) {
         const auth = getAuth(player);
         const club = findClubByAuth(auth);
@@ -525,10 +531,15 @@ module.exports = function createClubCommands({
         const captain = members.find((m) => m.auth === club.ownerAuth);
         const assistant = club.assistantAuth ? members.find((m) => m.auth === club.assistantAuth) : null;
         const rest = members.filter((m) => m.auth !== club.ownerAuth && m.auth !== club.assistantAuth);
+        function memberLabel(m, roleSuffix = '') {
+            const live = state.playersAll.find((p) => getAuth(p) === m.auth);
+            const idTag = live ? `[${live.id}]` : '';
+            return `${m.playerName}${idTag}${roleSuffix}`;
+        }
         const entries = [];
-        if (captain) entries.push(`${captain.playerName} (c)`);
-        if (assistant) entries.push(`${assistant.playerName} (a)`);
-        entries.push(...rest.map((m) => m.playerName));
+        if (captain) entries.push(memberLabel(captain, ' (c)'));
+        if (assistant) entries.push(memberLabel(assistant, ' (a)'));
+        entries.push(...rest.map((m) => memberLabel(m)));
         // A club that paid to unlock + set a custom color (!club color,
         // colorUnlocked-gated — see clubColorCommand) previously only ever
         // saw it in chat prefixes (events/activity.js); this is its own
@@ -576,7 +587,7 @@ module.exports = function createClubCommands({
             `!club invite #<id> — пригласить игрока в клуб (владелец и ассистент). У приглашения есть ${CLUB_INVITE_DURATION_SECONDS} секунд на принятие.`,
             '!club join [название] — принять приглашение в клуб.',
             '!club leave — покинуть клуб.',
-            '!club kick <#id|auth> — выгнать игрока из клуба (только владелец).',
+            '!club kick <#id|auth> — выгнать игрока из клуба (только владелец). id — тот, что показан рядом с ником в "!club show", если игрок сейчас в комнате.',
             '!club assistant <игрок> — назначить ассистента клуба, или без аргумента чтобы снять его (только владелец). У ассистента есть доступ только к приглашениям игроков.',
             '!club disband — расформировать клуб (только владелец).',
             `!club color buy — разблокировать кастомный цвет клуба (${formatCoins(CLUB_COLOR_UNLOCK_COST)}, только владелец, разовая покупка).`,

@@ -105,6 +105,7 @@ const {
     formatVipRemaining,
     formatCoins,
     renderProgressBar,
+    detectCleanSheetWatch,
     formatStreakText,
     formatTrophyLabel,
     encodeLegacyTrophyKey,
@@ -116,6 +117,7 @@ const {
     fetchRecording,
 } = require('../core/reports');
 const createChatHelpers = require('../core/chat');
+const { recordHeadToHead, checkWinStreakRecord } = require('../core/matchHistory');
 
 const db = createBridgedDb();
 const discordBot = createBridgedDiscordBot({ state, authArray });
@@ -234,6 +236,18 @@ const { checkOverflowPassword } = createOverflowPassword({
     db,
     initialPassword: persistedPassword,
     initialPasswordSetAt: persistedPasswordSetAt,
+});
+
+/* TELEGRAM ACCOUNT LINKING */
+
+// !telegram [code] — links this player's auth to a Telegram chat id, so
+// VIPs can pull the current overflow password via /pass (see
+// core/telegram.js) instead of watching Discord. Reused as-is by BFF too
+// (bffEntry.js instantiates its own copy) — see core/telegramLink.js's own
+// doc comment.
+const createTelegramLink = require('../core/telegramLink');
+const { linkTelegramCommand } = createTelegramLink({
+    room, db, authArray, HaxNotification, errorColor, successColor, generateRoomPassword,
 });
 
 /* ECONOMY */
@@ -564,6 +578,11 @@ state.pauseVotes = { [Team.RED]: null, [Team.BLUE]: null };
 state.pauseVoteUsed = { [Team.RED]: false, [Team.BLUE]: false };
 state.pauseVoteUnpauseTimeout = undefined;
 
+// !tip #<id> (see commands/player.js's tipCommand) — once-per-match
+// allowance per auth, reset every onGameStart alongside pauseVoteUsed
+// above (same convention).
+state.tipUsedThisMatch = new Set();
+
 const emptyPlayer = {
     id: 0,
 };
@@ -737,9 +756,31 @@ setInterval(() => {
 
 /* GAME FUNCTIONS */
 
+// Fraction of the match's own time limit at which a still-intact clean
+// sheet starts getting watched (item #14, requested 2026-08-17) — last
+// 20% of regulation, same "getting genuinely tense" window the rest of
+// this file's late-match handling already cares about.
+const CLEAN_SHEET_WATCH_THRESHOLD = 0.8;
+
 function checkTime() {
     const scores = room.getScores();
     if (state.game != undefined) state.game.scores = scores;
+    // Live clean-sheet tension (item #14) — see utils.js's own
+    // detectCleanSheetWatch for the actual decision logic (kept pure/
+    // testable there); this just gates it to once per match and sends the
+    // announcement.
+    const cleanSheetTeam = detectCleanSheetWatch(scores, state.playSituation, state.cleanSheetWatchAnnounced, CLEAN_SHEET_WATCH_THRESHOLD, Situation, Team);
+    if (cleanSheetTeam != null) {
+        state.cleanSheetWatchAnnounced = true;
+        const teamName = cleanSheetTeam == Team.RED ? 'Красная команда' : 'Синяя команда';
+        room.sendAnnouncement(
+            `👀 Сухая серия под угрозой — ${getTimeGame(scores.timeLimit - scores.time)} до конца, ${teamName} пока не пропустила !`,
+            null,
+            infoColor,
+            'small',
+            HaxNotification.CHAT
+        );
+    }
     if (Math.abs(scores.time - scores.timeLimit) <= 0.01 && scores.timeLimit != 0 && state.playSituation == Situation.PLAY) {
         if (scores.red != scores.blue) {
             if (!state.checkTimeVariable) {
@@ -865,6 +906,26 @@ async function endGame(winner) {
             'bold',
             HaxNotification.CHAT
         );
+    }
+    // Head-to-head recording + room-wide win-streak record (items #2/#10/
+    // #11/#13, requested 2026-08-17) — see core/matchHistory.js's own doc
+    // comments for what each does and why the logic lives there rather
+    // than inline here (independent testability: this file is the
+    // composition root, not an extracted, requireable core/ module).
+    // Wrapped like updateStats()/awardMatchCoins() below: a failure here
+    // must never block the rest of endGame().
+    try {
+        await recordHeadToHead(db, authArray, state.teamRed, state.teamBlue, winner, Team);
+    } catch (err) {
+        console.error('[endGame] recordHeadToHead failed:', err);
+    }
+    if (winner == Team.RED || winner == Team.BLUE) {
+        try {
+            const captain = winner == Team.RED ? state.teamRed[0] : state.teamBlue[0];
+            await checkWinStreakRecord(db, room, HaxNotification, achievementColor, authArray, captain, state.streak);
+        } catch (err) {
+            console.error('[endGame] win-streak record check failed:', err);
+        }
     }
     let possessionRedPct = (state.possession[0] / (state.possession[0] + state.possession[1])) * 100;
     let possessionBluePct = 100 - possessionRedPct;
@@ -1280,6 +1341,8 @@ const {
     leaveCommand,
     helpCommand,
     globalStatsCommand,
+    vsCommand,
+    tipCommand,
     renameCommand,
     customColorsCommand,
     vipColorCommand,
@@ -1485,12 +1548,15 @@ const commands = createCommands({
     leaveCommand,
     helpCommand,
     globalStatsCommand,
+    vsCommand,
+    tipCommand,
     renameCommand,
     customColorsCommand,
     vipColorCommand,
     vipHideCommand,
     vipHelpCommand,
     linkDiscordCommand,
+    linkTelegramCommand,
     topsCommand,
     afkCommand,
     afkListCommand,
@@ -1683,6 +1749,10 @@ Object.assign(room, wrapEventHandlers(createGameManagementEvents({
     playGoalSizeEffect,
     resetPauseVotes,
     updateTeams,
+    achievementColor,
+    infoColor,
+    authArray,
+    db,
 })));
 
 /* MISCELLANEOUS */

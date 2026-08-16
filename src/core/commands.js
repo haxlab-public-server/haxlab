@@ -4,12 +4,15 @@ module.exports = function createCommands({
     leaveCommand,
     helpCommand,
     globalStatsCommand,
+    vsCommand,
+    tipCommand,
     renameCommand,
     customColorsCommand,
     vipColorCommand,
     vipHideCommand,
     vipHelpCommand,
     linkDiscordCommand,
+    linkTelegramCommand,
     topsCommand,
     afkCommand,
     afkListCommand,
@@ -122,6 +125,29 @@ module.exports = function createCommands({
         Эта команда показывает ваши глобальные статистики в комнате.`,
         function: globalStatsCommand,
     },
+    vs: {
+        aliases: [],
+        roles: Role.PLAYER,
+        category: 'stats',
+        desc: `
+        Эта команда сравнивает вашу статистику со статистикой другого игрока — построчно, кто впереди.
+    Она принимает 1 аргумент:
+    Аргумент 1: #<id> где <id> это id игрока для сравнения.
+    Пример: !vs #3 сравнит вашу статистику с игроком с id 3.`,
+        function: vsCommand,
+    },
+    tip: {
+        aliases: [],
+        roles: Role.PLAYER,
+        category: 'misc',
+        desc: `
+        Эта команда публично благодарит другого игрока за игру ("👏 вы благодарит(е) игрока. Хорошая игра!").
+    Не больше 1 раза за матч, и не больше 5 раз в день (10 раз для VIP).
+    Она принимает 1 аргумент:
+    Аргумент 1: #<id> где <id> это id игрока, которого вы благодарите.
+    Пример: !tip #3 благодарит игрока с id 3.`,
+        function: tipCommand,
+    },
     rename: {
         aliases: [],
         roles: Role.PLAYER,
@@ -186,15 +212,26 @@ module.exports = function createCommands({
     Пример: !discord 123456789012345678 связывает ваш аккаунт Discord.`,
         function: linkDiscordCommand,
     },
+    telegram: {
+        aliases: [],
+        roles: Role.PLAYER,
+        category: 'misc',
+        desc: `
+        Эта команда связывает ваш аккаунт Telegram, чтобы VIP мог получить текущий пароль от заполненной комнаты через бота командой /pass, не заходя в Discord.
+    Без аргумента: показывает код для команды /link в боте Telegram.
+    С аргументом: завершает привязку кодом, который бот прислал на команду /start.
+    Пример: !telegram связывает аккаунт (шаг 1). !telegram AB12CD34 завершает привязку кодом из Telegram (шаг 2, если начали с /start).`,
+        function: linkTelegramCommand,
+    },
     tops: {
         aliases: [],
         roles: Role.PLAYER,
         category: 'stats',
         desc: `
         Эта команда показывает таблицы лидеров (топ 5 игроков) комнаты.
-    Без аргумента показывает все таблицы сразу: игры, победы, голы, ассисты, сухие матчи, время игры и клубы.
+    Без аргумента показывает все таблицы сразу: игры, победы, голы, ассисты, сухие матчи, время игры, ELO и клубы.
     Она принимает 1 аргумент (опционально):
-    Аргумент 1: <категория> где <категория> одна из: games, wins, goals, assists, cs, playtime (или pt), clubs.
+    Аргумент 1: <категория> где <категория> одна из: games, wins, goals, assists, cs, playtime (или pt), elo, clubs.
     Пример: !tops goals покажет только таблицу лидеров по голам.
     Пример: !tops clubs покажет топ-5 клубов по сумме голов+ассистов+сухих матчей их ТЕКУЩИХ участников (вышедшие из клуба не в счет).`,
         function: topsCommand,
@@ -491,7 +528,8 @@ module.exports = function createCommands({
         desc: `
     Эта команда снимает бан по auth, выданный командой '!banauth'.
     Она принимает 1 аргумент:
-    Аргумент 1: <auth> auth забаненного игрока.`,
+    Аргумент 1: <auth|номер> auth забаненного игрока, ИЛИ номер [i] из списка "!authbans" — так проще, чем вводить auth целиком.
+    Пример: !unbanauth 2 снимает бан с игрока под номером [2] в "!authbans".`,
         function: unbanAuthCommand,
     },
     authbans: {
@@ -499,7 +537,7 @@ module.exports = function createCommands({
         roles: Role.MASTER,
         category: 'moderation',
         desc: `
-    Эта команда показывает список игроков, забаненных по auth командой '!banauth'.`,
+    Эта команда показывает список игроков, забаненных по auth командой '!banauth', с номером [i] у каждого — его можно передать в "!unbanauth" вместо auth.`,
         function: authBanListCommand,
     },
     restrictcmd: {

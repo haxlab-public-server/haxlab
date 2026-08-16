@@ -22,6 +22,12 @@ function createDatabaseApi(options = {}) {
         getLeaderboard(statKey, limit) {
             return sqlite.getLeaderboard(statKey, limit);
         },
+        getPlayerStatsForSeed(minGames) {
+            return sqlite.getPlayerStatsForSeed(minGames);
+        },
+        setEloRating(auth, elo) {
+            return sqlite.setEloRating(auth, elo);
+        },
         getRating(auth) {
             return sqlite.getRating(auth);
         },
@@ -69,6 +75,18 @@ function createDatabaseApi(options = {}) {
         },
         getAuthByDiscordId(discordId) {
             return sqlite.getAuthByDiscordId(discordId);
+        },
+        createTelegramLinkCode(code, target, expiresAt) {
+            return sqlite.createTelegramLinkCode(code, target, expiresAt);
+        },
+        redeemTelegramLinkCode(code) {
+            return sqlite.redeemTelegramLinkCode(code);
+        },
+        linkTelegramId(auth, telegramChatId) {
+            return sqlite.linkTelegramId(auth, telegramChatId);
+        },
+        getAuthByTelegramId(telegramChatId) {
+            return sqlite.getAuthByTelegramId(telegramChatId);
         },
         banAuth(auth, playerName, reason, durationMinutes) {
             return sqlite.banAuth(auth, playerName, reason, durationMinutes);
@@ -168,6 +186,18 @@ function createDatabaseApi(options = {}) {
         },
         getAllSilencedPairs() {
             return sqlite.getAllSilencedPairs();
+        },
+        recordHeadToHead(authA, authB, winnerAuth) {
+            return sqlite.recordHeadToHead(authA, authB, winnerAuth);
+        },
+        getHeadToHead(authA, authB) {
+            return sqlite.getHeadToHead(authA, authB);
+        },
+        getRecord(category) {
+            return sqlite.getRecord(category);
+        },
+        setRecord(category, value, holderAuth, holderName) {
+            return sqlite.setRecord(category, value, holderAuth, holderName);
         },
         setVipColor(auth, color) {
             return sqlite.setVipColor(auth, color);

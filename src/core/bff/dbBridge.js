@@ -78,6 +78,23 @@ module.exports = function createBffDatabaseBridge({ roomDb, sharedDb }) {
         addVip: (auth, playerName, expiresAt) => sharedDb.addVip(auth, playerName, expiresAt),
         removeVip: (auth) => sharedDb.removeVip(auth),
 
+        // Overflow password unification (requested 2026-08-17) — separate
+        // names from getSetting/setSetting above (which stay routed to this
+        // room's OWN file for everything else) so core/overflowPassword.js
+        // can be handed a db-shaped object whose getSetting/setSetting land
+        // here instead, without touching what "getSetting" means for any
+        // other BFF caller.
+        getSharedSetting: (key) => sharedDb.getSetting(key),
+        setSharedSetting: (key, value) => sharedDb.setSetting(key, value),
+
+        // Telegram account linking (requested 2026-08-17) — identity-level,
+        // same tier as masters/admins/vips above: one linked account should
+        // work regardless of which room a VIP actually plays.
+        createTelegramLinkCode: (code, target, expiresAt) => sharedDb.createTelegramLinkCode(code, target, expiresAt),
+        redeemTelegramLinkCode: (code) => sharedDb.redeemTelegramLinkCode(code),
+        linkTelegramId: (auth, telegramChatId) => sharedDb.linkTelegramId(auth, telegramChatId),
+        getAuthByTelegramId: (telegramChatId) => sharedDb.getAuthByTelegramId(telegramChatId),
+
         close() {
             roomDb.close();
             sharedDb.close();

@@ -28,12 +28,14 @@ module.exports = function createBffThreeDefLine({ room, state, Team, HaxNotifica
         }, null);
     }
 
-    // Explains the invisible wall the very first time it actually applies
-    // to someone (item #20) — this runs every tick, but the two branches
-    // below only fire on the cGroup transition edge itself (see the
-    // `=== plainGroup` / `!== plainGroup` guards), not on every tick the
-    // restriction merely continues to hold, so a player sees this once per
-    // spell as the most-advanced defender, not spammed every frame.
+    // Chat announcement on the cGroup transition edge was removed 2026-08-17
+    // — "most forward player" is inherently noisy in real play (two
+    // defenders jostling for position can flip which one of them is
+    // "furthest back" many times a second), so the transition edge itself
+    // fires far more often than the doc comment here used to assume,
+    // spamming the same two messages. The actual rule enforcement
+    // (setPlayerDiscProperties toggling cGroup) is unaffected — only the
+    // per-transition chat line is gone, pending a replacement (still TBD).
     function restrictTeam(players, mfpId, plainGroup, restrictedGroup) {
         for (const p of players) {
             const props = room.getPlayerDiscProperties(p.id);
@@ -41,16 +43,8 @@ module.exports = function createBffThreeDefLine({ room, state, Team, HaxNotifica
             const shouldBeRestricted = p.id === mfpId;
             if (shouldBeRestricted && props.cGroup === plainGroup) {
                 room.setPlayerDiscProperties(p.id, { cGroup: restrictedGroup });
-                room.sendAnnouncement(
-                    `🚧 Вы крайний защитник — дальше своей трети отступать нельзя (правило "3 защитника").`,
-                    p.id, warningColor, 'bold', HaxNotification.CHAT
-                );
             } else if (!shouldBeRestricted && props.cGroup !== plainGroup) {
                 room.setPlayerDiscProperties(p.id, { cGroup: plainGroup });
-                room.sendAnnouncement(
-                    `✅ Вы больше не крайний защитник — можно снова отступать в свою треть.`,
-                    p.id, successColor, 'bold', HaxNotification.CHAT
-                );
             }
         }
     }

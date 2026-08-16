@@ -8,12 +8,20 @@
  */
 const { formatRatingDisplay, formatRankPrefix } = require('../utils');
 
-const STAT_LABELS = { games: 'Игры', wins: 'Победы', goals: 'Голы', assists: 'Ассисты', CS: 'Сухие матчи', playtime: 'Время игры' };
+const STAT_LABELS = { games: 'Игры', wins: 'Победы', goals: 'Голы', assists: 'Ассисты', CS: 'Сухие матчи', playtime: 'Время игры', elo: 'ELO' };
 const CLUB_STAT_LABEL = 'Клубы';
 
 // Every category !tops/`/tops` can show, in display order. Exported (not
 // just a local const) so core/bff/roomStats.js can build its own combined
 // view (player stats + rating, no clubs) without duplicating this list.
+// 'elo' is deliberately NOT in this list, same reasoning as BFF's rating
+// being kept out too (see buildRatingRankingString's own comment below):
+// player_stats' elo_rating column is shared schema, but BFF never writes to
+// it, so every row would sit at the flat DEFAULT 1000 there — including it
+// here would make it show up (meaninglessly) in BFF's own combined !tops
+// view too, since that view iterates this exact same shared list against
+// its own db. buildEloRankingString/buildEloLeaderLine below are the
+// main-room-only equivalent of buildRatingRankingString/buildRatingLeaderLine.
 const RANKING_STAT_KEYS = ['games', 'wins', 'goals', 'assists', 'CS', 'playtime'];
 
 // One leaderboard's formatted line, or null if fewer than 5 players have any
@@ -116,6 +124,39 @@ async function buildRatingLeaderLine(db) {
     return `Рейтинг: ${leaderboard[0].playerName} (${formatRatingDisplay(leaderboard[0].ordinal)})`;
 }
 
+// Main-room-only ELO leaderboard (see stats/elo.js) — kept OUT of
+// RANKING_STAT_KEYS for the exact reason buildRatingRankingString above is:
+// the underlying column is shared schema but only meaningfully populated on
+// one side, so a generic inclusion would leak a flat, meaningless "everyone
+// is 1000" leaderboard into the other room's own combined !tops view. Same
+// 5-player quorum and medal/self-position treatment as every other
+// leaderboard builder here — no rescale needed (classic ELO is already in
+// human-readable ~1000-point units, unlike BFF's openskill ordinal).
+async function buildEloRankingString(db, auth) {
+    const leaderboard = await db.getLeaderboard('elo', 5);
+    if (leaderboard.length < 5) return null;
+    const vipAuths = new Set((await db.getVips()).map((v) => v.auth));
+    let rankingString = `ELO> `;
+    for (let i = 0; i < 5; i++) {
+        const vipBadge = vipAuths.has(leaderboard[i].auth) ? '⭐' : '';
+        rankingString += `${formatRankPrefix(i + 1)} ${vipBadge}${leaderboard[i].playerName} : ${leaderboard[i].value}, `;
+    }
+    rankingString = rankingString.substring(0, rankingString.length - 2);
+    if (auth && !leaderboard.some((row) => row.auth === auth)) {
+        const rankInfo = await db.getStatRank('elo', (await db.getPlayerStats(auth))?.elo ?? 1000);
+        if (rankInfo.total > 0) {
+            rankingString += `\nТы: #${rankInfo.rank} из ${rankInfo.total}`;
+        }
+    }
+    return rankingString;
+}
+
+async function buildEloLeaderLine(db) {
+    const leaderboard = await db.getLeaderboard('elo', 5);
+    if (leaderboard.length < 5) return null;
+    return `ELO: ${leaderboard[0].playerName} (${leaderboard[0].value})`;
+}
+
 async function buildClubLeaderLine(db) {
     const topClubs = await db.getTopClubs(1);
     if (topClubs.length === 0) return null;
@@ -195,6 +236,18 @@ module.exports = function createPrintStats({
         if (stats.ratingOrdinal != null) {
             text += ` [⚔️ Рейтинг: ${formatRatingDisplay(stats.ratingOrdinal)}]`;
         }
+        // Main-room-only ELO (see stats/elo.js), same ad-hoc opt-in pattern
+        // as ratingOrdinal above — deliberately a SEPARATE field from
+        // stats.elo itself, which the shared player_stats row always
+        // carries (a BFF player's row has it too, flat at the DEFAULT 1000,
+        // never written there): using presence of stats.elo directly as the
+        // "show this" signal would leak a meaningless "ELO: 1000" line into
+        // BFF's own !me. Only commands/player.js's globalStatsCommand ever
+        // sets eloDisplay.
+        if (stats.eloDisplay != null) {
+            const eloRank = await db.getStatRank('elo', stats.eloDisplay);
+            text += ` [🎯 ELO: ${stats.eloDisplay}, ранг: ${formatRank(eloRank)}]`;
+        }
         return text;
     }
 
@@ -209,5 +262,7 @@ module.exports.buildAllRankingsText = buildAllRankingsText;
 module.exports.buildClubRankingString = buildClubRankingString;
 module.exports.buildRatingRankingString = buildRatingRankingString;
 module.exports.buildRatingLeaderLine = buildRatingLeaderLine;
+module.exports.buildEloRankingString = buildEloRankingString;
+module.exports.buildEloLeaderLine = buildEloLeaderLine;
 module.exports.RANKING_STAT_KEYS = RANKING_STAT_KEYS;
 module.exports.STAT_LABELS = STAT_LABELS;

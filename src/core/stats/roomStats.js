@@ -4,7 +4,8 @@
  * Mutable room state is reached through `state`, never captured by value:
  * those bindings are reassigned on every room event.
  */
-const { buildRankingString, buildAllRankingsText, buildClubRankingString, STAT_LABELS } = require('./print');
+const { buildRankingString, buildAllRankingsText, buildClubRankingString, buildEloRankingString, buildEloLeaderLine, STAT_LABELS } = require('./print');
+const { INITIAL_ELO, computeEloDelta } = require('./elo');
 
 // !tops categories a fresh top-5 entry is worth privately pinging a player
 // about (requested 2026-08-16) — same 6 columns !tops/voteBan.js's own
@@ -112,7 +113,7 @@ module.exports = function createRoomStats({
             HaxNotification.MENTION
         );
     }
-    async function updatePlayerStats(player, teamStats) {
+    async function updatePlayerStats(player, teamStats, eloDelta = 0) {
         const auth = authArray[player.id][0];
         const pComp = getPlayerComp(player);
         const stats = (await db.getPlayerStats(auth)) ?? new HaxStatistics(player.name);
@@ -128,6 +129,7 @@ module.exports = function createRoomStats({
         stats.ownGoals += getOwnGoalsPlayer(pComp);
         stats.CS += CS;
         stats.playtime += getGametimePlayer(pComp);
+        stats.elo = (stats.elo ?? INITIAL_ELO) + eloDelta;
 
         // Must run BEFORE the save below: both getStatRank queries it makes
         // (one for `before[key]`, one for `after[key]`) rely on this
@@ -141,6 +143,19 @@ module.exports = function createRoomStats({
         await announceTopFiveEntries(room, db, HaxNotification, achievementColor, player, before, stats);
 
         await db.savePlayerStats(auth, stats);
+
+        // Private post-match ELO feedback — mirrors bff/matchFlow.js's own
+        // rating-delta DM (`📊 Рейтинг: ... (+N)`). Skipped for a genuine
+        // zero delta (the default `updatePlayerStats` is called with
+        // outside updateStats()'s real match-end path, e.g. direct test
+        // calls) — a "+0" message would just be noise, not feedback.
+        if (eloDelta !== 0) {
+            const sign = eloDelta > 0 ? '+' : '';
+            room.sendAnnouncement(
+                `🎯 ELO: ${stats.elo} (${sign}${eloDelta})`,
+                player.id, infoColor, 'bold', HaxNotification.CHAT
+            );
+        }
 
         // Round-number games-played milestone (item #24) — deliberately
         // narrow scope (see haxchill-ux-reliability-backlog project memory:
@@ -179,11 +194,29 @@ module.exports = function createRoomStats({
             ) &&
             state.teamRedStats.length >= teamSize && state.teamBlueStats.length >= teamSize
         ) {
+            // Team-average ELO exchange, computed ONCE up front from both
+            // teams' PRE-match ratings. Must happen before either loop below
+            // starts saving — reading Blue's average after Red's loop had
+            // already written new values would pick up Red's POST-match ELO
+            // instead, silently corrupting the exchange. actualRed uses 0.5
+            // for a draw (see state.lastWinner's own "sits outside RED/BLUE
+            // on a draw" comment above); computeEloDelta's negation is exact
+            // for a draw too, not just a decisive result.
+            const redElos = await Promise.all(state.teamRedStats.map(async (p) =>
+                (await db.getPlayerStats(authArray[p.id][0]))?.elo ?? INITIAL_ELO));
+            const blueElos = await Promise.all(state.teamBlueStats.map(async (p) =>
+                (await db.getPlayerStats(authArray[p.id][0]))?.elo ?? INITIAL_ELO));
+            const avgRed = redElos.reduce((a, b) => a + b, 0) / redElos.length;
+            const avgBlue = blueElos.reduce((a, b) => a + b, 0) / blueElos.length;
+            const actualRed = state.lastWinner === Team.RED ? 1 : state.lastWinner === Team.BLUE ? 0 : 0.5;
+            const eloDeltaRed = computeEloDelta(avgRed, avgBlue, actualRed);
+            const eloDeltaBlue = -eloDeltaRed;
+
             for (let player of state.teamRedStats) {
-                await updatePlayerStats(player, Team.RED);
+                await updatePlayerStats(player, Team.RED, eloDeltaRed);
             }
             for (let player of state.teamBlueStats) {
-                await updatePlayerStats(player, Team.BLUE);
+                await updatePlayerStats(player, Team.BLUE, eloDeltaBlue);
             }
             // Refreshes the "who currently holds #1" snapshot trophies
             // (commands/trophies.js) and the chat prefix read off of —
@@ -210,7 +243,13 @@ module.exports = function createRoomStats({
         // buildRankingString's own self-position line only ever shows up
         // for someone who actually asked.
         const auth = id !== 0 ? authArray[id]?.[0] : undefined;
-        const rankingString = await buildRankingString(db, getTimeStats, statKey, auth);
+        // 'elo' isn't in RANKING_STAT_KEYS/LEADERBOARD_COLUMNS' generic path
+        // on purpose (see buildEloRankingString's own comment — kept out so
+        // it never leaks into BFF's combined !tops view, which iterates the
+        // same shared list against its own always-1000 rows).
+        const rankingString = statKey === 'elo'
+            ? await buildEloRankingString(db, auth)
+            : await buildRankingString(db, getTimeStats, statKey, auth);
         if (rankingString == null) {
             if (id != 0) {
                 room.sendAnnouncement(
@@ -233,9 +272,15 @@ module.exports = function createRoomStats({
     }
 
     // !tops with no argument — every category in one message, skipping any
-    // that don't have the 5-player quorum yet rather than erroring.
+    // that don't have the 5-player quorum yet rather than erroring. The ELO
+    // leader line is appended on top of the generic text (same pattern
+    // BFF's own printAllRankings uses for its rating line) rather than
+    // folded into buildAllRankingsText itself, since 'elo' deliberately
+    // isn't in the shared RANKING_STAT_KEYS list.
     async function printAllRankings(id = 0) {
-        const text = await buildAllRankingsText(db, getTimeStats);
+        const genericText = await buildAllRankingsText(db, getTimeStats);
+        const eloLine = await buildEloLeaderLine(db);
+        const text = [genericText, eloLine].filter((line) => line != null).join('\n') || null;
         if (text == null) {
             room.sendAnnouncement(
                 'Недостаточно игр сыграно !',

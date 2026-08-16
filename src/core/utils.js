@@ -152,6 +152,30 @@ function renderProgressBar(current, max) {
     return `${filled}${empty} ${current}/${max}`;
 }
 
+// Pure decision function for item #14 (requested 2026-08-17, "clean-sheet
+// watch") — separated from entry.js's own checkTime() specifically so it's
+// testable in isolation (entry.js is the composition root, not an
+// extracted, requireable core/ module). Returns the team enum value whose
+// clean sheet is under threat, or null if nothing to announce right now.
+// The caller owns the "only once per match" gate (alreadyAnnounced) and
+// the actual room.sendAnnouncement call — this only decides WHETHER to.
+// A still-scoreless 0-0 never qualifies (`> 0` on both sides below) — that
+// isn't a clean sheet under threat, it's just a slow match with nothing
+// either side has defended yet.
+function detectCleanSheetWatch(scores, playSituation, alreadyAnnounced, thresholdRatio, Situation, Team) {
+    if (
+        scores.timeLimit == 0 ||
+        scores.time / scores.timeLimit < thresholdRatio ||
+        playSituation != Situation.PLAY ||
+        alreadyAnnounced
+    ) {
+        return null;
+    }
+    if (scores.blue === 0 && scores.red > 0) return Team.RED;
+    if (scores.red === 0 && scores.blue > 0) return Team.BLUE;
+    return null;
+}
+
 // Win-streak display (requested 2026-08-16) — below 3 it's just the plain
 // "Текущая серия: N" wording both rooms already used; from 3 up it gets a
 // 🔥 escalation instead, since a 2-game "streak" barely means anything but a
@@ -231,6 +255,7 @@ module.exports = {
     formatRatingDisplay,
     formatRankPrefix,
     renderProgressBar,
+    detectCleanSheetWatch,
     formatStreakText,
     formatTrophyLabel,
     parseEquippedTrophy,

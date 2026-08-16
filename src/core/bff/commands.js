@@ -279,6 +279,7 @@ module.exports = function createBffCommands({
             `!voteban #<id> - начать голосование за временный бан игрока\n` +
             `!report - позвать администрацию\n` +
             `!afk, !afks - AFK-режим и список AFK ("jj" в чате тоже выводит из AFK)\n` +
+            `!telegram [код] - привязать Telegram-аккаунт (для /pass — пароль от заполненной комнаты, только VIP)\n` +
             `!bb - мгновенно выйти из комнаты`;
         if (getRole(player) >= Role.VIP) {
             text += `\n\nVIP:\n` +

@@ -102,6 +102,98 @@ console.log('\n--- utils.js: formatStreakText escalation tiers ---');
     check('10+ is three fires', formatStreakText(10), '🔥🔥🔥 Серия: 10');
 }
 
+console.log('\n--- utils.js: detectCleanSheetWatch (item #14, requested 2026-08-17) ---');
+{
+    const { detectCleanSheetWatch } = require(path.join(CORE, 'utils'));
+    const TeamLocal = { RED: 1, BLUE: 2 };
+    const SituationLocal = { STOP: 0, KICKOFF: 1, PLAY: 2, GOAL: 3 };
+    check(
+        'below the time threshold, nothing to announce',
+        detectCleanSheetWatch({ time: 100, timeLimit: 300, red: 2, blue: 0 }, SituationLocal.PLAY, false, 0.8, SituationLocal, TeamLocal),
+        null
+    );
+    check(
+        'a still-scoreless 0-0 never qualifies, even late',
+        detectCleanSheetWatch({ time: 250, timeLimit: 300, red: 0, blue: 0 }, SituationLocal.PLAY, false, 0.8, SituationLocal, TeamLocal),
+        null
+    );
+    check(
+        'RED ahead and untroubled defensively flags RED\'s clean sheet',
+        detectCleanSheetWatch({ time: 250, timeLimit: 300, red: 2, blue: 0 }, SituationLocal.PLAY, false, 0.8, SituationLocal, TeamLocal),
+        TeamLocal.RED
+    );
+    check(
+        'BLUE ahead and untroubled defensively flags BLUE\'s clean sheet',
+        detectCleanSheetWatch({ time: 250, timeLimit: 300, red: 0, blue: 2 }, SituationLocal.PLAY, false, 0.8, SituationLocal, TeamLocal),
+        TeamLocal.BLUE
+    );
+    check(
+        'already announced this match — no repeat',
+        detectCleanSheetWatch({ time: 250, timeLimit: 300, red: 2, blue: 0 }, SituationLocal.PLAY, true, 0.8, SituationLocal, TeamLocal),
+        null
+    );
+    check(
+        'not actually in live play (e.g. a frozen kickoff) — no announce',
+        detectCleanSheetWatch({ time: 250, timeLimit: 300, red: 2, blue: 0 }, SituationLocal.KICKOFF, false, 0.8, SituationLocal, TeamLocal),
+        null
+    );
+}
+
+console.log('\n--- core/matchHistory.js: head-to-head recording + win-streak record (items #2/#10/#11/#13) ---');
+(async () => {
+    const { recordHeadToHead, checkWinStreakRecord } = require(path.join(CORE, 'matchHistory'));
+    const { createSqliteDatabase } = require(path.join(__dirname, '..', 'db', 'sqlite'));
+    const db = createSqliteDatabase(':memory:');
+    db.init();
+    const TeamLocal = { RED: 1, BLUE: 2, SPECTATORS: 0 };
+    const authArray = { 1: ['AUTH_ALICE'], 2: ['AUTH_BOB'], 3: ['AUTH_CAROL'] };
+
+    // --- recordHeadToHead ---
+    await recordHeadToHead(db, authArray, [{ id: 1 }], [{ id: 2 }], TeamLocal.RED, TeamLocal);
+    check('a RED win records a win for the red-side auth', db.getHeadToHead('AUTH_ALICE', 'AUTH_BOB'), { winsFor: 1, winsAgainst: 0, games: 1, lastPlayedAt: db.getHeadToHead('AUTH_ALICE', 'AUTH_BOB').lastPlayedAt });
+    check('...and reads as a loss from the other side\'s perspective', db.getHeadToHead('AUTH_BOB', 'AUTH_ALICE').winsAgainst, 1);
+
+    await recordHeadToHead(db, authArray, [{ id: 1 }], [{ id: 2 }], TeamLocal.SPECTATORS, TeamLocal);
+    check('a draw (winner outside RED/BLUE) records the pairing without moving either win count', db.getHeadToHead('AUTH_ALICE', 'AUTH_BOB'), { winsFor: 1, winsAgainst: 0, games: 2, lastPlayedAt: db.getHeadToHead('AUTH_ALICE', 'AUTH_BOB').lastPlayedAt });
+
+    // Multi-player pairing (a real 2v1) — every red/blue combination gets
+    // its own update, not just the first pair — including Alice-vs-Bob
+    // AGAIN (Alice is on red here too), a genuine third encounter for
+    // that specific pair, not a bug.
+    await recordHeadToHead(db, authArray, [{ id: 1 }, { id: 3 }], [{ id: 2 }], TeamLocal.BLUE, TeamLocal);
+    check('a 2v1 records BOTH red players against the same blue opponent', db.getHeadToHead('AUTH_CAROL', 'AUTH_BOB').winsAgainst, 1);
+    check('...and the pre-existing Alice/Bob pair also gets THIS match counted (Alice is on red here too)', db.getHeadToHead('AUTH_ALICE', 'AUTH_BOB').games, 3);
+
+    check('never-played pair has no row at all', db.getHeadToHead('AUTH_ALICE', 'AUTH_CAROL'), null);
+
+    // --- checkWinStreakRecord ---
+    const sentLocal = [];
+    const roomMock = { sendAnnouncement: (msg, id, color, style, sound) => sentLocal.push({ msg, color, style, sound }) };
+    const HaxNotificationMock = { CHAT: 1, MENTION: 2 };
+
+    await checkWinStreakRecord(db, roomMock, HaxNotificationMock, 99, authArray, { id: 1, name: 'Alice' }, 5);
+    check('a first-ever record is set and announced', db.getRecord('winStreak'), { value: 5, holderAuth: 'AUTH_ALICE', holderName: 'Alice', achievedAt: db.getRecord('winStreak').achievedAt });
+    check('...in the achievementColor passed through', sentLocal[0].color, 99);
+    check('...and MENTION sound, not CHAT', sentLocal[0].sound, HaxNotificationMock.MENTION);
+    check('...names no previous record the first time', sentLocal[0].msg.includes('прошлый рекорд'), false);
+
+    sentLocal.length = 0;
+    await checkWinStreakRecord(db, roomMock, HaxNotificationMock, 99, authArray, { id: 2, name: 'Bob' }, 3);
+    check('a LOWER streak than the current record does not overwrite it', db.getRecord('winStreak').value, 5);
+    check('...and sends nothing at all', sentLocal, []);
+
+    sentLocal.length = 0;
+    await checkWinStreakRecord(db, roomMock, HaxNotificationMock, 99, authArray, { id: 2, name: 'Bob' }, 8);
+    check('a genuinely higher streak overwrites the record', db.getRecord('winStreak'), { value: 8, holderAuth: 'AUTH_BOB', holderName: 'Bob', achievedAt: db.getRecord('winStreak').achievedAt });
+    check('...and names the previous holder in the announcement', sentLocal[0].msg.includes('прошлый рекорд: 5, держал(а) Alice'), true);
+
+    sentLocal.length = 0;
+    await checkWinStreakRecord(db, roomMock, HaxNotificationMock, 99, authArray, null, 100);
+    check('a falsy captain (defensive case) is a silent no-op, not a crash', sentLocal, []);
+
+    db.close();
+})();
+
 console.log('\n--- chat.js: helpers must see state populated AFTER wiring ---');
 {
     let playersAll = [];
@@ -396,6 +488,17 @@ console.log('\n--- commands/master.js: writes must land in shared state ---');
     await master.authBanListCommand(caller, '!authbans');
     check('authBanListCommand lists the remaining auth ban', /AUTH_OFFLINE/.test(sent[0].msg), true);
     check('authBanListCommand shows the remaining duration', /осталось \d+ мин\./.test(sent[0].msg), true);
+    check('authBanListCommand shows an [i] index instead of the raw auth (requested 2026-08-17 — unbanning by auth was inconvenient)', /\[0\]/.test(sent[0].msg), true);
+
+    // A single-entry list: [0] deterministically refers to AUTH_OFFLINE.
+    sent.length = 0;
+    await master.unbanAuthCommand(caller, '!unbanauth 0');
+    check('unbanAuthCommand accepts the [i] index shown by authBanListCommand', db.getAuthBan('AUTH_OFFLINE'), null);
+    check('...and confirms by the real player name, not the index', /AUTH_OFFLINE разбанен по auth/.test(sent[0].msg), true);
+
+    sent.length = 0;
+    await master.unbanAuthCommand(caller, '!unbanauth 0');
+    check('unbanAuthCommand with an out-of-range index (list is now empty) reports so, not a crash', /Неверный номер/.test(sent[0].msg), true);
 
     // !restrictcmd/!unrestrictcmd/!cmdrestrictions — same #<id>|auth
     // resolution and by-auth persistence as !banauth above, but keyed on
@@ -531,6 +634,7 @@ console.log('\n--- db + roomStats.js/player.js: player data actually round-trips
         this.assists = 0;
         this.CS = 0;
         this.ownGoals = 0;
+        this.elo = 1000;
     };
 
     const authArray = { 1: ['AUTH_ALICE'], 2: ['AUTH_BOB'], 3: ['AUTH_NEW_PLAYER'] };
@@ -593,10 +697,14 @@ console.log('\n--- db + roomStats.js/player.js: player data actually round-trips
     // anything at this point in the test).
     sent.length = 0;
     await roomStats.printAllRankings(0);
-    check('printAllRankings combines every category into one message', sent[0].msg.split('\n').length, 7);
+    // 6 categories + hint line + the ELO line appended on top (all 5 rows
+    // sit at the elo_rating DEFAULT 1000 at this point — the quorum only
+    // needs 5 rows to exist, not 5 players who've actually had ELO moved).
+    check('printAllRankings combines every category into one message', sent[0].msg.split('\n').length, 8);
     check('printAllRankings includes the goals leader', /Голы: Filler2 \(100\)/.test(sent[0].msg), true);
     check('printAllRankings includes the playtime leader too', /Время игры:/.test(sent[0].msg), true);
     check('...and points at !tops <category> for the full top-5', /Полная таблица по категории: !tops <games\|wins\|goals\|assists\|cs\|playtime\|clubs>/.test(sent[0].msg), true);
+    check('...and the ELO leader line is appended after it (elo is deliberately outside the generic list)', /ELO: \w+ \(1000\)/.test(sent[0].msg), true);
 
     const printRankingsCalls = [];
     const printAllRankingsCalls = [];
@@ -639,6 +747,10 @@ console.log('\n--- db + roomStats.js/player.js: player data actually round-trips
     printRankingsCalls.length = 0;
     await player.topsCommand({ id: 1, name: 'Alice' }, '!tops pt');
     check('!tops pt resolves the "pt" alias to "playtime"', printRankingsCalls, [{ key: 'playtime', id: 1 }]);
+
+    printRankingsCalls.length = 0;
+    await player.topsCommand({ id: 1, name: 'Alice' }, '!tops elo');
+    check('!tops elo is no longer rejected as an unknown category', printRankingsCalls, [{ key: 'elo', id: 1 }]);
 
     printClubRankingsCalls.length = 0;
     printRankingsCalls.length = 0;
@@ -1087,6 +1199,41 @@ console.log('\n--- db + roomStats.js/player.js: player data actually round-trips
     db.removeSilence('AUTH_ALICE', 'AUTH_CLUB_SCORER');
     db.removeSilence('AUTH_NEW_PLAYER', 'AUTH_BOB');
 
+    // !vs #<id> (requested 2026-08-17, item #2) — head-to-head comparison.
+    // Reuses room.getPlayer (id 1 -> Alice, id 2 -> Bob) already set up
+    // above for the !silence tests.
+    sent.length = 0;
+    await player.vsCommand({ id: 1, name: 'Alice' }, '!vs');
+    check('!vs with no argument shows usage', /Использование/.test(sent[0].msg), true);
+
+    sent.length = 0;
+    await player.vsCommand({ id: 1, name: 'Alice' }, '!vs #1');
+    check('!vs against yourself is rejected', /самим собой/.test(sent[0].msg), true);
+
+    // Real accumulated numbers rather than hardcoded guesses — this IIFE
+    // has already run many prior matches/mutations against Alice/Bob by
+    // this point, so read the actual current values instead of assuming.
+    const aliceGoalsAtThisPoint = db.getPlayerStats('AUTH_ALICE').goals;
+    const bobGoalsAtThisPoint = db.getPlayerStats('AUTH_BOB').goals;
+    sent.length = 0;
+    await player.vsCommand({ id: 1, name: 'Alice' }, '!vs #2');
+    check('!vs shows both player names', /Alice.*vs.*Bob/.test(sent[0].msg), true);
+    check('!vs compares real stat numbers straight off the db', sent[0].msg.includes(`⚽ Голы: ${aliceGoalsAtThisPoint} — ${bobGoalsAtThisPoint}`), true);
+    check('...with no head-to-head history yet, says so explicitly', /Личных встреч.*ещё не было/.test(sent[0].msg), true);
+
+    db.recordHeadToHead('AUTH_ALICE', 'AUTH_BOB', 'AUTH_ALICE');
+    db.recordHeadToHead('AUTH_ALICE', 'AUTH_BOB', 'AUTH_ALICE');
+    db.recordHeadToHead('AUTH_ALICE', 'AUTH_BOB', 'AUTH_BOB');
+    sent.length = 0;
+    await player.vsCommand({ id: 1, name: 'Alice' }, '!vs #2');
+    check('!vs shows the real head-to-head record, oriented to the CALLER (Alice: 2 wins, 1 loss)', /Личные встречи: 2-1/.test(sent[0].msg), true);
+    check('...and calls out that it favors the caller', /\(в твою пользу\)/.test(sent[0].msg), true);
+
+    sent.length = 0;
+    await player.vsCommand({ id: 2, name: 'Bob' }, '!vs #1');
+    check('the SAME record, asked from Bob\'s side, correctly flips to 1-2', /Личные встречи: 1-2/.test(sent[0].msg), true);
+    check('...and reads as not in Bob\'s favor', /\(не в твою пользу\)/.test(sent[0].msg), true);
+
     sent.length = 0;
     await player.linkDiscordCommand({ id: 1, name: 'Alice' }, '!discord 123456789012345678');
     check('linkDiscordCommand stores the link', db.getDiscordIdByAuth('AUTH_ALICE'), '123456789012345678');
@@ -1274,6 +1421,137 @@ console.log('\n--- db + roomStats.js/player.js: player data actually round-trips
     check('the very next (non-milestone) game, 51, announces nothing', sent.some((s) => /сыграл\(а\)/.test(s.msg)), false);
 
     db.close();
+})();
+
+console.log('\n--- stats/roomStats.js + stats/elo.js: main-room ELO exchange (requested 2026-08-17) ---');
+(async () => {
+    const { createSqliteDatabase } = require(path.join(__dirname, '..', 'db', 'sqlite'));
+    const dbElo = createSqliteDatabase(':memory:');
+    dbElo.init();
+    const HaxStatisticsElo = function (playerName = '') {
+        this.playerName = playerName; this.games = 0; this.wins = 0; this.winrate = '0.00%';
+        this.playtime = 0; this.goals = 0; this.assists = 0; this.CS = 0; this.ownGoals = 0; this.elo = 1000;
+    };
+    // Pre-seeded so the two teams' PRE-match averages differ from a flat
+    // 1000/1000 — avgRed = (1100+900)/2 = 1000, avgBlue = (1000+1000)/2 =
+    // 1000, so this is actually an even matchup despite R1/R2 individually
+    // differing — a deliberate check that the exchange uses the TEAM
+    // average, not a naive per-player expected score.
+    dbElo.savePlayerStats('AUTH_R1', Object.assign(new HaxStatisticsElo('R1'), { elo: 1100 }));
+    dbElo.savePlayerStats('AUTH_R2', Object.assign(new HaxStatisticsElo('R2'), { elo: 900 }));
+    dbElo.savePlayerStats('AUTH_B1', Object.assign(new HaxStatisticsElo('B1'), { elo: 1000 }));
+    dbElo.savePlayerStats('AUTH_B2', Object.assign(new HaxStatisticsElo('B2'), { elo: 1000 }));
+
+    const sentElo = [];
+    const roomElo = { sendAnnouncement: (msg, id, color, style) => sentElo.push({ msg, id, color, style }) };
+    const authArrayElo = { 1: ['AUTH_R1'], 2: ['AUTH_R2'], 3: ['AUTH_B1'], 4: ['AUTH_B2'] };
+    const stateElo = {
+        lastWinner: Team.RED,
+        teamRedStats: [{ id: 1, name: 'R1' }, { id: 2, name: 'R2' }],
+        teamBlueStats: [{ id: 3, name: 'B1' }, { id: 4, name: 'B2' }],
+        players: [1, 2, 3, 4],
+        game: { scores: { time: 300, timeLimit: 300, red: 3, blue: 0, scoreLimit: 3 } },
+        clubMembers: [],
+    };
+    const roomStatsElo = require(path.join(CORE, 'stats', 'roomStats'))({
+        room: roomElo, state: stateElo, Team, authArray: authArrayElo, db: dbElo, HaxStatistics: HaxStatisticsElo, HaxNotification,
+        errorColor: 3, infoColor: 5, announcementColor: 1, achievementColor: 99, teamSize: 2,
+        getAssistsPlayer: () => 0, getCSPlayer: () => 0, getGametimePlayer: () => 60, getGoalsPlayer: () => 0,
+        getOwnGoalsPlayer: () => 0, getPlayerComp: (player) => player, getTimeStats: (s) => `${s}s`,
+        applyVipGrant: async () => {}, random: () => 1, // 1 >= VIP_LOTTERY_CHANCE always, so the lottery never fires
+    });
+
+    await roomStatsElo.updateStats();
+    // Even matchup (both team averages are exactly 1000) -> expected score
+    // 0.5 each way -> delta = round(32 * (1 - 0.5)) = 16 for the winner.
+    check('the winning team\'s ELO moves up by the computed delta', dbElo.getPlayerStats('AUTH_R1').elo, 1116);
+    check('...both winners get the SAME delta (team-average exchange, not per-player)', dbElo.getPlayerStats('AUTH_R2').elo, 916);
+    check('the losing team moves down by the exact negation', dbElo.getPlayerStats('AUTH_B1').elo, 984);
+    check('...symmetric for both losers too', dbElo.getPlayerStats('AUTH_B2').elo, 984);
+
+    const eloDms = sentElo.filter((s) => /^🎯 ELO:/.test(s.msg));
+    check('a private ELO delta DM is sent to every one of the 4 players', eloDms.length, 4);
+    check('...privately (not broadcast)', eloDms.every((s) => s.id != null), true);
+    check('...winners see a +16 delta', eloDms.find((s) => s.id === 1).msg, '🎯 ELO: 1116 (+16)');
+    check('...losers see a -16 delta', eloDms.find((s) => s.id === 3).msg, '🎯 ELO: 984 (-16)');
+
+    // A non-full-house stop must not touch ELO at all — same gate goals/
+    // wins already require (state.teamRedStats/teamBlueStats below teamSize).
+    stateElo.teamRedStats = [{ id: 1, name: 'R1' }];
+    stateElo.teamBlueStats = [{ id: 3, name: 'B1' }];
+    sentElo.length = 0;
+    await roomStatsElo.updateStats();
+    check('a non-full-house match end leaves ELO untouched', dbElo.getPlayerStats('AUTH_R1').elo, 1116);
+    check('...and sends no ELO DM either', sentElo.some((s) => /^🎯 ELO:/.test(s.msg)), false);
+
+    dbElo.close();
+})();
+
+console.log('\n--- core/stats/elo.js: pure classic-ELO math ---');
+{
+    const { expectedScore, computeEloDelta, K_FACTOR, INITIAL_ELO } = require(path.join(CORE, 'stats', 'elo'));
+    check('INITIAL_ELO is the same 1000 baseline the DB column defaults to', INITIAL_ELO, 1000);
+    check('K_FACTOR is the standard chess default', K_FACTOR, 32);
+    check('an even matchup gives each side exactly 50% expected score', expectedScore(1000, 1000), 0.5);
+    check('expectedScore is symmetric: A\'s + B\'s always sum to 1', expectedScore(1200, 1000) + expectedScore(1000, 1200), 1);
+    check('the higher-rated side has a higher expected score', expectedScore(1200, 1000) > 0.5, true);
+
+    check('an even matchup: winner gains half of K, rounded', computeEloDelta(1000, 1000, 1), 16);
+    check('an even matchup: loser loses the exact same amount', computeEloDelta(1000, 1000, 0), -16);
+    check('an even matchup: a draw moves nothing', computeEloDelta(1000, 1000, 0.5), 0);
+    // A big underdog (400 points below) winning nets close to the full
+    // K-factor; a heavy favorite winning as expected nets almost nothing.
+    // expectedScore(1000,1400) = 1/11 -> round(32*(1-1/11)) = round(29.09) = 29.
+    check('an underdog beating a big favorite gains close to the full K-factor', computeEloDelta(1000, 1400, 1), 29);
+    // expectedScore(1400,1000) = 10/11 -> round(32*(1-10/11)) = round(2.91) = 3.
+    check('a big favorite beating a big underdog gains almost nothing', computeEloDelta(1400, 1000, 1), 3);
+    // Symmetric zero-sum: B's delta for the exact same result is always A's negation.
+    check('B\'s delta is always the exact negation of A\'s, decisive result', -computeEloDelta(1000, 1400, 1), computeEloDelta(1400, 1000, 0));
+    check('...and for a draw too', -computeEloDelta(1000, 1400, 0.5), computeEloDelta(1400, 1000, 0.5));
+}
+
+console.log('\n--- scripts/backfill-elo.js: initial ELO seed for existing players ---');
+(async () => {
+    const { computeSeedRatings, MIN_ELO, MAX_ELO } = require(path.join(__dirname, '..', 'scripts', 'backfill-elo'));
+    // A clear spread: Ace has a great record, Grinder plays a lot but loses
+    // more than they win, everyone else sits in between — this is the
+    // population computeSeedRatings' own z-scoring is relative to.
+    const rows = [
+        { auth: 'AUTH_ACE', playerName: 'Ace', games: 50, wins: 40, goals: 60, assists: 30, CS: 20 },
+        { auth: 'AUTH_MID1', playerName: 'Mid1', games: 20, wins: 10, goals: 10, assists: 5, CS: 4 },
+        { auth: 'AUTH_MID2', playerName: 'Mid2', games: 20, wins: 10, goals: 8, assists: 6, CS: 3 },
+        { auth: 'AUTH_MID3', playerName: 'Mid3', games: 20, wins: 10, goals: 9, assists: 4, CS: 5 },
+        { auth: 'AUTH_GRINDER', playerName: 'Grinder', games: 60, wins: 15, goals: 5, assists: 5, CS: 2 },
+    ];
+    const seeded = computeSeedRatings(rows);
+    const byAuth = Object.fromEntries(seeded.map((p) => [p.auth, p.elo]));
+    check('a strong winrate + high output player seeds above the 1000 baseline', byAuth.AUTH_ACE > 1000, true);
+    check('a poor winrate player seeds below the baseline despite lots of games', byAuth.AUTH_GRINDER < 1000, true);
+    check('the best record seeds strictly higher than a mediocre one', byAuth.AUTH_ACE > byAuth.AUTH_MID1, true);
+    check('every seed stays within the clip band', seeded.every((p) => p.elo >= MIN_ELO && p.elo <= MAX_ELO), true);
+    check('every row produces an integer ELO', seeded.every((p) => Number.isInteger(p.elo)), true);
+
+    // Below MIN_GAMES: computeSeedRatings is only ever called with rows the
+    // DB layer already filtered (getPlayerStatsForSeed(minGames)) — the
+    // caller (run()) is what enforces the threshold, not this pure function
+    // — so verify THAT boundary via a fake db instead.
+    const dryRunLog = [];
+    const originalLog = console.log;
+    console.log = (msg) => dryRunLog.push(msg);
+    let setCalls = [];
+    const fakeDb = {
+        getPlayerStatsForSeed: async (minGames) => rows.filter((r) => r.games >= minGames),
+        setEloRating: async (auth, elo) => setCalls.push({ auth, elo }),
+    };
+    const { run, MIN_GAMES } = require(path.join(__dirname, '..', 'scripts', 'backfill-elo'));
+    check('MIN_GAMES matches the RIVALRY_MIN_GAMES convention used elsewhere', MIN_GAMES, 5);
+    await run({ db: fakeDb, dryRun: true });
+    console.log = originalLog;
+    check('--dry-run computes but writes nothing', setCalls.length, 0);
+
+    setCalls = [];
+    await run({ db: fakeDb, dryRun: false });
+    check('without --dry-run, every qualifying player is written', setCalls.length, rows.length);
 })();
 
 console.log('\n--- stats/roomStats.js: private top-5 entry ping (requested 2026-08-16) ---');
@@ -1475,7 +1753,7 @@ console.log('\n--- core/commands/club.js: create/invite/join/kick/leave/disband/
 
     sent.length = 0;
     club.clubInfoCommand(alice, '!club');
-    check('!club shows the requested "name (members/limit): captain (c)" format', sent[0].msg, 'Falcons (1/5): Alice (c)');
+    check('!club shows "name (members/limit): captain[id] (c)" — [id] is the room id (requested 2026-08-17, so captains can !club kick #<id> without asking the owner)', sent[0].msg, 'Falcons (1/5): Alice[1] (c)');
 
     sent.length = 0;
     await club.clubInviteCommand(bob, '!clubinvite #1');
@@ -1500,6 +1778,21 @@ console.log('\n--- core/commands/club.js: create/invite/join/kick/leave/disband/
     sent.length = 0;
     await club.clubJoinCommand(bob, '!clubjoin');
     check('a player already in a club cannot join another', /уже состоите/.test(sent[0].msg), true);
+
+    sent.length = 0;
+    club.clubInfoCommand(alice, '!club');
+    check('a plain member also gets [id] shown, no role suffix', sent[0].msg, 'Falcons (2/5): Alice[1] (c), Bob[2]');
+
+    // Bob goes offline (removed from the live roster, membership untouched)
+    // — no live id to show, so the bracket is simply omitted for him;
+    // "!club kick #<id>" couldn't target an offline player that way either
+    // (it still accepts a raw auth for that, just not surfaced in this list).
+    const playersAllWithBob = state.playersAll;
+    state.playersAll = state.playersAll.filter((p) => p.id !== 2);
+    sent.length = 0;
+    club.clubInfoCommand(alice, '!club');
+    check('an offline member is shown with no [id] bracket at all', sent[0].msg, 'Falcons (2/5): Alice[1] (c), Bob');
+    state.playersAll = playersAllWithBob;
 
     sent.length = 0;
     await club.clubLeaveCommand(alice, '!clubleave');
@@ -1593,7 +1886,7 @@ console.log('\n--- core/commands/club.js: create/invite/join/kick/leave/disband/
 
     sent.length = 0;
     club.clubInfoCommand(alice, '!club');
-    check('!club lists a second regular member after the captain', sent[0].msg, 'Falcons (2/5): Alice (c), Carol');
+    check('!club lists a second regular member after the captain', sent[0].msg, 'Falcons (2/5): Alice[1] (c), Carol[3]');
 
     sent.length = 0;
     await club.clubAssistantCommand(carol, '!clubassistent Carol');
@@ -1615,7 +1908,7 @@ console.log('\n--- core/commands/club.js: create/invite/join/kick/leave/disband/
 
     sent.length = 0;
     club.clubInfoCommand(alice, '!club');
-    check('!club lists the assistant with (a) right after the captain', sent[0].msg, 'Falcons (2/5): Alice (c), Carol (a)');
+    check('!club lists the assistant with (a) right after the captain', sent[0].msg, 'Falcons (2/5): Alice[1] (c), Carol[3] (a)');
 
     sent.length = 0;
     await club.clubInviteCommand(carol, '!clubinvite #2');
@@ -1782,7 +2075,7 @@ console.log('\n--- core/commands/club.js: clubCommand dispatcher — !club <subc
 
     sent.length = 0;
     await club.clubCommand(alice, '!club show');
-    check('"!club show" now reports the just-created club', /Falcons \(1\/5\): Alice \(c\)/.test(sent[0].msg), true);
+    check('"!club show" now reports the just-created club', /Falcons \(1\/5\): Alice\[1\] \(c\)/.test(sent[0].msg), true);
 
     sent.length = 0;
     await club.clubCommand(alice, '!club invite #2');
@@ -2623,28 +2916,37 @@ console.log('\n--- discord.js: message/interaction-handling logic (no live Disco
     check('!banauth on an offline auth does not attempt a kick', kicked, []);
     check('!banauth on an offline auth confirms without a kick', banOfflineReply, 'AUTH_OFFLINE забанен по auth на 30 мин. (сейчас не в комнате).');
 
-    check('!unbanauth with no auth shows usage', await handleIncomingMessage(msg('OWNER_ID', '!unbanauth'), authBanDeps), 'Использование: !unbanauth <auth>');
+    check('!unbanauth with no auth shows usage', await handleIncomingMessage(msg('OWNER_ID', '!unbanauth'), authBanDeps), 'Использование: !unbanauth <auth|номер>');
     check('!unbanauth from a non-owner is ignored', await handleIncomingMessage(msg('SOME_OTHER_USER', '!unbanauth AUTH_X'), authBanDeps), null);
     check('!unbanauth on an auth that was never banned reports so', await handleIncomingMessage(msg('OWNER_ID', '!unbanauth AUTH_GHOST'), authBanDeps), 'Этот auth не забанен.');
+    check('!unbanauth on an out-of-range index reports so', await handleIncomingMessage(msg('OWNER_ID', '!unbanauth 99'), authBanDeps), 'Неверный номер. Введите "!authbans" чтобы увидеть список.');
 
-    // Sorted before comparing: both bans can land in the same
-    // CURRENT_TIMESTAMP second, so their listing order isn't guaranteed.
+    // Each line's content is checked with its trailing [i] index stripped
+    // off and compared unordered — both bans can land in the same
+    // CURRENT_TIMESTAMP second, so WHICH index (0 or 1) either one gets
+    // isn't guaranteed, only that every line has one.
     const authbansReply = await handleIncomingMessage(msg('OWNER_ID', '!authbans'), authBanDeps);
-    check('!authbans lists both active bans with remaining time', authbansReply.split('\n').sort(), [
-        'AUTH_OFFLINE [AUTH_OFFLINE] — осталось 30 мин. (griefing)',
-        'NewNick [AUTH_X] — осталось 60 мин. (cheating)',
+    const authbansLines = authbansReply.split('\n');
+    check('!authbans lists both active bans with remaining time', authbansLines.map((l) => l.replace(/ \[\d+\]$/, '')).sort(), [
+        'AUTH_OFFLINE — осталось 30 мин. (griefing)',
+        'NewNick — осталось 60 мин. (cheating)',
     ]);
+    check('...each with an [i] index (no raw auth shown anymore — the actual point of this)', authbansLines.every((l) => /\[\d+\]$/.test(l)), true);
     check('!authbans from a non-owner is ignored', await handleIncomingMessage(msg('SOME_OTHER_USER', '!authbans'), authBanDeps), null);
     const authbansAdminReply = await handleIncomingMessage(msg('ADMIN_USER', '!authbans', false, ['ADMIN_ROLE_ID']), authBanDeps);
-    check('!authbans from a member with the admin role works too', authbansAdminReply.split('\n').sort(), [
-        'AUTH_OFFLINE [AUTH_OFFLINE] — осталось 30 мин. (griefing)',
-        'NewNick [AUTH_X] — осталось 60 мин. (cheating)',
+    check('!authbans from a member with the admin role works too', authbansAdminReply.split('\n').map((l) => l.replace(/ \[\d+\]$/, '')).sort(), [
+        'AUTH_OFFLINE — осталось 30 мин. (griefing)',
+        'NewNick — осталось 60 мин. (cheating)',
     ]);
 
-    check('!unbanauth clears an existing ban', await handleIncomingMessage(msg('OWNER_ID', '!unbanauth AUTH_X'), authBanDeps), 'NewNick разбанен по auth.');
+    check('!unbanauth clears an existing ban by raw auth (still works)', await handleIncomingMessage(msg('OWNER_ID', '!unbanauth AUTH_X'), authBanDeps), 'NewNick разбанен по auth.');
     check('!unbanauth actually removed the ban from the db', await db.getAuthBan('AUTH_X'), null);
 
-    check('!unbanauth from a member with the admin role also works', await handleIncomingMessage(msg('ADMIN_USER', '!unbanauth AUTH_OFFLINE', false, ['ADMIN_ROLE_ID']), authBanDeps), 'AUTH_OFFLINE разбанен по auth.');
+    // Only AUTH_OFFLINE is left now — a single-entry list is deterministic,
+    // so index 0 reliably refers to it (the real point of this feature:
+    // "!authbans" -> "!unbanauth 0" instead of retyping the full auth).
+    check('!unbanauth by index [0] (the new, easier way) also works', await handleIncomingMessage(msg('ADMIN_USER', '!unbanauth 0', false, ['ADMIN_ROLE_ID']), authBanDeps), 'AUTH_OFFLINE разбанен по auth.');
+    check('...and actually removed it from the db', await db.getAuthBan('AUTH_OFFLINE'), null);
 
     // Same commands again, as slash interactions this time.
     check('/players from the owner lists the room', await handleSlashCommand(interaction('OWNER_ID', 'players', {}), authBanDeps), { content: 'Игроки в комнате:\nNewNick [AUTH_X]', ephemeral: true });
@@ -2664,14 +2966,16 @@ console.log('\n--- discord.js: message/interaction-handling logic (no live Disco
 
     check('/unbanauth clears the ban just placed', await handleSlashCommand(interaction('OWNER_ID', 'unbanauth', { auth: 'AUTH_X' }), authBanDeps), { content: 'NewNick разбанен по auth.', ephemeral: true });
     check('/unbanauth on an auth that was never banned reports so', await handleSlashCommand(interaction('OWNER_ID', 'unbanauth', { auth: 'AUTH_GHOST' }), authBanDeps), { content: 'Этот auth не забанен.', ephemeral: true });
-    check('/unbanauth from a member with the admin role also works', await handleSlashCommand(interaction('ADMIN_USER', 'unbanauth', { auth: 'AUTH_GHOST2' }, ['ADMIN_ROLE_ID']), authBanDeps), { content: 'AUTH_GHOST2 разбанен по auth.', ephemeral: true });
+    // Only AUTH_GHOST2 is left now — deterministic index 0, same
+    // by-index path as the !prefix version above.
+    check('/unbanauth by index also works, from an admin role', await handleSlashCommand(interaction('ADMIN_USER', 'unbanauth', { auth: '0' }, ['ADMIN_ROLE_ID']), authBanDeps), { content: 'AUTH_GHOST2 разбанен по auth.', ephemeral: true });
 
     // !tops/`/tops`: same leaderboard logic as the room's own !tops (see
     // stats/roomStats.js), just as a reply string. Only 1 player has stats
     // so far in this db — below the 5-player quorum every category needs.
     check('!tops with no argument reports not enough games yet', await handleIncomingMessage(msg('U1', '!tops'), deps), 'Недостаточно игр сыграно !');
     check('!tops <valid stat> reports not enough games yet too', await handleIncomingMessage(msg('U1', '!tops goals'), deps), 'Недостаточно игр сыграно !');
-    check('!tops <unknown stat> shows usage', await handleIncomingMessage(msg('U1', '!tops nonsense'), deps), 'Использование: !tops [games|wins|goals|assists|cs|playtime|clubs] (или /tops). Без аргумента показывает все таблицы лидеров сразу.');
+    check('!tops <unknown stat> shows usage', await handleIncomingMessage(msg('U1', '!tops nonsense'), deps), 'Использование: !tops [games|wins|goals|assists|cs|playtime|clubs|elo] (или /tops). Без аргумента показывает все таблицы лидеров сразу.');
     check('/tops with no stat option is ephemeral', (await handleSlashCommand(interaction('U1', 'tops', {}), deps)).ephemeral, true);
     check('/tops with no stat option reports not enough games yet', (await handleSlashCommand(interaction('U1', 'tops', {}), deps)).content, 'Недостаточно игр сыграно !');
 
@@ -2685,8 +2989,11 @@ console.log('\n--- discord.js: message/interaction-handling logic (no live Disco
     const topsSlashReply = await handleSlashCommand(interaction('U1', 'tops', { stat: 'goals' }), deps);
     check('/tops <stat> matches !tops <stat> exactly', topsSlashReply, { content: 'Голы> 🥇 Xara : 7, 🥈 Filler4 : 4, 🥉 Filler3 : 3, #4 Filler2 : 2, #5 Filler1 : 1', ephemeral: true });
     // Leader-only per category since 2026-08-15 (real wall-of-text fix) —
-    // 6 categories + 1 trailing "!tops <category>" hint line.
-    check('!tops with no argument now shows every category combined (leader-only)', (await handleIncomingMessage(msg('U1', '!tops'), deps)).split('\n').length, 7);
+    // 6 categories + 1 trailing "!tops <category>" hint line + the ELO line
+    // appended after it (see buildTopsReply's own comment — 'elo' is
+    // deliberately outside the generic RANKING_STAT_KEYS list).
+    check('!tops with no argument now shows every category combined (leader-only)', (await handleIncomingMessage(msg('U1', '!tops'), deps)).split('\n').length, 8);
+    check('...including an ELO leader line', (await handleIncomingMessage(msg('U1', '!tops'), deps)).includes('ELO: '), true);
 
     // Auto-role on join: every new Discord member gets the configured role,
     // regardless of whether they've ever linked a HaxBall account.
@@ -3568,6 +3875,163 @@ console.log('\n--- events/movement.js: auth-bans block a join regardless of conn
         check('leave also logs to discord', discordLogs.length, 1);
         db.close();
     }, 20);
+})();
+
+console.log('\n--- events/gameManagement.js: in-match comeback detection (item #12, requested 2026-08-17) ---');
+(async () => {
+    const Team = { RED: 1, BLUE: 2, SPECTATORS: 0 };
+    const State = { PLAY: 0, PAUSE: 1, STOP: 2 };
+    const Situation = { STOP: 0, KICKOFF: 1, PLAY: 2, GOAL: 3 };
+    const HaxNotificationMock = { CHAT: 1, MENTION: 2, NONE: 0 };
+    const sent = [];
+    let currentScores = { red: 0, blue: 0, scoreLimit: 0, time: 0, timeLimit: 0 };
+    const roomMock = {
+        getScores: () => currentScores,
+        sendAnnouncement: (msg, id, color, style, sound) => sent.push({ msg, color, sound }),
+        setKickRateLimit: () => {},
+    };
+    const state = {
+        teamRed: [{ id: 1 }], teamBlue: [{ id: 2 }],
+        lastTouches: [null, null],
+    };
+    const gm = require(path.join(CORE, 'events', 'gameManagement'))({
+        room: roomMock, state, Game: function () {}, HaxNotification: HaxNotificationMock, Situation, State, Team,
+        blueColor: 0, defaultColor: 0, discordBot: { sendLog: () => {} }, fetchRecordingVariable: false,
+        getStartingLineups: () => [], mentionPlayersUnpause: false, redColor: 0, teamSize: 4,
+        announceTeamForms: async () => {}, balanceTeams: () => {}, calculateStadiumVariables: () => {},
+        deactivateChooseMode: () => {}, endGame: () => {}, fetchRecording: () => {}, fetchSummaryEmbed: () => {},
+        getBallSpeed: () => 0, getDate: () => '', getGoalString: () => 'goal', getPlayerComp: () => ({ goalsScoredTeam: 0, goalsConcededTeam: 0 }),
+        handleActivityStop: () => {}, handlePlayersStop: () => {},
+        playGoalAnimation: async () => {}, playGoalSizeEffect: async () => {},
+        resetPauseVotes: () => {}, updateTeams: () => {},
+        achievementColor: 42, infoColor: 5, authArray: {}, db: { getHeadToHead: async () => null },
+    });
+
+    gm.onGameStart(null);
+
+    // BLUE races to a 3-0 lead — RED's worst deficit climbs to 3 each time.
+    currentScores = { red: 0, blue: 1, scoreLimit: 0, time: 10, timeLimit: 300 };
+    gm.onTeamGoal(Team.BLUE);
+    currentScores = { red: 0, blue: 2, scoreLimit: 0, time: 20, timeLimit: 300 };
+    gm.onTeamGoal(Team.BLUE);
+    currentScores = { red: 0, blue: 3, scoreLimit: 0, time: 30, timeLimit: 300 };
+    gm.onTeamGoal(Team.BLUE);
+    check('no comeback fires while still building the deficit', sent.some((s) => s.msg.includes('камбэк')), false);
+
+    // RED claws back one goal at a time — not yet level, no comeback fires early.
+    currentScores = { red: 1, blue: 3, scoreLimit: 0, time: 40, timeLimit: 300 };
+    gm.onTeamGoal(Team.RED);
+    currentScores = { red: 2, blue: 3, scoreLimit: 0, time: 50, timeLimit: 300 };
+    gm.onTeamGoal(Team.RED);
+    check('still behind (2-3) — no comeback yet, even though the deficit shrank a lot', sent.some((s) => s.msg.includes('камбэк')), false);
+
+    // The tying goal — this is the actual comeback moment.
+    currentScores = { red: 3, blue: 3, scoreLimit: 0, time: 60, timeLimit: 300 };
+    gm.onTeamGoal(Team.RED);
+    const comebackMsg = sent.find((s) => s.msg.includes('камбэк'));
+    check('the tying goal fires the comeback announcement', comebackMsg?.msg.includes('Красная команда'), true);
+    check('...names the worst deficit actually faced (3)', comebackMsg?.msg.includes('отставания в 3'), true);
+    check('...in the achievement color', comebackMsg?.color, 42);
+    check('...with MENTION sound', comebackMsg?.sound, HaxNotificationMock.MENTION);
+
+    // RED then goes on to score again (extends the lead) — must NOT
+    // re-fire, this exact team's comeback already happened this match.
+    sent.length = 0;
+    currentScores = { red: 4, blue: 3, scoreLimit: 0, time: 70, timeLimit: 300 };
+    gm.onTeamGoal(Team.RED);
+    check('extending the lead after the comeback already fired does not re-announce', sent.some((s) => s.msg.includes('камбэк')), false);
+
+    // A fresh match (onGameStart resets the per-match flags/deficits) — the
+    // SAME scoreline sequence can announce a comeback again.
+    gm.onGameStart(null);
+    sent.length = 0;
+    currentScores = { red: 0, blue: 3, scoreLimit: 0, time: 10, timeLimit: 300 };
+    gm.onTeamGoal(Team.BLUE);
+    currentScores = { red: 3, blue: 3, scoreLimit: 0, time: 60, timeLimit: 300 };
+    gm.onTeamGoal(Team.RED);
+    check('a fresh match (onGameStart) resets the comeback tracking, same sequence fires again', sent.some((s) => s.msg.includes('камбэк')), true);
+})();
+
+console.log('\n--- events/gameManagement.js: pre-match rivalry hype / same-day rematch (items #10/#13, requested 2026-08-17) ---');
+(async () => {
+    const Team = { RED: 1, BLUE: 2, SPECTATORS: 0 };
+    const State = { PLAY: 0, PAUSE: 1, STOP: 2 };
+    const Situation = { STOP: 0, KICKOFF: 1, PLAY: 2, GOAL: 3 };
+    const HaxNotificationMock = { CHAT: 1, MENTION: 2, NONE: 0 };
+    const sent = [];
+    const roomMock = {
+        getScores: () => ({ red: 0, blue: 0, scoreLimit: 0, time: 0, timeLimit: 0 }),
+        sendAnnouncement: (msg, id, color, style, sound) => sent.push({ msg, id, style }),
+        setKickRateLimit: () => {},
+    };
+    const authArray = { 1: ['AUTH_RED1'], 2: ['AUTH_RED2'], 3: ['AUTH_RED3'], 4: ['AUTH_RED4'], 5: ['AUTH_BLUE1'], 6: ['AUTH_BLUE2'], 7: ['AUTH_BLUE3'], 8: ['AUTH_BLUE4'] };
+    const state = {
+        teamRed: [{ id: 1, name: 'Red1' }, { id: 2, name: 'Red2' }, { id: 3, name: 'Red3' }, { id: 4, name: 'Red4' }],
+        teamBlue: [{ id: 5, name: 'Blue1' }, { id: 6, name: 'Blue2' }, { id: 7, name: 'Blue3' }, { id: 8, name: 'Blue4' }],
+        teamRedStats: [], teamBlueStats: [],
+        matchWorstDeficit: {}, comebackAnnounced: {}, cleanSheetWatchAnnounced: false,
+    };
+    // A mock db (not the real sqlite one) — real recordHeadToHead always
+    // stamps CURRENT_TIMESTAMP, which would make every seeded pair "today"
+    // and always win the rematch check, making the rivalry-only branch
+    // (a real history that ISN'T from today) impossible to isolate without
+    // raw SQL backdating access this module doesn't expose. A mock gives
+    // full control over exactly what each pair's lastPlayedAt looks like.
+    const h2hByPair = new Map();
+    const dbMock = { getHeadToHead: async (a, b) => h2hByPair.get([a, b].sort().join('|')) ?? null };
+    const seedH2h = (authA, authB, winsFor, winsAgainst, lastPlayedAt) => {
+        h2hByPair.set([authA, authB].sort().join('|'), { winsFor, winsAgainst, games: winsFor + winsAgainst, lastPlayedAt });
+    };
+    const gm = require(path.join(CORE, 'events', 'gameManagement'))({
+        room: roomMock, state, Game: function () {}, HaxNotification: HaxNotificationMock, Situation, State, Team,
+        blueColor: 0, defaultColor: 0, discordBot: { sendLog: () => {} }, fetchRecordingVariable: false,
+        getStartingLineups: () => [], mentionPlayersUnpause: false, redColor: 0, teamSize: 4,
+        announceTeamForms: async () => {}, balanceTeams: () => {}, calculateStadiumVariables: () => {},
+        deactivateChooseMode: () => {}, endGame: () => {}, fetchRecording: () => {}, fetchSummaryEmbed: () => {},
+        getBallSpeed: () => 0, getDate: () => '', getGoalString: () => '', getPlayerComp: () => ({}),
+        handleActivityStop: () => {}, handlePlayersStop: () => {},
+        playGoalAnimation: async () => {}, playGoalSizeEffect: async () => {},
+        resetPauseVotes: () => {}, updateTeams: () => {},
+        achievementColor: 42, infoColor: 5, authArray, db: dbMock,
+    });
+
+    gm.onGameStart(null);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    check('no storyline at all when nobody in this match has ever faced each other', sent.length, 0);
+
+    // Red1/Blue1: a real history (well past RIVALRY_MIN_GAMES), but from a
+    // week ago, not today.
+    const lastWeek = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+    seedH2h('AUTH_RED1', 'AUTH_BLUE1', 1, 5, lastWeek);
+    sent.length = 0;
+    gm.onGameStart(null);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    check('a real rivalry (6+ games), not from today, announces the hype line', sent.some((s) => s.msg.includes('Принципиальная встреча')), true);
+    check('...names both players and the real record (1-5, from Red1\'s perspective)', sent.find((s) => s.msg.includes('Принципиальная встреча'))?.msg.includes('Red1 против Blue1 — личный счёт 1-5'), true);
+    check('...and does NOT also fire a rematch line for the same pairing', sent.some((s) => s.msg.includes('Реванш')), false);
+
+    h2hByPair.clear();
+    // Below RIVALRY_MIN_GAMES (2 games), also not today — neither storyline
+    // qualifies.
+    seedH2h('AUTH_RED1', 'AUTH_BLUE1', 1, 1, lastWeek);
+    sent.length = 0;
+    gm.onGameStart(null);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    check('a modest history (below RIVALRY_MIN_GAMES) and not from today — no storyline at all', sent.length, 0);
+
+    h2hByPair.clear();
+    // A DIFFERENT pair (Red2/Blue2) played earlier TODAY, on top of the
+    // established Red1/Blue1 rivalry — same-day rematch takes priority,
+    // and only ONE message ever fires per match start.
+    seedH2h('AUTH_RED1', 'AUTH_BLUE1', 1, 5, lastWeek);
+    seedH2h('AUTH_RED2', 'AUTH_BLUE2', 1, 0, new Date().toISOString());
+    sent.length = 0;
+    gm.onGameStart(null);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    check('same-day rematch takes priority over an older, bigger rivalry pairing', sent.some((s) => s.msg.includes('Реванш')), true);
+    const rematchMsg = sent.find((s) => s.msg.includes('Реванш'));
+    check('...names the SAME-DAY pair, not the rivalry pair', rematchMsg?.msg.includes('Red2') && rematchMsg?.msg.includes('Blue2'), true);
+    check('only ONE storyline message fires per match start, never both', sent.filter((s) => s.msg.includes('Реванш') || s.msg.includes('Принципиальная встреча')).length, 1);
 })();
 
 console.log('\n--- events/gameManagement.js: onGameStop falls back to balanceTeams() when handlePlayersStop\'s own guard doesn\'t fire ---');
@@ -6328,8 +6792,110 @@ console.log('\n--- stats/goalAttribution.js: an assist can never be the same pla
     check('a goal with no recorded touch falls back to a generic message, no striker', state.game.goals[0].striker, null);
 }
 
+console.log('\n--- commands/player.js: !tip #<id> — once per match + role-based daily cap (requested 2026-08-17) ---');
+(async () => {
+    // Dedicated, isolated instantiation (not the giant shared `player` mock
+    // used elsewhere in this file) specifically because tipCommand needs a
+    // getRole/Role that actually distinguishes VIP, which that shared mock
+    // deliberately doesn't (getRole: () => 0 always, Role: { PLAYER: 0 }
+    // only) — safer to keep this fully separate than risk perturbing every
+    // other command tested against that shared instance.
+    const sentTip = [];
+    const playersById = new Map([
+        [1, { id: 1, name: 'Alice' }],
+        [2, { id: 2, name: 'Bob' }],
+        [3, { id: 3, name: 'VipCarol' }],
+    ]);
+    const roomMockTip = {
+        sendAnnouncement: (msg, id, color) => sentTip.push({ msg, id, color }),
+        getPlayer: (id) => playersById.get(id) ?? null,
+    };
+    const authArrayTip = { 1: ['AUTH_TIP_ALICE'], 2: ['AUTH_TIP_BOB'], 3: ['AUTH_TIP_VIP'] };
+    const RoleMock = { PLAYER: 0, VIP: 1 };
+    const stateTip = { tipUsedThisMatch: new Set() };
+    const { tipCommand } = require(path.join(CORE, 'commands', 'player'))({
+        room: roomMockTip, state: stateTip, Team: {}, Role: RoleMock, HaxStatistics: function () {}, authArray: authArrayTip, db: {},
+        AFKSet: new Set(), AFKMinSet: new Set(), AFKCooldownSet: new Set(),
+        hiddenVipSet: new Set(), silencedAuths: new Map(),
+        minAFKDuration: 0, maxAFKDuration: 0, AFKCooldown: 0,
+        announcementColor: 1, errorColor: 3, infoColor: 5, successColor: 6,
+        HaxNotification: { CHAT: 1 },
+        getCommand: () => false, getRole: (p) => (p.id === 3 ? RoleMock.VIP : RoleMock.PLAYER),
+        handlePlayersJoin: () => {}, handlePlayersLeave: () => {},
+        printPlayerStats: () => '', printRankings: async () => {}, printAllRankings: async () => {}, printClubRankings: async () => {},
+        updateTeams: () => {}, getCommands: () => ({}),
+        formatCoins: (n) => `${n}`, formatBanRemaining: (iso) => `${Math.max(0, Math.ceil((new Date(iso) - Date.now()) / 60000))} мин.`,
+        renderProgressBar: (used, max) => `${used}/${max}`,
+        discordBot: { sendAdminCall: () => {}, checkVipRoleOnLink: () => {} },
+        tipDailyMaxUses: 2, tipDailyMaxUsesVip: 3, tipDailyWindowMs: 24 * 60 * 60 * 1000,
+    });
+
+    sentTip.length = 0;
+    await tipCommand({ id: 1, name: 'Alice' }, '!tip');
+    check('!tip with no argument shows usage', /Использование/.test(sentTip[0].msg), true);
+
+    sentTip.length = 0;
+    await tipCommand({ id: 1, name: 'Alice' }, '!tip #99');
+    check('!tip at an unknown id shows usage too', /Использование/.test(sentTip[0].msg), true);
+
+    sentTip.length = 0;
+    await tipCommand({ id: 1, name: 'Alice' }, '!tip #1');
+    check('!tip on yourself is rejected', /самого себя/.test(sentTip[0].msg), true);
+
+    sentTip.length = 0;
+    await tipCommand({ id: 1, name: 'Alice' }, '!tip #2');
+    check('a valid !tip sends the exact public thank-you message, broadcast (id: null)', sentTip[0], { msg: '👏 Alice благодарит Bob. Хорошая игра!', id: null, color: 1 });
+    check('...plus a private usage-count follow-up', sentTip[1].msg, 'Использований !tip сегодня: 1/2');
+    check('...sent privately, not broadcast', sentTip[1].id, 1);
+
+    sentTip.length = 0;
+    await tipCommand({ id: 1, name: 'Alice' }, '!tip #2');
+    check('a second !tip in the SAME match is refused, even with daily uses left', /только один раз за матч/.test(sentTip[0].msg), true);
+    check('...and does not send a second public message', sentTip.length, 1);
+
+    // Simulate a new match starting (see gameManagement.js's onGameStart) —
+    // resets the once-per-match set, but NOT the rolling daily usage.
+    stateTip.tipUsedThisMatch = new Set();
+    sentTip.length = 0;
+    await tipCommand({ id: 1, name: 'Alice' }, '!tip #2');
+    check('after a new match starts, !tip is available again', /благодарит/.test(sentTip[0].msg), true);
+    check('...and counts toward the SAME daily total (now at the 2/2 cap)', sentTip[1].msg, 'Использований !tip сегодня: 2/2');
+
+    stateTip.tipUsedThisMatch = new Set();
+    sentTip.length = 0;
+    await tipCommand({ id: 1, name: 'Alice' }, '!tip #2');
+    check('a regular player is refused once their daily cap (2) is reached', /не больше 2 раз в день/.test(sentTip[0].msg), true);
+
+    // VIP (id 3) gets a HIGHER daily cap (3, vs 2 for regular players) —
+    // the whole reason getRole is checked at all inside tipCommand.
+    for (let i = 1; i <= 3; i++) {
+        stateTip.tipUsedThisMatch = new Set();
+        sentTip.length = 0;
+        await tipCommand({ id: 3, name: 'VipCarol' }, '!tip #2');
+        check(`VIP tip #${i} of their 3-per-day cap succeeds`, /благодарит/.test(sentTip[0].msg), true);
+    }
+    stateTip.tipUsedThisMatch = new Set();
+    sentTip.length = 0;
+    await tipCommand({ id: 3, name: 'VipCarol' }, '!tip #2');
+    check('a VIP is refused once THEIR higher daily cap (3) is reached', /не больше 3 раз в день/.test(sentTip[0].msg), true);
+
+    // Alice (regular, already at her own 2/2 cap from earlier) is
+    // unaffected by VipCarol's separate usage — confirms per-auth tracking,
+    // not a single shared counter.
+    stateTip.tipUsedThisMatch = new Set();
+    sentTip.length = 0;
+    await tipCommand({ id: 1, name: 'Alice' }, '!tip #2');
+    check('a regular player\'s own cap is unaffected by a VIP\'s usage (separate per-auth tracking)', /не больше 2 раз в день/.test(sentTip[0].msg), true);
+})();
+
 console.log('\n--- core/overflowPassword.js: activates/rotates/deactivates around a threshold ---');
-{
+(async () => {
+    // A tick lets the fire-and-forget syncPassword() (checkOverflowPassword
+    // itself stays synchronous, matching every real call site — see
+    // bff/events.js's onPlayerJoin/onPlayerLeave) actually reach its
+    // room.setPassword()/discordBot.sendPassword() calls before asserting.
+    const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
+
     const state = { playersAll: new Array(9).fill(0).map((_, i) => ({ id: i })), roomPassword: '' };
     const roomCallsLocal = [];
     const roomMock = { setPassword: (p) => roomCallsLocal.push(p) };
@@ -6343,27 +6909,39 @@ console.log('\n--- core/overflowPassword.js: activates/rotates/deactivates aroun
         getSetting: (key) => Promise.resolve(persistedSettings[key] ?? null),
     };
 
+    // rotateIntervalMs (staleness threshold) is deliberately huge (10
+    // minutes) — every assertion in THIS block is about reuse-not-remint
+    // behavior, which must never race real wall-clock time against however
+    // long a handful of setTimeout(0) flushes happen to take under this
+    // file's own heavy concurrent test load. The separate "keeps rotating"
+    // block below tests the real-time rotation behavior in isolation, with
+    // its own short interval, instead of sharing one with these
+    // determinism-sensitive assertions.
     const { checkOverflowPassword } = require(path.join(CORE, 'overflowPassword'))({
         room: roomMock, state, maxPlayers: 12, passwordThreshold: 10,
-        discordBot: discordBotMock, generateRoomPassword, rotateIntervalMs: 20,
-        db: dbMock,
+        discordBot: discordBotMock, generateRoomPassword, rotateIntervalMs: 10 * 60 * 1000,
+        syncIntervalMs: 10 * 60 * 1000, db: dbMock,
     });
 
     checkOverflowPassword();
+    await flush();
     check('below the threshold, nothing happens', roomCallsLocal, []);
 
     state.playersAll = new Array(11).fill(0).map((_, i) => ({ id: i }));
     checkOverflowPassword();
+    await flush();
     check('crossing the threshold sets a fresh password on the room', roomCallsLocal, ['PW1']);
     check('crossing the threshold announces it to Discord', passwords, ['PW1']);
     check('the active password is also recorded on state.roomPassword', state.roomPassword, 'PW1');
     check('the fresh password is persisted for a future restart to pick up', persistedSettings.overflowPasswordValue, 'PW1');
 
     checkOverflowPassword();
-    check('staying at/above the threshold does not re-activate outside of the hourly rotation', roomCallsLocal, ['PW1']);
+    await flush();
+    check('staying at/above the threshold does not re-activate outside of the sync tick', roomCallsLocal, ['PW1']);
 
     state.playersAll = new Array(9).fill(0).map((_, i) => ({ id: i }));
     checkOverflowPassword();
+    await flush();
     check('dropping back below the threshold clears the password immediately', roomCallsLocal, ['PW1', null]);
     check('state.roomPassword is cleared too', state.roomPassword, '');
 
@@ -6374,39 +6952,69 @@ console.log('\n--- core/overflowPassword.js: activates/rotates/deactivates aroun
     // single re-crossing.
     state.playersAll = new Array(11).fill(0).map((_, i) => ({ id: i }));
     checkOverflowPassword();
+    await flush();
     check('re-crossing the threshold shortly after reuses the same password on the room', roomCallsLocal, ['PW1', null, 'PW1']);
     check('re-crossing the threshold does not re-announce a new password to Discord', passwords, ['PW1']);
     check('state.roomPassword is restored to the reused password, not a new one', state.roomPassword, 'PW1');
+})();
 
-    // Unlike the checks above, reuse never applies here — only the interval
-    // (20ms) drives further rotation now, so this needs real elapsed time
-    // rather than the synchronous "free" regenerations the pre-fix version
-    // got from every re-crossing. 400ms gives it ~20 possible ticks — wide
-    // margin above ordinary event-loop jitter for a >=3 threshold, sized up
-    // from 150ms once this file's own growing pile of concurrent async test
-    // blocks started contending for the event loop enough to occasionally
-    // starve a 150ms window down to under 3 real ticks. Widened again to
-    // 700ms, then 1000ms, as this file's own pile of concurrent bff/* test
-    // blocks kept growing.
-    setTimeout(() => {
-        check('the password still rotates on its own while the room stays full', passwords.length >= 3, true);
-    }, 1000);
-}
+console.log('\n--- core/overflowPassword.js: keeps rotating on its own while the room stays full ---');
+(async () => {
+    // Isolated from the reuse-behavior assertions above specifically so a
+    // short, real-time-driven rotateIntervalMs/syncIntervalMs here can't
+    // make THOSE deterministic assertions race real wall-clock time too.
+    const state = { playersAll: new Array(11).fill(0).map((_, i) => ({ id: i })), roomPassword: '' };
+    const roomMock = { setPassword: () => {} };
+    const passwords = [];
+    const discordBotMock = { sendPassword: (p) => passwords.push(p) };
+    let passwordCounter = 0;
+    const generateRoomPassword = () => `PW${++passwordCounter}`;
+    const dbMock = {
+        setSetting: () => Promise.resolve(),
+        getSetting: () => Promise.resolve(null), // always "empty" -> always stale -> always re-mints
+    };
+
+    const { checkOverflowPassword } = require(path.join(CORE, 'overflowPassword'))({
+        room: roomMock, state, maxPlayers: 12, passwordThreshold: 10,
+        discordBot: discordBotMock, generateRoomPassword, rotateIntervalMs: 20,
+        syncIntervalMs: 20, db: dbMock,
+    });
+
+    checkOverflowPassword();
+    // 1000ms at a 20ms tick gives ~50 possible re-mints — wide margin above
+    // ordinary event-loop jitter, even with this file's own large pile of
+    // concurrent async test blocks contending for the event loop; only
+    // needs >=3 to prove it's genuinely repeating, not a one-shot mint.
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+    check('the password rotates repeatedly on its own while the room stays full', passwords.length >= 3, true);
+})();
 
 console.log('\n--- core/overflowPassword.js: reuses a persisted password across a simulated restart ---');
-{
+(async () => {
+    const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
+
     // A restart tears down the whole module (fresh closure, fresh `active`/
-    // `currentPassword`/`rotateTimer`) — this is exactly the bug report that
+    // `currentPassword`/`syncTimer`) — this is exactly the bug report that
     // prompted persistence: the room comes back empty, and once it refills
     // past the threshold the old, still-valid-in-Discord password must keep
-    // working instead of a silent new one nobody's seen.
+    // working instead of a silent new one nobody's seen. initialPassword/
+    // initialPasswordSetAt (read from db.getSetting at boot, BEFORE this
+    // factory is even constructed — see entry.js/bffEntry.js's own wiring)
+    // and the live db.getSetting reads syncPassword() does on its own
+    // reflect the SAME underlying store here, exactly like production: the
+    // seed value was never anything other than an earlier read of this same
+    // key.
     const state = { playersAll: new Array(9).fill(0).map((_, i) => ({ id: i })), roomPassword: '' };
     const roomCallsLocal = [];
     const roomMock = { setPassword: (p) => roomCallsLocal.push(p) };
     const passwords = [];
     const discordBotMock = { sendPassword: (p) => passwords.push(p) };
     const generateRoomPassword = () => 'SHOULD-NOT-BE-USED';
-    const dbMock = { setSetting: () => Promise.resolve(), getSetting: () => Promise.resolve(null) };
+    const persistedSettings = { overflowPasswordValue: 'OLDPW', overflowPasswordSetAt: String(Date.now() - 1000) };
+    const dbMock = {
+        setSetting: (key, value) => { persistedSettings[key] = value; return Promise.resolve(); },
+        getSetting: (key) => Promise.resolve(persistedSettings[key] ?? null),
+    };
 
     const { checkOverflowPassword } = require(path.join(CORE, 'overflowPassword'))({
         room: roomMock, state, maxPlayers: 12, passwordThreshold: 10,
@@ -6416,13 +7024,16 @@ console.log('\n--- core/overflowPassword.js: reuses a persisted password across 
 
     state.playersAll = new Array(11).fill(0).map((_, i) => ({ id: i }));
     checkOverflowPassword();
+    await flush();
     check('a persisted password still within its rotation window is reused on the room', roomCallsLocal, ['OLDPW']);
     check('reusing a persisted password does not re-announce it to Discord', passwords, []);
     check('state.roomPassword reflects the reused persisted password', state.roomPassword, 'OLDPW');
-}
+})();
 
 console.log('\n--- core/overflowPassword.js: ignores a persisted password past its rotation window ---');
-{
+(async () => {
+    const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
+
     const state = { playersAll: new Array(11).fill(0).map((_, i) => ({ id: i })), roomPassword: '' };
     const roomCallsLocal = [];
     const roomMock = { setPassword: (p) => roomCallsLocal.push(p) };
@@ -6438,8 +7049,247 @@ console.log('\n--- core/overflowPassword.js: ignores a persisted password past i
     });
 
     checkOverflowPassword();
+    await flush();
     check('an expired persisted password is not reused', roomCallsLocal, ['FRESHPW']);
     check('a fresh password is announced instead', passwords, ['FRESHPW']);
+})();
+
+console.log('\n--- core/overflowPassword.js: two rooms sharing one db.getSetting/setSetting converge on the same password ---');
+(async () => {
+    const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+    // Simulates the real production topology: BOTH "rooms" are handed a
+    // getSetting/setSetting pair backed by the exact same underlying store
+    // (mirroring bffEntry.js's sharedSettingsDb wrapper routing to the main
+    // room's physical file) — this is the actual mechanism that makes the
+    // two rooms converge, not a special-cased test double.
+    const sharedStore = {};
+    const sharedDbMock = {
+        setSetting: (key, value) => { sharedStore[key] = value; return Promise.resolve(); },
+        getSetting: (key) => Promise.resolve(sharedStore[key] ?? null),
+    };
+
+    const roomACalls = [];
+    const roomBCalls = [];
+    const announcementsA = [];
+    const announcementsB = [];
+    let counter = 0;
+    // Distinct generators per "room" — if room B ever mints its own instead
+    // of adopting room A's, its calls would show a 'B#' password instead.
+    const genA = () => `A${++counter}`;
+    const genB = () => `B${++counter}`;
+
+    const stateA = { playersAll: new Array(15).fill(0).map((_, i) => ({ id: i })), roomPassword: '' };
+    const stateB = { playersAll: new Array(9).fill(0).map((_, i) => ({ id: i })), roomPassword: '' };
+
+    const { checkOverflowPassword: checkA } = require(path.join(CORE, 'overflowPassword'))({
+        room: { setPassword: (p) => roomACalls.push(p) }, state: stateA, maxPlayers: 20, passwordThreshold: 15,
+        discordBot: { sendPassword: (p) => announcementsA.push(p) }, generateRoomPassword: genA,
+        rotateIntervalMs: 60 * 60 * 1000, db: sharedDbMock,
+    });
+    const { checkOverflowPassword: checkB } = require(path.join(CORE, 'overflowPassword'))({
+        room: { setPassword: (p) => roomBCalls.push(p) }, state: stateB, maxPlayers: 14, passwordThreshold: 12,
+        discordBot: { sendPassword: (p) => announcementsB.push(p) }, generateRoomPassword: genB,
+        rotateIntervalMs: 60 * 60 * 1000, db: sharedDbMock,
+    });
+
+    // Room A (futsal) crosses its threshold first and mints.
+    checkA();
+    await flush();
+    check('room A mints the very first shared password', roomACalls, ['A1']);
+    check('room A announces it', announcementsA, ['A1']);
+
+    // Room B (BFF) crosses its OWN threshold later — it must ADOPT room A's
+    // value, not mint its own B#.
+    stateB.playersAll = new Array(12).fill(0).map((_, i) => ({ id: i }));
+    checkB();
+    await flush();
+    check('room B adopts the SAME password room A already minted', roomBCalls, ['A1']);
+    check('room B does not re-announce a password someone else already posted', announcementsB, []);
+})();
+
+console.log('\n--- db/sqlite.js: telegram_links/telegram_link_codes (requested 2026-08-17) ---');
+{
+    const { createSqliteDatabase } = require(path.join(__dirname, '..', 'db', 'sqlite'));
+    const dbT = createSqliteDatabase(':memory:');
+    dbT.init();
+
+    check('getAuthByTelegramId returns null before any link exists', dbT.getAuthByTelegramId('CHAT_1'), null);
+
+    // Room-issued code (auth set, telegramChatId null) — the !telegram
+    // (no-arg) direction.
+    dbT.createTelegramLinkCode('ROOMCODE', { auth: 'AUTH_A' }, new Date(Date.now() + 60000).toISOString());
+    const roomRow = dbT.redeemTelegramLinkCode('ROOMCODE');
+    check('redeeming a room-issued code returns its auth half', roomRow.auth, 'AUTH_A');
+    check('...and telegram_chat_id is still null (the other half, not filled in yet)', roomRow.telegramChatId, null);
+    check('a redeemed code is consumed — redeeming it again returns null', dbT.redeemTelegramLinkCode('ROOMCODE'), null);
+
+    dbT.linkTelegramId('AUTH_A', 'CHAT_1');
+    check('linkTelegramId round-trips: getAuthByTelegramId resolves the chat id back to the auth', dbT.getAuthByTelegramId('CHAT_1'), 'AUTH_A');
+
+    // Relink to a different chat id (e.g. switched phones) — upsert, not reject.
+    dbT.linkTelegramId('AUTH_A', 'CHAT_2');
+    check('linkTelegramId upserts rather than rejecting a relink', dbT.getAuthByTelegramId('CHAT_2'), 'AUTH_A');
+    check('...the OLD chat id no longer resolves to anything', dbT.getAuthByTelegramId('CHAT_1'), null);
+
+    // Telegram-issued code (telegramChatId set, auth null) — the /start direction.
+    dbT.createTelegramLinkCode('TGCODE', { telegramChatId: 'CHAT_3' }, new Date(Date.now() + 60000).toISOString());
+    const tgRow = dbT.redeemTelegramLinkCode('TGCODE');
+    check('redeeming a Telegram-issued code returns its telegramChatId half', tgRow.telegramChatId, 'CHAT_3');
+    check('...and auth is still null', tgRow.auth, null);
+
+    // Expiry sweep — a code past its expiry is treated exactly like it never existed.
+    dbT.createTelegramLinkCode('EXPIRED', { auth: 'AUTH_B' }, new Date(Date.now() - 1000).toISOString());
+    check('an expired code cannot be redeemed', dbT.redeemTelegramLinkCode('EXPIRED'), null);
+
+    check('an unknown code returns null, not a crash', dbT.redeemTelegramLinkCode('NEVER-EXISTED'), null);
+
+    dbT.close();
+}
+
+console.log('\n--- core/telegramLink.js: !telegram [code] — links a room auth to a Telegram chat id ---');
+(async () => {
+    const { createSqliteDatabase } = require(path.join(__dirname, '..', 'db', 'sqlite'));
+    const dbT = createSqliteDatabase(':memory:');
+    dbT.init();
+
+    const sentT = [];
+    const roomMockT = { sendAnnouncement: (msg, id, color) => sentT.push({ msg, id, color }) };
+    const authArrayT = { 1: ['AUTH_LINK1'], 2: ['AUTH_LINK2'] };
+    const HaxNotificationMock = { CHAT: 1 };
+    let codeCounter = 0;
+    const generateRoomPassword = () => `CODE${++codeCounter}`;
+
+    const { linkTelegramCommand } = require(path.join(CORE, 'telegramLink'))({
+        room: roomMockT, db: dbT, authArray: authArrayT, HaxNotification: HaxNotificationMock,
+        errorColor: 3, successColor: 6, generateRoomPassword,
+    });
+
+    sentT.length = 0;
+    await linkTelegramCommand({ id: 1, name: 'P1' }, '!telegram');
+    check('!telegram with no argument generates and shows a code', /CODE1/.test(sentT[0].msg), true);
+    check('...in the success color', sentT[0].color, 6);
+    const pendingRoomCode = dbT.redeemTelegramLinkCode('CODE1');
+    check('the generated code is tied to the caller\'s auth', pendingRoomCode.auth, 'AUTH_LINK1');
+
+    // Wrong-direction redemption: a room-issued code (auth set, no
+    // telegramChatId) replayed back into !telegram itself must be rejected,
+    // not silently link a null chat id.
+    sentT.length = 0;
+    await linkTelegramCommand({ id: 1, name: 'P1' }, '!telegram CODE1');
+    check('a room-issued code replayed into !telegram is rejected (already consumed above, and wrong direction anyway)', /неверный или истёк/.test(sentT[0].msg), true);
+
+    // Correct direction: a Telegram-issued code (simulating /start).
+    dbT.createTelegramLinkCode('FROMTG', { telegramChatId: 'CHAT_99' }, new Date(Date.now() + 60000).toISOString());
+    sentT.length = 0;
+    await linkTelegramCommand({ id: 2, name: 'P2' }, '!telegram FROMTG');
+    check('a Telegram-issued code completes the link', /связан/.test(sentT[0].msg), true);
+    check('the caller\'s auth is now linked to that chat id', dbT.getAuthByTelegramId('CHAT_99'), 'AUTH_LINK2');
+
+    sentT.length = 0;
+    await linkTelegramCommand({ id: 2, name: 'P2' }, '!telegram BOGUS');
+    check('an unknown/expired code shows the same rejection', /неверный или истёк/.test(sentT[0].msg), true);
+
+    dbT.close();
+})();
+
+console.log('\n--- core/telegram.js: /start, /link, /pass ---');
+(async () => {
+    const { createSqliteDatabase } = require(path.join(__dirname, '..', 'db', 'sqlite'));
+    const dbT = createSqliteDatabase(':memory:');
+    dbT.init();
+    dbT.setSetting('overflowPasswordValue', 'SHAREDPW');
+    dbT.setSetting('overflowPasswordSetAt', String(Date.now()));
+    dbT.addVip('AUTH_TG_VIP', 'VipPlayer', null);
+    dbT.savePlayerStats('AUTH_TG_VIP', { playerName: 'VipPlayer' });
+    dbT.savePlayerStats('AUTH_TG_PLAIN', { playerName: 'PlainPlayer' });
+
+    // Minimal stand-in for node-telegram-bot-api's Client — only the surface
+    // core/telegram.js actually calls (onText/sendMessage/on), same "mock
+    // just what's used" convention as this file's other library mocks.
+    const sentMessages = [];
+    const textHandlers = {};
+    class FakeTelegramBot {
+        constructor(token, options) {
+            this.token = token;
+            this.options = options;
+        }
+        onText(regex, handler) {
+            textHandlers[regex.source] = handler;
+        }
+        sendMessage(chatId, text) {
+            sentMessages.push({ chatId, text });
+        }
+        on() {}
+    }
+    // TelegramBotClass is dependency-injected specifically so this never
+    // needs to construct the REAL library (which would immediately start
+    // making real HTTP polling requests to Telegram's API the instant it's
+    // constructed with `polling: true`) — see telegram.js's own comment.
+    let codeCounter = 0;
+    const generateRoomPassword = () => `TGCODE${++codeCounter}`;
+    const createTelegramBot = require(path.join(CORE, 'telegram'));
+    const telegramBot = createTelegramBot({
+        db: dbT, telegramBotToken: 'FAKE_TOKEN', generateRoomPassword, TelegramBotClass: FakeTelegramBot,
+    });
+    telegramBot.init();
+
+    check('init() with a real token constructs the client and registers handlers', Object.keys(textHandlers).length, 3);
+
+    const startHandler = textHandlers['^\\/start\\b'];
+    const linkHandler = textHandlers['^\\/link\\s+(\\S+)'];
+    const passHandler = textHandlers['^\\/pass\\b'];
+
+    sentMessages.length = 0;
+    await startHandler({ chat: { id: 111 } });
+    check('/start replies with room-command instructions', /!telegram TGCODE1/.test(sentMessages[0].text), true);
+
+    // Simulate completing the link from the room side (as telegramLink.js
+    // would), then /link redeeming it from Telegram's side.
+    dbT.linkTelegramId('AUTH_TG_VIP', '111');
+
+    sentMessages.length = 0;
+    await passHandler({ chat: { id: 111 } });
+    check('/pass for a linked, current VIP returns the live shared password', sentMessages[0].text.includes('SHAREDPW'), true);
+
+    sentMessages.length = 0;
+    await passHandler({ chat: { id: 222 } });
+    check('/pass for an unlinked chat prompts linking instead', /не привязан/.test(sentMessages[0].text), true);
+
+    dbT.linkTelegramId('AUTH_TG_PLAIN', '333');
+    sentMessages.length = 0;
+    await passHandler({ chat: { id: 333 } });
+    check('/pass for a linked but non-VIP account is rejected', /только VIP/.test(sentMessages[0].text), true);
+
+    dbT.setSetting('overflowPasswordSetAt', String(Date.now() - 2 * 60 * 60 * 1000));
+    sentMessages.length = 0;
+    await passHandler({ chat: { id: 111 } });
+    check('/pass for a VIP when the password has gone stale says it is not needed', /не нужен/.test(sentMessages[0].text), true);
+
+    // /link with a genuine room-issued code.
+    dbT.createTelegramLinkCode('ROOMCODE9', { auth: 'AUTH_TG_PLAIN' }, new Date(Date.now() + 60000).toISOString());
+    sentMessages.length = 0;
+    await linkHandler({ chat: { id: 444 } }, [null, 'ROOMCODE9']);
+    check('/link with a valid room-issued code confirms', /связан/.test(sentMessages[0].text), true);
+    check('the link actually took effect', dbT.getAuthByTelegramId('444'), 'AUTH_TG_PLAIN');
+
+    sentMessages.length = 0;
+    await linkHandler({ chat: { id: 555 } }, [null, 'BOGUS']);
+    check('/link with an unknown code is rejected', /неверный или истёк/.test(sentMessages[0].text), true);
+
+    dbT.close();
+})();
+
+console.log('\n--- core/telegram.js: init() with an empty token is a total no-op ---');
+{
+    const createTelegramBot = require(path.join(CORE, 'telegram'));
+    let threw = false;
+    try {
+        createTelegramBot({ db: null, telegramBotToken: '', generateRoomPassword: () => 'X' }).init();
+    } catch (err) {
+        threw = true;
+    }
+    check('init() with no token does not throw (and never touches the real library)', threw, false);
 }
 
 console.log('\n--- core/announcements.js: cycles through messages in order, on an interval ---');
@@ -9833,10 +10683,11 @@ console.log('--- core/bff/threeDefLine.js: "3 defenders" rule (big map only) ---
     check("blue's most forward player (lowest x) is tagged with the c1 defensive-line group", discProps.get(21).cGroup, CF.blue | CF.c1);
     check('...the other blue player is left on the plain group', discProps.get(20).cGroup, CF.blue);
     check('exactly 2 disc-property writes happen (one per team), not one per player', discCalls.length, 2);
-    // item #20: the newly-restricted defender on each side is told once, privately.
-    check('the newly-restricted red defender (11) gets a private explanation', sentLocal.some((s) => s.id === 11 && /крайний защитник/.test(s.msg)), true);
-    check('the newly-restricted blue defender (21) gets one too', sentLocal.some((s) => s.id === 21 && /крайний защитник/.test(s.msg)), true);
-    check('the never-restricted teammates get no message at all', sentLocal.some((s) => s.id === 10 || s.id === 20), false);
+    // The per-transition chat announcement was removed 2026-08-17 (spammed
+    // far too often — "most forward player" flip-flops rapidly during real
+    // jostling-for-position play); a replacement is still TBD, so this rule
+    // is now expected to send NO announcement at all.
+    check('restricting a player sends no chat announcement (removed 2026-08-17)', sentLocal.length, 0);
 
     // --- idempotent: an unchanged tick makes no redundant writes OR messages ---
     discCalls.length = 0;
@@ -9852,8 +10703,7 @@ console.log('--- core/bff/threeDefLine.js: "3 defenders" rule (big map only) ---
     adjustDefenseLine();
     check('when a teammate overtakes, the new forward player is restricted', discProps.get(10).cGroup, CF.red | CF.c0);
     check('...and the previous one is released back to the plain group', discProps.get(11).cGroup, CF.red);
-    check('the newly-restricted player (10) gets the restriction message', sentLocal.some((s) => s.id === 10 && /крайний защитник/.test(s.msg)), true);
-    check('the just-released player (11) gets a "no longer restricted" message instead', sentLocal.some((s) => s.id === 11 && /больше не крайний/.test(s.msg)), true);
+    check('the transition still sends no chat announcement either direction', sentLocal.length, 0);
 
     // --- a player with no disc yet (e.g. mid-transition) does not crash the tick ---
     stateLocal.teamBlue = [mkPlayer(20, 200), mkPlayer(99, -500)];
@@ -10400,6 +11250,7 @@ console.log('--- core/bff/events.js: room.onXxx handlers, trimmed of economy/pok
     const ghostKicks = [];
     const lineupCalls = [];
     let goalStringCalls = 0;
+    let lastTouchCalls = 0;
 
     const events = require(path.join(CORE, 'bff', 'events'))({
         room: roomMock, state: stateLocal, authArray: authArrayLocal, db, Team: TeamLocal, State: StateLocal, Situation: SituationLocal, Game: GameLocal,
@@ -10407,7 +11258,9 @@ console.log('--- core/bff/events.js: room.onXxx handlers, trimmed of economy/pok
         announcementColor: 1, errorColor: 2, infoColor: 3, welcomeColor: 4, redColor: 5, blueColor: 6,
         masterList: ['AUTH_MASTER'], maxPlayers: 14, discordBot,
         getDate: () => 'DATE', getRole: (p) => (p.auth === 'AUTH_MASTER' ? RoleLocal.MASTER : RoleLocal.PLAYER),
-        getGoalString: (team) => { goalStringCalls++; return `GOAL:${team}`; }, getPlayerComp: () => null,
+        getGoalString: (team) => { goalStringCalls++; return `GOAL:${team}`; },
+        getLastTouchOfTheBall: () => { lastTouchCalls++; },
+        getPlayerComp: () => null,
         getStartingLineups: () => [[], []],
         handleLineupChangeLeave: (p) => lineupCalls.push({ fn: 'leave', id: p.id }),
         handleLineupChangeTeamChange: (p) => lineupCalls.push({ fn: 'teamChange', id: p.id }),
@@ -10578,6 +11431,7 @@ console.log('--- core/bff/events.js: room.onXxx handlers, trimmed of economy/pok
     check('...and endGameVariable is set', stateLocal.endGameVariable, true);
     check('playSituation is set to GOAL', stateLocal.playSituation, SituationLocal.GOAL);
     check('getGoalString is called exactly once, not twice (it has a side effect — double-calling would double-record the goal)', goalStringCalls, 1);
+    check('onTeamGoal forces one last getLastTouchOfTheBall() before reading attribution (closes an onGameTick/onTeamGoal ordering race)', lastTouchCalls, 1);
 
     // --- team goal: golden goal ends the match on ANY goal, well below the
     // score limit — draws are not possible, same as the main room ---

@@ -45,6 +45,9 @@ module.exports = function createPlayerCommands({
     upCooldownMs = 60 * 60 * 1000,
     upDailyMaxUses = 3,
     upDailyWindowMs = 24 * 60 * 60 * 1000,
+    tipDailyMaxUses = 5,
+    tipDailyMaxUsesVip = 10,
+    tipDailyWindowMs = 24 * 60 * 60 * 1000,
 }) {
     // One-time reward for linking a Discord account — only paid out on a
     // genuine first link (see db.linkDiscordId's isNewLink), so relinking
@@ -86,6 +89,23 @@ module.exports = function createPlayerCommands({
         const now = Date.now();
         const timestamps = (upDailyUsage.get(auth) ?? []).filter((t) => now - t < upDailyWindowMs);
         upDailyUsage.set(auth, timestamps);
+        return timestamps;
+    }
+
+    // !tip #<id> (requested 2026-08-17) — a Dota-style "gg" tip: publicly
+    // thanks another player, no economy effect. Two independent limits:
+    // a rolling-24h daily cap (5 regular / 10 VIP, same reasoning/shape as
+    // !up's own dailyUsage above — keyed by auth, not player.id, so it
+    // survives a reconnect), AND a once-PER-MATCH allowance regardless of
+    // the daily total remaining (state.tipUsedThisMatch, a plain Set of
+    // auths reset every onGameStart — same convention as !votepause's own
+    // state.pauseVoteUsed, see gameManagement.js).
+    const tipDailyUsage = new Map();
+
+    function pruneTipDailyUsage(auth) {
+        const now = Date.now();
+        const timestamps = (tipDailyUsage.get(auth) ?? []).filter((t) => now - t < tipDailyWindowMs);
+        tipDailyUsage.set(auth, timestamps);
         return timestamps;
     }
     function leaveCommand(player, message) {
@@ -179,9 +199,122 @@ module.exports = function createPlayerCommands({
         // ⭐ badge (requested 2026-08-16) — !tops already marks VIP entries
         // this way, !me previously didn't show VIP status at all.
         stats.isVip = getRole(player) >= Role.VIP;
+        // Opt-in field (same ad-hoc pattern as BFF's ratingOrdinal) — only
+        // the main room ever sets this, so printPlayerStats' ELO bracket
+        // stays hidden for BFF (see print.js's own comment for why it can't
+        // just check stats.elo directly).
+        stats.eloDisplay = stats.elo;
         const statsString = await printPlayerStats(stats);
         room.sendAnnouncement(
             statsString,
+            player.id,
+            infoColor,
+            'bold',
+            HaxNotification.CHAT
+        );
+    }
+
+    // !vs #<id> (requested 2026-08-17, item #2) — head-to-head comparison,
+    // never built before now: !me/!sf show one player's own numbers,
+    // !tops ranks everyone against everyone, but nothing compared two
+    // SPECIFIC people side by side. The personal head-to-head line reads
+    // db.getHeadToHead (see head_to_head's own doc comment in db/sqlite.js)
+    // — auth pairs recorded whenever a match ends (entry.js's endGame),
+    // for opposing-team pairings only, so this stays empty for two people
+    // who've only ever been teammates.
+    async function vsCommand(player, message) {
+        const msgArray = message.split(/ +/).slice(1);
+        if (msgArray.length == 0 || msgArray[0][0] != '#' || room.getPlayer(parseInt(msgArray[0].substring(1))) == null) {
+            room.sendAnnouncement(
+                `Использование: !vs #<id>. Пример: !vs #3 сравнит вашу статистику со статистикой игрока с id 3.`,
+                player.id,
+                errorColor,
+                'bold',
+                HaxNotification.CHAT
+            );
+            return;
+        }
+        const target = room.getPlayer(parseInt(msgArray[0].substring(1)));
+        if (target.id == player.id) {
+            room.sendAnnouncement(`Нельзя сравнить себя с самим собой !`, player.id, errorColor, 'bold', HaxNotification.CHAT);
+            return;
+        }
+        const authSelf = authArray[player.id][0];
+        const authTarget = authArray[target.id][0];
+        const [statsSelf, statsTarget] = await Promise.all([db.getPlayerStats(authSelf), db.getPlayerStats(authTarget)]);
+        const a = statsSelf ?? new HaxStatistics(player.name);
+        const b = statsTarget ?? new HaxStatistics(target.name);
+        const h2h = await db.getHeadToHead(authSelf, authTarget);
+        const h2hLine = h2h
+            ? `\nЛичные встречи: ${h2h.winsFor}-${h2h.winsAgainst} (${h2h.winsFor > h2h.winsAgainst ? 'в твою пользу' : h2h.winsFor < h2h.winsAgainst ? 'не в твою пользу' : 'ничья'})`
+            : `\nЛичных встреч друг против друга ещё не было.`;
+        const text = `⚔️ ${a.playerName} vs ${b.playerName}\n` +
+            `🏆 Победы: ${a.wins} — ${b.wins}\n` +
+            `🕹️ Игры: ${a.games} — ${b.games}\n` +
+            `⚽ Голы: ${a.goals} — ${b.goals}\n` +
+            `🅰️ Ассисты: ${a.assists} — ${b.assists}\n` +
+            `🧤 Сухие матчи: ${a.CS} — ${b.CS}` +
+            h2hLine;
+        room.sendAnnouncement(text, player.id, infoColor, 'bold', HaxNotification.CHAT);
+    }
+
+    async function tipCommand(player, message) {
+        const msgArray = message.split(/ +/).slice(1);
+        if (msgArray.length == 0 || msgArray[0][0] != '#' || room.getPlayer(parseInt(msgArray[0].substring(1))) == null) {
+            room.sendAnnouncement(
+                `Использование: !tip #<id>. Пример: !tip #3 благодарит игрока с id 3 за игру.`,
+                player.id,
+                errorColor,
+                'bold',
+                HaxNotification.CHAT
+            );
+            return;
+        }
+        const target = room.getPlayer(parseInt(msgArray[0].substring(1)));
+        if (target.id == player.id) {
+            room.sendAnnouncement(`Нельзя типнуть самого себя !`, player.id, errorColor, 'bold', HaxNotification.CHAT);
+            return;
+        }
+        const auth = authArray[player.id][0];
+
+        if (state.tipUsedThisMatch.has(auth)) {
+            room.sendAnnouncement(
+                `!tip можно использовать только один раз за матч !`,
+                player.id,
+                errorColor,
+                'bold',
+                HaxNotification.CHAT
+            );
+            return;
+        }
+
+        const dailyMax = getRole(player) >= Role.VIP ? tipDailyMaxUsesVip : tipDailyMaxUses;
+        const dailyUses = pruneTipDailyUsage(auth);
+        if (dailyUses.length >= dailyMax) {
+            const nextFreeAt = new Date(dailyUses[0] + tipDailyWindowMs).toISOString();
+            room.sendAnnouncement(
+                `!tip можно использовать не больше ${dailyMax} раз в день — использовано ${dailyUses.length}/${dailyMax}, следующая попытка через ${formatBanRemaining(nextFreeAt)} !`,
+                player.id,
+                errorColor,
+                'bold',
+                HaxNotification.CHAT
+            );
+            return;
+        }
+
+        state.tipUsedThisMatch.add(auth);
+        dailyUses.push(Date.now());
+        tipDailyUsage.set(auth, dailyUses);
+
+        room.sendAnnouncement(
+            `👏 ${player.name} благодарит ${target.name}. Хорошая игра!`,
+            null,
+            announcementColor,
+            'bold',
+            HaxNotification.CHAT
+        );
+        room.sendAnnouncement(
+            `Использований !tip сегодня: ${renderProgressBar(dailyUses.length, dailyMax)}`,
             player.id,
             infoColor,
             'bold',
@@ -361,7 +494,7 @@ module.exports = function createPlayerCommands({
     // No argument shows every category in one message (see
     // stats/roomStats.js's printAllRankings), skipping any that don't have
     // the 5-player quorum yet rather than erroring.
-    const TOPS_STAT_KEYS = ['games', 'wins', 'goals', 'assists', 'cs', 'playtime', 'pt', 'clubs'];
+    const TOPS_STAT_KEYS = ['games', 'wins', 'goals', 'assists', 'cs', 'playtime', 'pt', 'clubs', 'elo'];
     async function topsCommand(player, message) {
         const key = message.split(/ +/)[1]?.toLowerCase();
         if (!key) {
@@ -370,7 +503,7 @@ module.exports = function createPlayerCommands({
         }
         if (!TOPS_STAT_KEYS.includes(key)) {
             room.sendAnnouncement(
-                `Использование: !tops [games|wins|goals|assists|cs|playtime|clubs]. Без аргумента показывает все таблицы лидеров сразу.`,
+                `Использование: !tops [games|wins|goals|assists|cs|playtime|clubs|elo]. Без аргумента показывает все таблицы лидеров сразу.`,
                 player.id,
                 errorColor,
                 'bold',
@@ -850,6 +983,8 @@ module.exports = function createPlayerCommands({
         leaveCommand,
         helpCommand,
         globalStatsCommand,
+        vsCommand,
+        tipCommand,
         renameCommand,
         customColorsCommand,
         vipColorCommand,

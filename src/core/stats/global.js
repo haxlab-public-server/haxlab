@@ -32,27 +32,38 @@ module.exports = function createGlobalStats({
         }
         if (playerArray.length != 0) {
             let playerTouch = playerArray.sort((a, b) => a[1] - b[1])[0][0];
-            if (state.lastTeamTouched == playerTouch.team || state.lastTeamTouched == Team.SPECTATORS) {
-                if (state.lastTouches[0] == null || (state.lastTouches[0] != null && state.lastTouches[0].player.id != playerTouch.id)) {
-                    state.game.touchArray.push(
-                        new BallTouch(
-                            playerTouch,
-                            state.game.scores.time,
-                            getGoalGame(),
-                            ballPosition
-                        )
-                    );
-                    state.lastTouches[0] = checkGoalKickTouch(
-                        state.game.touchArray,
-                        state.game.touchArray.length - 1,
-                        getGoalGame()
-                    );
-                    state.lastTouches[1] = checkGoalKickTouch(
-                        state.game.touchArray,
-                        state.game.touchArray.length - 2,
-                        getGoalGame()
-                    );
-                }
+            // Previously this only recorded a touch once the SAME team had
+            // touched twice in a row (or on the first touch after a
+            // SPECTATORS reset), to avoid a stray opponent deflection being
+            // read as a genuine possession change. That gate had a real
+            // cost: a clean interception-and-shoot (one touch, no second
+            // confirming touch) never got recorded, leaving lastTouches[0]
+            // stale on the PREVIOUS team's toucher — misattributing the
+            // goal as an own goal, or leaving it null right after a reset.
+            // The team filter isn't needed for correctness anyway:
+            // getGoalAttribution() (goalAttribution.js) already requires
+            // lastTouches[1].player.team == scoring team before crediting an
+            // assist, so a cross-team lastTouches[1] here just naturally
+            // yields "no assist" instead of a wrong one.
+            if (state.lastTouches[0] == null || state.lastTouches[0].player.id != playerTouch.id) {
+                state.game.touchArray.push(
+                    new BallTouch(
+                        playerTouch,
+                        state.game.scores.time,
+                        getGoalGame(),
+                        ballPosition
+                    )
+                );
+                state.lastTouches[0] = checkGoalKickTouch(
+                    state.game.touchArray,
+                    state.game.touchArray.length - 1,
+                    getGoalGame()
+                );
+                state.lastTouches[1] = checkGoalKickTouch(
+                    state.game.touchArray,
+                    state.game.touchArray.length - 2,
+                    getGoalGame()
+                );
             }
             state.lastTeamTouched = playerTouch.team;
         }

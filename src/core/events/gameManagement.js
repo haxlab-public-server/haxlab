@@ -37,7 +37,58 @@ module.exports = function createGameManagementEvents({
     playGoalSizeEffect,
     resetPauseVotes,
     updateTeams,
+    achievementColor,
+    infoColor,
+    authArray,
+    db,
 }) {
+    // Same-day rematch (item #13) takes priority over a general rivalry
+    // callout (item #10) when both would apply — it's the more specific,
+    // more timely storyline. Only ONE line ever fires per match start
+    // (never both, never one per pair) — same "don't clutter chat with
+    // every possible signal" reasoning as the rest of this session's
+    // batch. RIVALRY_MIN_GAMES keeps a first-ever meeting (games === 1,
+    // which every pair trivially "has" the moment they've played once)
+    // from reading as a manufactured rivalry.
+    const RIVALRY_MIN_GAMES = 5;
+    async function announceMatchupStorylines() {
+        const pairs = [];
+        for (const red of state.teamRed) {
+            for (const blue of state.teamBlue) {
+                const authRed = authArray[red.id]?.[0];
+                const authBlue = authArray[blue.id]?.[0];
+                if (!authRed || !authBlue) continue;
+                const h2h = await db.getHeadToHead(authRed, authBlue);
+                if (h2h) pairs.push({ red, blue, h2h });
+            }
+        }
+        if (pairs.length === 0) return;
+
+        const today = new Date().toISOString().slice(0, 10);
+        const rematchPair = pairs.find((p) => p.h2h.lastPlayedAt.slice(0, 10) === today);
+        if (rematchPair) {
+            room.sendAnnouncement(
+                `🔄 Реванш ! ${rematchPair.red.name} и ${rematchPair.blue.name} уже играли друг против друга сегодня — личный счёт ${rematchPair.h2h.winsFor}-${rematchPair.h2h.winsAgainst}.`,
+                null, infoColor, 'bold', HaxNotification.CHAT
+            );
+            return;
+        }
+
+        const biggestRivalry = pairs.reduce((best, p) => (p.h2h.games > (best?.h2h.games ?? 0) ? p : best), null);
+        if (biggestRivalry.h2h.games >= RIVALRY_MIN_GAMES) {
+            room.sendAnnouncement(
+                `🔥 Принципиальная встреча ! ${biggestRivalry.red.name} против ${biggestRivalry.blue.name} — личный счёт ${biggestRivalry.h2h.winsFor}-${biggestRivalry.h2h.winsAgainst}.`,
+                null, infoColor, 'bold', HaxNotification.CHAT
+            );
+        }
+    }
+    // In-match comeback detection (requested 2026-08-17, item #12) — a
+    // COMEBACK_THRESHOLD-goal deficit that gets fully erased (level or
+    // ahead) is called out the instant it happens, not after the match
+    // ends. Per-team running "worst deficit faced so far this match" and a
+    // one-shot "already announced" flag, both reset every onGameStart —
+    // see onTeamGoal's own comment for exactly how they're used together.
+    const COMEBACK_THRESHOLD = 3;
     function onGameStart(byPlayer) {
         clearTimeout(state.startTimeout);
         if (byPlayer != null) clearTimeout(state.stopTimeout);
@@ -52,11 +103,23 @@ module.exports = function createGameManagementEvents({
         state.lastTeamTouched = Team.SPECTATORS;
         state.teamRedStats = [];
         state.teamBlueStats = [];
+        state.matchWorstDeficit = { [Team.RED]: 0, [Team.BLUE]: 0 };
+        state.comebackAnnounced = { [Team.RED]: false, [Team.BLUE]: false };
+        // Clean-sheet watch (item #14) — reset here alongside the other
+        // per-match flags above even though checkTime() (entry.js) is the
+        // only thing that ever reads/sets it; state is shared, this is
+        // just the established "everything per-match resets in
+        // onGameStart" convention.
+        state.cleanSheetWatchAnnounced = false;
         // !votepause (see core/pauseVote.js) — once-per-match allowance
         // resets on every fresh match, same as the rest of this function's
         // per-round state.
         resetPauseVotes();
         state.pauseVoteUsed = { [Team.RED]: false, [Team.BLUE]: false };
+        // !tip #<id> (commands/player.js) — once-per-match allowance, same
+        // "everything per-match resets in onGameStart" convention as
+        // pauseVoteUsed just above.
+        state.tipUsedThisMatch = new Set();
         if (state.teamRed.length == teamSize && state.teamBlue.length == teamSize) {
             for (let i = 0; i < teamSize; i++) {
                 state.teamRedStats.push(state.teamRed[i]);
@@ -75,6 +138,13 @@ module.exports = function createGameManagementEvents({
         announceTeamForms().catch((err) => console.error('[economy] announceTeamForms failed:', err));
         calculateStadiumVariables();
         room.setKickRateLimit(6, 12, 4);
+        // Items #10/#13 — deliberately NOT gated behind the teamSize-only
+        // block above: a rivalry/rematch pairing is just as real in a 1v1
+        // or 2v2 as it is in a full house, so this reads straight off
+        // state.teamRed/state.teamBlue (the actual current rosters of
+        // whatever size just started), not the teamSize-gated *Stats
+        // snapshots.
+        announceMatchupStorylines().catch((err) => console.error('[gameManagement] announceMatchupStorylines failed:', err));
     }
 
     function onGameStop(byPlayer) {
@@ -204,6 +274,27 @@ module.exports = function createGameManagementEvents({
             HaxNotification.CHAT
         );
         discordBot.sendLog(`[${getDate()}] ${goalString}`);
+        // In-match comeback detection (item #12) — must run BEFORE updating
+        // matchWorstDeficit below with THIS goal's own result: the check is
+        // "how far behind were they at some point BEFORE this exact goal",
+        // not "how far behind are they right now" (which, for the team
+        // that just scored, can only ever have gotten smaller).
+        const scoringTeamOldWorstDeficit = state.matchWorstDeficit[team];
+        state.matchWorstDeficit[Team.RED] = Math.max(state.matchWorstDeficit[Team.RED], scores.blue - scores.red);
+        state.matchWorstDeficit[Team.BLUE] = Math.max(state.matchWorstDeficit[Team.BLUE], scores.red - scores.blue);
+        const scoringTeamNowLevelOrAhead = team == Team.RED ? scores.red >= scores.blue : scores.blue >= scores.red;
+        if (scoringTeamOldWorstDeficit >= COMEBACK_THRESHOLD && scoringTeamNowLevelOrAhead && !state.comebackAnnounced[team]) {
+            state.comebackAnnounced[team] = true;
+            const teamName = team == Team.RED ? 'Красная команда' : 'Синяя команда';
+            const verb = scores.red === scores.blue ? 'сравняла счёт' : 'вышла вперёд';
+            room.sendAnnouncement(
+                `🔄 Какой камбэк ! ${teamName} отыгрывалась с отставания в ${scoringTeamOldWorstDeficit} мяча и только что ${verb} !`,
+                null,
+                achievementColor,
+                'bold',
+                HaxNotification.MENTION
+            );
+        }
         // The scorer.team === team check excludes own goals — on an own
         // goal, lastTouches[0] is the player who caused it, on the OPPOSING
         // side from the team that benefits (see goalAttribution.js's own

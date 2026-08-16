@@ -9,7 +9,7 @@
 const roomName = 'ㅤㅤ🧪 HaxLab | BFF    | 4x4 3DEF 🧪';
 const maxPlayers = 14;
 const roomPublic = true;
-const geo = { code: 'RU', lat: 55.3, lon: 37.6173 }; // Moscow, same as the main room
+const geo = { code: 'RU', lat: 55.8, lon: 37.6173 }; // Moscow, same as the main room
 
 const HAXBALL_TOKEN_LENGTH = 39;
 

@@ -42,6 +42,22 @@ const BRIDGED_METHODS = [
     'linkDiscordId',
     'getSetting',
     'setSetting',
+    // Overflow password unification (requested 2026-08-17) — BFF-only alias
+    // routing to the MAIN room's file (see core/bff/dbBridge.js), so both
+    // rooms' core/overflowPassword.js instances read/write the same row
+    // instead of each's own getSetting/setSetting above, which stay
+    // per-room. The main room never calls these (its own getSetting/
+    // setSetting already IS the shared file) — harmless either way, this
+    // array is just an allowlist, not a required-to-use list.
+    'getSharedSetting',
+    'setSharedSetting',
+    // Telegram account linking (requested 2026-08-17) — identity-level,
+    // same "shared: main room's file" tier as VIPs/masters/admins above,
+    // reachable from both rooms so !telegram works wherever a VIP plays.
+    'createTelegramLinkCode',
+    'redeemTelegramLinkCode',
+    'linkTelegramId',
+    'getAuthByTelegramId',
     'addCoins',
     'getBalance',
     'spendCoins',
@@ -61,6 +77,10 @@ const BRIDGED_METHODS = [
     'addSilence',
     'removeSilence',
     'getAllSilencedPairs',
+    'recordHeadToHead',
+    'getHeadToHead',
+    'getRecord',
+    'setRecord',
     'setVipColor',
     'getAllVipColors',
     'getTopPlayers',

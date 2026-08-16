@@ -134,23 +134,38 @@ const { applyLimitsForSize, applyTrainingMap } = createRoomSetup({
     classicScoreLimit, classicTimeLimit, bigScoreLimit, bigTimeLimit,
 });
 
-/* OVERFLOW PASSWORD — BFF's own numbers (threshold 12, max 14), confirmed
- * 2026-08-14, deliberately smaller than the main room's (14/20). Same
- * module (core/overflowPassword.js), reused as-is — it was already
- * economy-free. */
-// Same setting-key names the module itself writes to internally
-// (overflowPassword.js's own PASSWORD_SETTING_KEY/PASSWORD_SET_AT_SETTING_KEY
-// are hardcoded, not parameterized) — no collision risk with the main
-// room's own use of these same key names, since BFF's `db` routes to a
-// genuinely separate physical file (see core/bff/dbBridge.js).
+/* OVERFLOW PASSWORD — BFF's own threshold (12, max 14), deliberately
+ * smaller than the main room's (15/20) — each room still independently
+ * decides WHETHER it's currently gating. Same module
+ * (core/overflowPassword.js), reused as-is. The VALUE itself is shared
+ * with the main room (requested 2026-08-17 — one Discord channel, one
+ * password): getSetting/setSetting below are routed through
+ * getSharedSetting/setSharedSetting (core/bff/dbBridge.js), which land on
+ * the MAIN room's physical file, not BFF's own — deliberately NOT the
+ * plain `db.getSetting`/`db.setSetting` BFF uses for every other setting.
+ */
 const passwordThreshold = 12;
 const createOverflowPassword = require('../core/overflowPassword');
-const persistedPassword = await db.getSetting('overflowPasswordValue');
-const persistedPasswordSetAt = Number(await db.getSetting('overflowPasswordSetAt')) || 0;
+const sharedSettingsDb = {
+    getSetting: (key) => db.getSharedSetting(key),
+    setSetting: (key, value) => db.setSharedSetting(key, value),
+};
+const persistedPassword = await sharedSettingsDb.getSetting('overflowPasswordValue');
+const persistedPasswordSetAt = Number(await sharedSettingsDb.getSetting('overflowPasswordSetAt')) || 0;
 const { checkOverflowPassword } = createOverflowPassword({
     room, state, maxPlayers, passwordThreshold, discordBot, generateRoomPassword,
-    rotateIntervalMs: 60 * 60 * 1000, db,
+    rotateIntervalMs: 60 * 60 * 1000, db: sharedSettingsDb,
     initialPassword: persistedPassword, initialPasswordSetAt: persistedPasswordSetAt,
+});
+
+/* TELEGRAM ACCOUNT LINKING — reused as-is from the main room (requested
+ * 2026-08-17, see core/telegramLink.js). Unlike overflow-password above,
+ * no wrapper needed here: createTelegramLinkCode/redeemTelegramLinkCode/
+ * linkTelegramId are new method names dbBridge.js routes straight to the
+ * shared file, with no per-room equivalent to alias around. */
+const createTelegramLink = require('../core/telegramLink');
+const { linkTelegramCommand } = createTelegramLink({
+    room, db, authArray, HaxNotification, errorColor, successColor, generateRoomPassword,
 });
 
 /* OBJECTS */
@@ -542,7 +557,7 @@ Object.assign(room, wrapEventHandlers(createBffEvents({
     HaxNotification, Role,
     announcementColor, errorColor, infoColor, welcomeColor, redColor, blueColor,
     masterList, maxPlayers, discordBot,
-    getDate, getRole, getGoalString, getPlayerComp, getStartingLineups,
+    getDate, getRole, getGoalString, getLastTouchOfTheBall, getPlayerComp, getStartingLineups,
     handleLineupChangeLeave, handleLineupChangeTeamChange,
     ghostKickHandle, updateTeams, calculateStadiumVariables, checkOverflowPassword, endGame,
     matchFlow, bffRoomStats, teamSize,
@@ -685,6 +700,7 @@ const commands = {
     rules: { aliases: ['info', 'правила'], roles: Role.PLAYER, function: rulesCommand },
     help: { aliases: ['commands', 'рудз'], roles: Role.PLAYER, function: helpCommand },
     bb: { aliases: ['bye', 'gn', 'cya', 'ии'], roles: Role.PLAYER, function: leaveCommand },
+    telegram: { aliases: [], roles: Role.PLAYER, function: linkTelegramCommand },
     vipcolor: { aliases: [], roles: Role.VIP, function: vipColorCommand },
     viphide: { aliases: [], roles: Role.VIP, function: vipHideCommand },
     up: { aliases: [], roles: Role.VIP, function: upCommand },

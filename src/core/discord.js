@@ -10,7 +10,7 @@ const { Client, GatewayIntentBits, Events, EmbedBuilder, AttachmentBuilder, Slas
 const { Agent: UndiciAgent, buildConnector } = require('undici');
 const { SocksClient } = require('socks');
 const { formatBanRemaining } = require('./utils');
-const { buildRankingString, buildAllRankingsText, buildClubRankingString } = require('./stats/print');
+const { buildRankingString, buildAllRankingsText, buildClubRankingString, buildEloRankingString, buildEloLeaderLine } = require('./stats/print');
 
 const SAY_PREFIX = '!say';
 // Checked BEFORE SAY_PREFIX everywhere below — "!saybff ..." also satisfies
@@ -30,14 +30,19 @@ const STATUS_MESSAGE_SETTING_KEY = 'statusMessageId';
 // Same key list/aliases/quorum behavior as the room's own !tops (see
 // commands/player.js's topsCommand and stats/roomStats.js) — just producing
 // a reply string here instead of a room.sendAnnouncement call.
-const TOPS_STAT_KEYS = ['games', 'wins', 'goals', 'assists', 'cs', 'playtime', 'pt', 'clubs'];
-const TOPS_USAGE_REPLY = 'Использование: !tops [games|wins|goals|assists|cs|playtime|clubs] (или /tops). Без аргумента показывает все таблицы лидеров сразу.';
+const TOPS_STAT_KEYS = ['games', 'wins', 'goals', 'assists', 'cs', 'playtime', 'pt', 'clubs', 'elo'];
+const TOPS_USAGE_REPLY = 'Использование: !tops [games|wins|goals|assists|cs|playtime|clubs|elo] (или /tops). Без аргумента показывает все таблицы лидеров сразу.';
 const NOT_ENOUGH_GAMES_REPLY = 'Недостаточно игр сыграно !';
 const NO_CLUB_SCORES_REPLY = 'Ни один клуб еще не заработал очков !';
 
 async function buildTopsReply(key, { db, getTimeStats }) {
     if (!key) {
-        const text = await buildAllRankingsText(db, getTimeStats);
+        // ELO line appended on top, same as the room's own printAllRankings
+        // — 'elo' isn't in buildAllRankingsText's own RANKING_STAT_KEYS list
+        // (see buildEloRankingString's comment), so it's added here instead.
+        const genericText = await buildAllRankingsText(db, getTimeStats);
+        const eloLine = await buildEloLeaderLine(db);
+        const text = [genericText, eloLine].filter((line) => line != null).join('\n') || null;
         return text ?? NOT_ENOUGH_GAMES_REPLY;
     }
     if (key === 'clubs') {
@@ -45,6 +50,15 @@ async function buildTopsReply(key, { db, getTimeStats }) {
         return text ?? NO_CLUB_SCORES_REPLY;
     }
     if (!TOPS_STAT_KEYS.includes(key)) return TOPS_USAGE_REPLY;
+    // 'elo' deliberately isn't in RANKING_STAT_KEYS/buildAllRankingsText's
+    // generic path (see buildEloRankingString's own comment) — this db is
+    // always the main room's here (see this file's header comment), so
+    // it's always safe to show, unlike the generic path which is shared
+    // verbatim with a hypothetical BFF caller.
+    if (key === 'elo') {
+        const text = await buildEloRankingString(db);
+        return text ?? NOT_ENOUGH_GAMES_REPLY;
+    }
     const text = await buildRankingString(db, getTimeStats, key === 'pt' ? 'playtime' : key);
     return text ?? NOT_ENOUGH_GAMES_REPLY;
 }
@@ -106,7 +120,7 @@ const slashCommandData = [
     new SlashCommandBuilder()
         .setName('unbanauth')
         .setDescription('Снять бан по auth (владелец и админы)')
-        .addStringOption((option) => option.setName('auth').setDescription('Auth забаненного игрока').setRequired(true)),
+        .addStringOption((option) => option.setName('auth').setDescription('Auth забаненного игрока, или номер [i] из /authbans').setRequired(true)),
     new SlashCommandBuilder()
         .setName('authbans')
         .setDescription('Показать список банов по auth (владелец и админы)'),
@@ -177,8 +191,18 @@ async function handleIncomingMessage(message, { discordOwnerId, discordAdminRole
 
     if (message.content.toLowerCase().startsWith(UNBANAUTH_PREFIX)) {
         if (!isOwnerOrAdmin(message.author.id, message.member, discordOwnerId, discordAdminRoleId)) return null;
-        const auth = message.content.slice(UNBANAUTH_PREFIX.length).trim();
-        if (auth === '') return 'Использование: !unbanauth <auth>';
+        const arg = message.content.slice(UNBANAUTH_PREFIX.length).trim();
+        if (arg === '') return 'Использование: !unbanauth <auth|номер>';
+        // A bare number is the [i] index !authbans just printed — same
+        // convention as the room's own !unbanauth (see master.js's
+        // unbanAuthCommand for the full reasoning).
+        let auth = arg;
+        if (/^\d+$/.test(arg)) {
+            const bans = db.getAuthBans();
+            const index = parseInt(arg);
+            if (index >= bans.length) return 'Неверный номер. Введите "!authbans" чтобы увидеть список.';
+            auth = bans[index].auth;
+        }
         const existing = db.getAuthBan(auth);
         if (!existing) return 'Этот auth не забанен.';
         db.unbanAuth(auth);
@@ -189,7 +213,8 @@ async function handleIncomingMessage(message, { discordOwnerId, discordAdminRole
         if (!isOwnerOrAdmin(message.author.id, message.member, discordOwnerId, discordAdminRoleId)) return null;
         const bans = db.getAuthBans();
         if (bans.length === 0) return 'В списке банов по auth никого нет.';
-        return bans.map((ban) => `${ban.playerName} [${ban.auth}] — осталось ${formatBanRemaining(ban.expiresAt)}${ban.reason ? ' (' + ban.reason + ')' : ''}`).join('\n');
+        // [i] is the index !unbanauth accepts directly instead of the raw auth.
+        return bans.map((ban, i) => `${ban.playerName} — осталось ${formatBanRemaining(ban.expiresAt)}${ban.reason ? ' (' + ban.reason + ')' : ''} [${i}]`).join('\n');
     }
 
     // Checked before !muteauth so "!unmuteauth" doesn't get shadowed by it.
@@ -237,11 +262,17 @@ async function handleIncomingMessage(message, { discordOwnerId, discordAdminRole
             if (!auth) return 'Ваш аккаунт Discord не привязан. Используйте "!discord <ваш ID Discord>" в комнате, или "!stats <имя игрока>" здесь.';
             const stats = db.getPlayerStats(auth);
             if (!stats) return "Вы еще не играли в квалификационные игры.";
+            // This db is always the main room's (see this file's own header
+            // comment / discordProcess.js — BFF isn't fed into this process
+            // at all), so it's safe to always show ELO here, unlike
+            // printPlayerStats' generic default.
+            stats.eloDisplay = stats.elo;
             return await getPrintPlayerStats()(stats);
         }
 
         const stats = resolveStatsByName(name, { db, state, getAuthArray });
         if (!stats) return `Статистика для "${name}" не найдена.`;
+        stats.eloDisplay = stats.elo;
         return await getPrintPlayerStats()(stats);
     }
 
@@ -415,7 +446,16 @@ async function handleSlashCommand(interaction, { discordOwnerId, discordAdminRol
 
     if (commandName === 'unbanauth') {
         if (!isOwnerOrAdmin(interaction.user.id, interaction.member, discordOwnerId, discordAdminRoleId)) return OWNER_OR_ADMIN_ONLY_REPLY;
-        const auth = interaction.options.getString('auth');
+        const arg = interaction.options.getString('auth');
+        // A bare number is the [i] index /authbans just printed — same
+        // convention as everywhere else this command exists.
+        let auth = arg;
+        if (/^\d+$/.test(arg)) {
+            const bans = db.getAuthBans();
+            const index = parseInt(arg);
+            if (index >= bans.length) return { content: 'Неверный номер. Введите "/authbans" чтобы увидеть список.', ephemeral: true };
+            auth = bans[index].auth;
+        }
         const existing = db.getAuthBan(auth);
         if (!existing) return { content: 'Этот auth не забанен.', ephemeral: true };
         db.unbanAuth(auth);
@@ -426,7 +466,7 @@ async function handleSlashCommand(interaction, { discordOwnerId, discordAdminRol
         if (!isOwnerOrAdmin(interaction.user.id, interaction.member, discordOwnerId, discordAdminRoleId)) return OWNER_OR_ADMIN_ONLY_REPLY;
         const bans = db.getAuthBans();
         if (bans.length === 0) return { content: 'В списке банов по auth никого нет.', ephemeral: true };
-        const content = bans.map((ban) => `${ban.playerName} [${ban.auth}] — осталось ${formatBanRemaining(ban.expiresAt)}${ban.reason ? ' (' + ban.reason + ')' : ''}`).join('\n');
+        const content = bans.map((ban, i) => `${ban.playerName} — осталось ${formatBanRemaining(ban.expiresAt)}${ban.reason ? ' (' + ban.reason + ')' : ''} [${i}]`).join('\n');
         return { content, ephemeral: true };
     }
 
@@ -799,9 +839,14 @@ module.exports = function createDiscordBot({
         updateRoomStatus();
     }
 
+    // Both rooms share ONE overflow password now (requested 2026-08-17 —
+    // core/overflowPassword.js syncs the same value across both, see its
+    // own doc comment), and both post to this SAME single passwordChannel
+    // (no separate BFF channel exists) — so no room tag is needed here
+    // anymore, the value is genuinely valid in both rooms at once.
     function sendPassword(password) {
         if (!passwordChannel) return;
-        passwordChannel.send(`🔒 Комната заполнена! Пароль на оставшиеся места: **${password}** (обновляется каждый час)`)
+        passwordChannel.send(`🔒 Один из залов заполнен! Пароль на оставшиеся места в футзале и BFF: **${password}** (обновляется каждый час)`)
             .catch((err) => console.error('Discord sendPassword failed:', err));
     }
 

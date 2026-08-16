@@ -33,6 +33,7 @@ module.exports = function createBffEvents({
     getDate,
     getRole,
     getGoalString,
+    getLastTouchOfTheBall,
     getPlayerComp,
     getStartingLineups,
     handleLineupChangeLeave,
@@ -317,6 +318,15 @@ module.exports = function createBffEvents({
         const scores = room.getScores();
         state.game.scores = scores;
         state.playSituation = Situation.GOAL;
+        // Force one last touch-check before reading attribution. onTeamGoal
+        // and onGameTick are two independent native callbacks with no
+        // guaranteed ordering within the tick a goal is scored on — on a
+        // point-blank shot/redirect, the goal can be detected before that
+        // same tick's onGameTick (which normally records the touch) has run,
+        // leaving lastTouches[0] one tick stale (or null right after a
+        // reset). getLastTouchOfTheBall() is idempotent per-tick (it only
+        // records a genuinely new toucher), so calling it again here is safe.
+        getLastTouchOfTheBall();
         // Called ONCE — getGoalString has a side effect (pushes a Goal
         // record onto state.game.goals via goalAttribution.js), so calling
         // it a second time for the Discord log would double-record every

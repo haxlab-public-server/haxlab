@@ -610,8 +610,8 @@ module.exports = function createMasterCommands({
 
     async function unbanAuthCommand(player, message) {
         const msgArray = message.split(/ +/).slice(1);
-        const auth = msgArray[0];
-        if (!auth) {
+        const arg = msgArray[0];
+        if (!arg) {
             room.sendAnnouncement(
                 `Неверный auth. Введите "!help unbanauth" для получения информации.`,
                 player.id,
@@ -621,6 +621,32 @@ module.exports = function createMasterCommands({
             );
             return;
         }
+
+        let auth = arg;
+        // A bare number refers to the position !authbans just printed (same
+        // "index into the list you were just shown" convention !removevip/
+        // !removeadmin already use) — much easier to type than a full auth
+        // hash, which was the actual complaint (reported 2026-08-17). Fetches
+        // getAuthBans() fresh rather than caching the last-shown list: as
+        // long as nothing else changed the auth-ban list in between, the
+        // same index still points at the same ban (authBanListCommand below
+        // uses the exact same ordering).
+        if (/^\d+$/.test(arg)) {
+            const bans = await db.getAuthBans();
+            const index = parseInt(arg);
+            if (index >= bans.length) {
+                room.sendAnnouncement(
+                    `Неверный номер. Введите "!authbans" чтобы увидеть список.`,
+                    player.id,
+                    errorColor,
+                    'bold',
+                    HaxNotification.CHAT
+                );
+                return;
+            }
+            auth = bans[index].auth;
+        }
+
         const existing = await db.getAuthBan(auth);
         if (!existing) {
             room.sendAnnouncement(
@@ -654,9 +680,13 @@ module.exports = function createMasterCommands({
             );
             return false;
         }
+        // [i] is the index !unbanauth accepts directly (see its own comment)
+        // — the raw auth was shown here before, which was the actual
+        // complaint: unbanning meant retyping a long hash by hand.
         let cstm = '📢 Список банов по auth : ';
-        for (let ban of bans) {
-            cstm += `${ban.playerName} [${ban.auth}] — осталось ${formatBanRemaining(ban.expiresAt)}${ban.reason ? ' (' + ban.reason + ')' : ''}, `;
+        for (let i = 0; i < bans.length; i++) {
+            const ban = bans[i];
+            cstm += `${ban.playerName} — осталось ${formatBanRemaining(ban.expiresAt)}${ban.reason ? ' (' + ban.reason + ')' : ''} [${i}], `;
         }
         cstm = cstm.substring(0, cstm.length - 2) + '.';
         room.sendAnnouncement(

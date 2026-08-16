@@ -38,6 +38,7 @@ class HaxStatistics {
         this.assists = 0;
         this.CS = 0;
         this.ownGoals = 0;
+        this.elo = 1000;
     }
 }
 

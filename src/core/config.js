@@ -28,6 +28,11 @@ const mentionWatchName = process.env.MENTION_WATCH_NAME ?? '';
 const testMode = process.env.TEST_MODE === 'true';
 
 const discordToken = process.env.DISCORD_TOKEN ?? '';
+// Telegram bot for on-demand overflow-password delivery (requested
+// 2026-08-17, see core/telegram.js) — obtained from @BotFather. Same
+// "leave empty to disable" convention as discordToken above; telegram.js's
+// own init() no-ops with no token.
+const telegramBotToken = process.env.TELEGRAM_BOT_TOKEN ?? '';
 const discordLogChannelId = process.env.DISCORD_LOG_CHANNEL_ID ?? ''; // formerly roomWebhook
 const discordReportChannelId = process.env.DISCORD_REPORT_CHANNEL_ID ?? ''; // formerly gameWebhook
 const discordOwnerId = process.env.DISCORD_OWNER_ID ?? '';
@@ -73,6 +78,7 @@ module.exports = {
     testMode,
     mentionWatchName,
     discordToken,
+    telegramBotToken,
     discordLogChannelId,
     discordReportChannelId,
     discordOwnerId,

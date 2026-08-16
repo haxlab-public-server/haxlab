@@ -57,6 +57,7 @@ try {
 
 const {
     discordToken,
+    telegramBotToken,
     discordLogChannelId,
     discordReportChannelId,
     discordOwnerId,
@@ -76,7 +77,7 @@ const {
     discordMainBridgePort,
 } = require('./config');
 const { maxPlayers: bffMaxPlayers } = require('./bff/roomConstants');
-const { getTimeStats } = require('./utils');
+const { getTimeStats, generateRoomPassword } = require('./utils');
 
 // Routes this process's Discord gateway (WebSocket) traffic through
 // DISCORD_PROXY_URL, when set — the ISP appears to drop Discord's TCP
@@ -242,6 +243,13 @@ const discordBot = createDiscordBot({
     getTimeStats,
 });
 discordBot.init();
+
+// Telegram bot (requested 2026-08-17, see core/telegram.js) — reuses THIS
+// process's own `db` (already the direct connection to the main room's
+// physical file, the canonical/shared store both the overflow password and
+// telegram_links live in) rather than spinning up a separate process.
+const createTelegramBot = require('./telegram');
+createTelegramBot({ db, telegramBotToken, generateRoomPassword }).init();
 
 // Unchanged in substance from the old process.on('message') switch — just
 // invoked from the TCP data handler below instead of fork() IPC. Handles
@@ -439,6 +447,22 @@ function handleBffBridgeMessage(msg) {
         // sendBffLog never had.
         case 'adminCall':
             discordBot.sendAdminCall(msg.playerName, 'BFF');
+            break;
+        // Real bug fixed 2026-08-17: this case was simply missing — BFF's
+        // core/overflowPassword.js (reused as-is, see bffEntry.js) calls
+        // discordBot.sendPassword() over this exact bridge same as the main
+        // room does over its own, but with no matching case here the
+        // message was silently dropped by this switch (no default branch,
+        // no error). The room itself still correctly got password-
+        // protected (room.setPassword() is local, doesn't need the bridge)
+        // — only the Discord announcement telling anyone what the password
+        // actually was never arrived, making it look totally broken from a
+        // player's side. No room tag (unlike adminCall above) — both rooms
+        // now share ONE overflow password (see overflowPassword.js's own
+        // doc comment), so this genuinely applies to both regardless of
+        // which room's threshold triggered the mint.
+        case 'password':
+            discordBot.sendPassword(msg.password);
             break;
     }
 }
