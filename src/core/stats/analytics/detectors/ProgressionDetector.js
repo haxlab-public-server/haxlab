@@ -6,6 +6,14 @@
  * upfield, OR crosses a third boundary forward even on a shorter gain (e.g.
  * a short pass that still breaks a defensive line). Final 3rd counts
  * segments that specifically land in the attacking third.
+ *
+ * Real bug fixed 2026-08-17 (found while cross-checking against a real
+ * replay run through an independent analyzer): this used to count ANY
+ * consecutive touch pair, including a TURNOVER — a player dribbling forward
+ * and then getting the ball taken off them still moved the ball upfield in
+ * the process, so a failed advance was being credited exactly like a
+ * successful pass. Now requires `touchChain.isPass(i + 1)` — possession
+ * must have genuinely stayed with the same team — before counting anything.
  */
 const PROGRESS_THRESHOLD = 100;
 
@@ -19,6 +27,7 @@ class ProgressionDetector {
         const { touchChain, reports, authOf } = ctx;
 
         for (let i = 0; i < touchChain.length - 1; i++) {
+            if (!touchChain.isPass(i + 1)) continue;
             const touch = touchChain.at(i);
             const next = touchChain.at(i + 1);
             const report = reports.get(authOf(touch.player));

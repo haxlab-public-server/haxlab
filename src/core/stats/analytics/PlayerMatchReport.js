@@ -12,6 +12,14 @@
  * MATCH-scoped tally, independent of player_stats' own CAREER totals
  * (roomStats.js) — same underlying source data (state.game.goals), separate
  * bookkeeping, purely for this report. rating is the single 0-10 composite.
+ *
+ * shotsTaken/xgCreated (added 2026-08-17, requested after a real-replay
+ * cross-check showed an independent analyzer crediting a high-volume,
+ * high-quality-chances-but-no-goals player far above what this module did):
+ * the attacker-side mirror of xgFaced/xgPrevented, written by the same
+ * ShotQualityModel — same geometric-heuristic caveat applies, see that
+ * file's own doc comment. Was NOT in the original 28-metric spec (that list
+ * scoped "xG" to goalkeepers only) — a deliberate, later fairness fix.
  */
 class PlayerMatchReport {
     constructor(auth, playerName, team) {
@@ -42,6 +50,8 @@ class PlayerMatchReport {
         this.clearancesRecovered = 0;
         this.xgFaced = 0;
         this.xgPrevented = 0;
+        this.shotsTaken = 0;
+        this.xgCreated = 0;
         this.sweeperActions = 0;
         this.secondAssists = 0;
         this.thirdAssists = 0;

@@ -371,7 +371,7 @@ module.exports = function createPlayerCommands({
             return;
         }
         const text = `${ratingEmoji(report.rating)} Оценка за последний матч — ${report.playerName}: ${report.rating.toFixed(1)}/10\n` +
-            `⚽ Голы ${report.goals} | Передачи ${report.assists}\n` +
+            `⚽ Голы ${report.goals} | Передачи ${report.assists} | Удары ${report.shotsTaken} (xG ${report.xgCreated})\n` +
             `🎯 Владение: касания ${report.posTouches} | голевые ${report.scoringPct}% | скорость решений ${report.decisionSpeed}\n` +
             `⏩ Прогресс: прог. передачи ${report.progPasses} (${report.progDistance}px) | выход в финальную треть ${report.final3rdEntries} | ключевые передачи ${report.keyPasses}\n` +
             `🅰️ Цепочка: 2-й ассист ${report.secondAssists} | 3-й ассист ${report.thirdAssists} | добивания ${report.rebounds} (забрал ${report.reboundsRecovered}) | контратаки ${report.counters}\n` +

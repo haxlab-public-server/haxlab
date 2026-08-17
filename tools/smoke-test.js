@@ -12008,6 +12008,96 @@ console.log('\n--- stats/analytics/detectors/: RecoveryDetector + ClearanceDetec
     check('a big touch out of the defensive third, past the min distance, is a Clearance', reports2.get('AR1').clearances, 1);
 }
 
+console.log('\n--- stats/analytics/detectors/ProgressionDetector.js: a turnover must NOT count as a progressive pass ---');
+{
+    // Real bug fixed 2026-08-17 (found cross-checking a real replay against
+    // an independent analyzer): this used to count ANY forward ball
+    // movement between consecutive touches, even when the next toucher was
+    // an OPPONENT — crediting a player who dribbled forward and then got
+    // dispossessed with a "successful" progressive pass, identical to a
+    // real completed one.
+    const { TouchChain } = require(path.join(CORE, 'stats', 'analytics', 'TouchChain'));
+    const { ProgressionDetector } = require(path.join(CORE, 'stats', 'analytics', 'detectors', 'ProgressionDetector'));
+    const { ZoneClassifier } = require(path.join(CORE, 'stats', 'analytics', 'ZoneClassifier'));
+    const { PlayerMatchReport } = require(path.join(CORE, 'stats', 'analytics', 'PlayerMatchReport'));
+    const pointDistance = (p1, p2) => Math.sqrt((p1.x - p2.x) ** 2 + (p1.y - p2.y) ** 2);
+    const zones = new ZoneClassifier({ Team, fieldHalfWidth: 500 });
+    const detector = new ProgressionDetector({ zones, Team });
+
+    const R1 = { id: 1, team: Team.RED };
+    const B1 = { id: 2, team: Team.BLUE };
+    const R2 = { id: 3, team: Team.RED };
+
+    // R1 dribbles forward (a big advance, RED attacks +x) and then loses it
+    // to B1 — a genuine turnover, not a pass, even though the ball moved
+    // upfield in the process.
+    const turnoverChain = new TouchChain([
+        { player: R1, time: 0, position: { x: -400, y: 0 } },
+        { player: B1, time: 1, position: { x: 0, y: 0 } }, // +400px forward for RED, but B1 is the OPPONENT
+    ], { pointDistance });
+    const reportsA = new Map([['AR1', new PlayerMatchReport('AR1', 'R1', Team.RED)]]);
+    detector.analyze({ touchChain: turnoverChain, reports: reportsA, authOf: () => 'AR1' });
+    check('a turnover that also happened to advance the ball is NOT credited as a progressive pass', reportsA.get('AR1').progPasses, 0);
+    check('...or any progressive distance', reportsA.get('AR1').progDistance, 0);
+    check('...or a final-third entry', reportsA.get('AR1').final3rdEntries, 0);
+
+    // Same forward movement, but this time the next toucher is a TEAMMATE —
+    // a genuine completed pass, must still be credited (regression check).
+    const passChain = new TouchChain([
+        { player: R1, time: 0, position: { x: -400, y: 0 } },
+        { player: R2, time: 1, position: { x: 0, y: 0 } },
+    ], { pointDistance });
+    const reportsB = new Map([['AR1', new PlayerMatchReport('AR1', 'R1', Team.RED)]]);
+    detector.analyze({ touchChain: passChain, reports: reportsB, authOf: () => 'AR1' });
+    check('the identical forward movement IS credited when the next toucher is a teammate', reportsB.get('AR1').progPasses, 1);
+    check('...with the real distance', reportsB.get('AR1').progDistance, 400);
+}
+
+console.log('\n--- stats/analytics/detectors/ShotQualityModel.js: attacker-side xG (shotsTaken/xgCreated), added 2026-08-17 ---');
+{
+    // Real fairness gap found via a real-replay cross-check: a player with
+    // several good shots but zero goals used to get NOTHING for that
+    // output — only the defending GK's xgFaced/xgPrevented existed before.
+    const { ShotQualityModel } = require(path.join(CORE, 'stats', 'analytics', 'detectors', 'ShotQualityModel'));
+    const { ZoneClassifier } = require(path.join(CORE, 'stats', 'analytics', 'ZoneClassifier'));
+    const { PlayerMatchReport } = require(path.join(CORE, 'stats', 'analytics', 'PlayerMatchReport'));
+    const zones = new ZoneClassifier({ Team, fieldHalfWidth: 500 });
+
+    const shooter = { id: 1, team: Team.RED };
+    const gk = { id: 2, team: Team.BLUE };
+    const reports = new Map([
+        ['A_SHOOTER', new PlayerMatchReport('A_SHOOTER', 'Shooter', Team.RED)],
+        ['A_GK', new PlayerMatchReport('A_GK', 'GK', Team.BLUE)],
+    ]);
+    const authOf = (p) => (p === shooter ? 'A_SHOOTER' : 'A_GK');
+    const getGK = (team) => (team === Team.BLUE ? { auth: 'A_GK' } : null);
+    const detector = new ShotQualityModel({ getGK, Team, zones });
+
+    // A missed shot (isGoal: false) from a central, close position (high quality).
+    const missedShot = { team: Team.RED, isGoal: false, touch: { player: shooter, position: { x: 400, y: 0 } } };
+    detector.analyze({ reports, shots: [missedShot], authOf });
+
+    const shooterReport = reports.get('A_SHOOTER');
+    check('a missed shot still credits the shooter with a shot taken', shooterReport.shotsTaken, 1);
+    check('...and a nonzero xgCreated (this is what used to be lost entirely)', shooterReport.xgCreated > 0, true);
+
+    const gkReport = reports.get('A_GK');
+    check('the SAME shot quality also lands on the defending GK as xgFaced', gkReport.xgFaced, shooterReport.xgCreated);
+    check('...and since it missed, counts as prevented too', gkReport.xgPrevented, shooterReport.xgCreated);
+
+    // A second shot that DOES score — shooter still gets credited with
+    // xgCreated (the chance was real regardless of outcome), but the GK
+    // should NOT get xgPrevented for a goal actually conceded.
+    const scoredShot = { team: Team.RED, isGoal: true, touch: { player: shooter, position: { x: 400, y: 0 } } };
+    const reports2 = new Map([
+        ['A_SHOOTER', new PlayerMatchReport('A_SHOOTER', 'Shooter', Team.RED)],
+        ['A_GK', new PlayerMatchReport('A_GK', 'GK', Team.BLUE)],
+    ]);
+    detector.analyze({ reports: reports2, shots: [scoredShot], authOf });
+    check('a scored shot still credits the shooter\'s xgCreated', reports2.get('A_SHOOTER').xgCreated > 0, true);
+    check('...but the GK gets xgFaced with NO xgPrevented (it went in)', [reports2.get('A_GK').xgFaced > 0, reports2.get('A_GK').xgPrevented], [true, 0]);
+}
+
 console.log('\n--- stats/analytics/index.js: full pipeline (recordTick + analyzeMatch), a real match end to end ---');
 (async () => {
     const State = { PLAY: 0, PAUSE: 1, STOP: 2 };
@@ -12167,6 +12257,39 @@ console.log('\n--- stats/analytics/detectors/MatchRatingDetector.js: fair across
     const goalsWithConcede = [...goalsForStriker, { time: 90, team: Team.BLUE, striker: { id: 2, team: Team.BLUE }, assist: null }];
     new MatchRatingDetector({ Team, getGK: getGKMock }).analyze({ reports: reportsB, goals: goalsWithConcede, authOf: authOfStriker });
     check('the identical GK performance rates lower once their team actually concedes (loses the clean-sheet bonus)', reportsB.get('AUTH_GK').rating < gkClean.rating, true);
+}
+
+console.log('\n--- stats/analytics/detectors/MatchRatingDetector.js: zero-spread epsilon (found 2026-08-17, while answering a user question about the rating\'s theoretical floor/ceiling) ---');
+{
+    // A match where every participant's raw attack/defense score is
+    // IDENTICAL should z-score everyone to exactly 0 (nobody stood out) and
+    // land everyone on the flat 6.5 baseline. Found via a synthetic all-tied
+    // match that this original code got wrong: summing identical raw scores
+    // and dividing back out doesn't always reproduce the exact same float
+    // (mean came out 5.6000000000000005, not 5.6), so stddev() computed a
+    // tiny nonzero residual (~9e-16) instead of a true 0 — and the old
+    // `sd > 0` check took that as real spread, dividing by it and blowing
+    // every player's z-score up to a uniform -1 instead of 0 (silently
+    // dragging the WHOLE match to a 5.0 rating instead of the intended 6.5).
+    // Fixed with a ZERO_SPREAD_EPSILON floor on the sd check.
+    const { MatchRatingDetector } = require(path.join(CORE, 'stats', 'analytics', 'detectors', 'MatchRatingDetector'));
+    const { PlayerMatchReport } = require(path.join(CORE, 'stats', 'analytics', 'PlayerMatchReport'));
+
+    function tiedReport(auth, team) {
+        const r = new PlayerMatchReport(auth, auth, team);
+        r.posTouches = 20; r.decisionSpeed = 50; r.turnoverTouches = 4; r.forcedTakeaways = 3;
+        r.dangerousTurnovers = 1; r.progPasses = 4; r.progDistance = 800; r.final3rdEntries = 1;
+        r.recoveries = 2; r.pressRelief = 40; r.duels = 6; r.duelsWon = 3; r.duelsLost = 3;
+        r.intercDuels = 1; r.clearances = 1; r.shotsTaken = 1; r.xgCreated = 0.2;
+        return r;
+    }
+    const tiedReports = new Map();
+    for (let i = 0; i < 8; i++) {
+        const auth = `AUTH_TIED${i}`;
+        tiedReports.set(auth, tiedReport(auth, i < 4 ? Team.RED : Team.BLUE));
+    }
+    new MatchRatingDetector({ Team, getGK: () => null }).analyze({ reports: tiedReports, goals: [], authOf: () => null });
+    check('a match where every participant\'s raw stats are exactly tied lands everyone on the 6.5 baseline, not a floating-point-skewed value', [...tiedReports.values()].every((r) => r.rating === 6.5), true);
 }
 
 // The movement.js leave broadcast fires from inside a 10ms setTimeout, the
