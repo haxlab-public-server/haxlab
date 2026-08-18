@@ -59,6 +59,9 @@ module.exports = function createEconomy({
     HaxNotification,
     announcementColor,
     errorColor,
+    infoColor,
+    achievementColor,
+    warningColor,
     formatCoins,
     getRandomInt,
     playSmokeAnimation,
@@ -595,14 +598,22 @@ module.exports = function createEconomy({
         // as an OPTIONAL filter on top of the full dump, but the actual ask
         // was for the bare command to be the compact view by default, with
         // the full per-category listing only one category name away).
+        // 3-part styled breakdown (requested 2026-08-18 — same visual
+        // hierarchy as !rating/!me/!tops): a bold achievementColor header
+        // with the balance, the actual catalog/category list de-emphasized
+        // as small print, and the usage hint as a small-italic warningColor
+        // footer — matches roomStats.js's sendRankingBlock/printAllRankings
+        // header/body/hint shape.
         if (msgArray.length === 0) {
             const balance = await db.getBalance(auth);
             const categoryList = SHOP_CATEGORY_KEYS.map((key) => `${key} (${CATEGORY_LABELS[key]})`).join(', ');
+            room.sendAnnouncement(`🛒 Магазин (баланс: ${formatCoins(balance)})`, player.id, achievementColor, 'bold', HaxNotification.CHAT);
+            room.sendAnnouncement(`Категории: ${categoryList}`, player.id, infoColor, 'small', HaxNotification.CHAT);
             room.sendAnnouncement(
-                `🛒 Магазин (баланс: ${formatCoins(balance)})\nКатегории: ${categoryList}\nСмотреть категорию: !shop <категория>. Купить/улучшить: !shop <id>. Надеть: !equip <id>.`,
+                `Смотреть категорию: !shop <категория>. Купить/улучшить: !shop <id>. Надеть: !equip <id>.`,
                 player.id,
-                announcementColor,
-                'bold',
+                warningColor,
+                'small-italic',
                 HaxNotification.CHAT
             );
             return;
@@ -612,13 +623,9 @@ module.exports = function createEconomy({
         if (category) {
             const [balance, owned, equipped] = await Promise.all([db.getBalance(auth), db.getOwnedItemIds(auth), db.getEquipped(auth)]);
             const levels = await getUpgradeableLevels(auth, items);
-            room.sendAnnouncement(
-                `🛒 Магазин — ${CATEGORY_LABELS[category]} (баланс: ${formatCoins(balance)})\n${formatCatalogSection(category, owned, equipped, levels, balance)}\nКупить/улучшить: !shop <id>. Надеть: !equip <id>.`,
-                player.id,
-                announcementColor,
-                'bold',
-                HaxNotification.CHAT
-            );
+            room.sendAnnouncement(`🛒 Магазин — ${CATEGORY_LABELS[category]} (баланс: ${formatCoins(balance)})`, player.id, achievementColor, 'bold', HaxNotification.CHAT);
+            room.sendAnnouncement(formatCatalogSection(category, owned, equipped, levels, balance), player.id, infoColor, 'small', HaxNotification.CHAT);
+            room.sendAnnouncement(`Купить/улучшить: !shop <id>. Надеть: !equip <id>.`, player.id, warningColor, 'small-italic', HaxNotification.CHAT);
             return;
         }
 
@@ -775,7 +782,16 @@ module.exports = function createEconomy({
             const lines = categoryItems.map((item) => formatItemLine(item, true, equipped[item.type], levels[item.id], vipGranted.includes(item.id)));
             return `${CATEGORY_LABELS[category]}:\n${lines.join('\n')}`;
         }).filter(Boolean);
-        room.sendAnnouncement(`🎒 Ваши аксессуары:\n${sections.join('\n')}`, player.id, announcementColor, 'bold', HaxNotification.CHAT);
+        // Header + one announcement per category (requested 2026-08-18 —
+        // same visual-hierarchy treatment as !rating/!me/!tops: at most 4
+        // categories exist (SHOP_CATEGORY_KEYS), so this stays well short of
+        // spammy even at a full inventory) — a bold achievementColor title,
+        // then each category as its own small-print block instead of one
+        // dense bold wall.
+        room.sendAnnouncement('🎒 Ваши аксессуары', player.id, achievementColor, 'bold', HaxNotification.CHAT);
+        for (const section of sections) {
+            room.sendAnnouncement(section, player.id, infoColor, 'small', HaxNotification.CHAT);
+        }
     }
 
     // Toggle: running this again on whatever's currently equipped for that

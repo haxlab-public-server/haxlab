@@ -33,7 +33,6 @@ module.exports = function createBffEvents({
     getDate,
     getRole,
     getGoalString,
-    getLastTouchOfTheBall,
     getPlayerComp,
     getStartingLineups,
     handleLineupChangeLeave,
@@ -318,19 +317,24 @@ module.exports = function createBffEvents({
         const scores = room.getScores();
         state.game.scores = scores;
         state.playSituation = Situation.GOAL;
-        // Force one last touch-check before reading attribution. onTeamGoal
-        // and onGameTick are two independent native callbacks with no
-        // guaranteed ordering within the tick a goal is scored on — on a
-        // point-blank shot/redirect, the goal can be detected before that
-        // same tick's onGameTick (which normally records the touch) has run,
-        // leaving lastTouches[0] one tick stale (or null right after a
-        // reset). getLastTouchOfTheBall() is idempotent per-tick (it only
-        // records a genuinely new toucher), so calling it again here is safe.
-        getLastTouchOfTheBall();
-        // Called ONCE — getGoalString has a side effect (pushes a Goal
-        // record onto state.game.goals via goalAttribution.js), so calling
-        // it a second time for the Discord log would double-record every
-        // single goal.
+        // Real regression found 2026-08-18 ("голы в BFF считает криво") —
+        // REMOVED the extra getLastTouchOfTheBall() call this function used
+        // to make here (added 2026-08-17 to close a theorized onGameTick/
+        // onTeamGoal ordering race). getLastTouchOfTheBall() doesn't replay
+        // history — it scans EVERY player's CURRENT position against the
+        // ball's CURRENT position (see stats/global.js) and records
+        // whoever's closest right now. Called again at goal time, the ball
+        // has often already settled inside/near the goal mouth — exactly
+        // where a diving keeper or a scrambling defender is most likely to
+        // be standing — so this could silently overwrite lastTouches[0]
+        // with THEIR id instead of the real scorer's, right before
+        // getGoalString reads it. Worse on BFF specifically: bigger maps
+        // keep more bodies clustered near goal (see the "3 defenders" rule
+        // on big maps). The main room's own onTeamGoal (events/
+        // gameManagement.js) never did this extra re-check and has no
+        // known equivalent bug — this now matches that exactly, trusting
+        // whatever lastTouches[0] the normal per-tick onGameTick call
+        // already recorded, same as the main room always has.
         const goalString = getGoalString(team);
         room.sendAnnouncement(goalString, null, team == Team.RED ? redColor : blueColor, 'bold', HaxNotification.CHAT);
         discordBot.sendLog(`[${getDate()}] ${goalString}`);

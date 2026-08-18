@@ -9,9 +9,36 @@
  * same-team follow-up is rewarded). Averaged across a player's touches this
  * match. Designed, not derived — same spirit as a credit score or ELO
  * itself, reasonable but not objectively "the" right formula.
+ *
+ * Real bug found 2026-08-18 (players reporting they couldn't get anywhere
+ * near 100 no matter how fast they played): the per-touch weights below
+ * only ever combine to a raw score in [RAW_MIN, RAW_MAX] = [10, 75] —
+ * BASELINE + the best-case speed bonus + the best-case outcome bonus caps
+ * out at 75, never 100, and the WORST case bottoms out at 10, never 0. The
+ * old `Math.max(0, Math.min(100, score))` clamp was dead code — score could
+ * never actually reach either bound, so it silently masked the mismatch
+ * between the metric's advertised 0-100 range and what the formula could
+ * ever produce. Confirmed against 500 real match reports: max observed was
+ * exactly 75, mean 40.4 — matching the theoretical ceiling exactly, not a
+ * coincidence. Fixed by linearly rescaling the final averaged score from
+ * its true achievable range onto the advertised 0-100 one — the underlying
+ * heuristic (what's rewarded/penalized, and by how much relative to each
+ * other) is UNCHANGED, only the displayed number's scale is corrected.
  */
 const IDEAL_HOLD_SECONDS = 1.0;
 const SLOW_HOLD_SECONDS = 3.0;
+
+const BASELINE = 50;
+const FAST_BONUS = 15;
+const SLOW_PENALTY = 15;
+const GOOD_OUTCOME_BONUS = 10;
+const TURNOVER_PENALTY = 25;
+
+// The true achievable range of the raw per-touch score above, derived from
+// the weights themselves (not hardcoded) so they can't silently drift apart
+// again if the weights above are ever retuned.
+const RAW_MIN = BASELINE - SLOW_PENALTY - TURNOVER_PENALTY;
+const RAW_MAX = BASELINE + FAST_BONUS + GOOD_OUTCOME_BONUS;
 
 class DecisionSpeedScorer {
     analyze(ctx) {
@@ -25,15 +52,14 @@ class DecisionSpeedScorer {
             const next = touchChain.at(i + 1);
             if (next == null) continue;
 
-            let score = 50;
+            let score = BASELINE;
             const holdTime = next.time - touch.time;
-            if (holdTime <= IDEAL_HOLD_SECONDS) score += 15;
-            else if (holdTime > SLOW_HOLD_SECONDS) score -= 15;
+            if (holdTime <= IDEAL_HOLD_SECONDS) score += FAST_BONUS;
+            else if (holdTime > SLOW_HOLD_SECONDS) score -= SLOW_PENALTY;
 
-            if (touchChain.isTurnoverAt(i + 1)) score -= 25;
-            else score += 10;
+            if (touchChain.isTurnoverAt(i + 1)) score -= TURNOVER_PENALTY;
+            else score += GOOD_OUTCOME_BONUS;
 
-            score = Math.max(0, Math.min(100, score));
             const arr = scores.get(auth) ?? [];
             arr.push(score);
             scores.set(auth, arr);
@@ -41,9 +67,12 @@ class DecisionSpeedScorer {
 
         for (const [auth, arr] of scores) {
             const report = reports.get(auth);
-            if (report != null) report.decisionSpeed = Math.round(arr.reduce((a, b) => a + b, 0) / arr.length);
+            if (report == null) continue;
+            const rawAvg = arr.reduce((a, b) => a + b, 0) / arr.length;
+            const rescaled = ((rawAvg - RAW_MIN) / (RAW_MAX - RAW_MIN)) * 100;
+            report.decisionSpeed = Math.round(Math.max(0, Math.min(100, rescaled)));
         }
     }
 }
 
-module.exports = { DecisionSpeedScorer, IDEAL_HOLD_SECONDS, SLOW_HOLD_SECONDS };
+module.exports = { DecisionSpeedScorer, IDEAL_HOLD_SECONDS, SLOW_HOLD_SECONDS, RAW_MIN, RAW_MAX };

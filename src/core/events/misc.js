@@ -22,7 +22,24 @@ module.exports = function createMiscEvents({
     handleActivity,
     stadiumCommand,
     updateTeams,
-    recordMatchAnalyticsTick,
+    // Real production bug found 2026-08-18 ("почему умирает бфф рума"):
+    // this module is genuinely shared between both rooms (see bffEntry.js's
+    // own "reused as-is" comment), but match analytics (core/stats/
+    // analytics/) was deliberately scoped main-room-only — BFF's own
+    // createMiscEvents call never passed this, so it was `undefined` and
+    // every single onGameTick call (60/sec, for the full duration of EVERY
+    // BFF match, since the analytics module shipped) threw "TypeError:
+    // recordMatchAnalyticsTick is not a function". wrapEventHandlers caught
+    // it so it never crashed the process outright, but it logged an Error
+    // (with a full stack trace) 60 times a SECOND, nonstop — the actual
+    // out.log on the VPS had grown to ~4 million lines from this alone,
+    // almost certainly what was starving disk space and destabilizing the
+    // whole box (including, plausibly, the "database is locked" crash seen
+    // in the error log). Defaulted to a no-op here — same established
+    // pattern as gameManagement.js's own `resetMatchAnalytics = () => {}}` —
+    // rather than wiring BFF into the real analytics module, matching this
+    // feature's original main-room-only scope decision.
+    recordMatchAnalyticsTick = () => {},
 }) {
     function onRoomLink(url) {
         console.log(url);

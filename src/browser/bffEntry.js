@@ -557,7 +557,7 @@ Object.assign(room, wrapEventHandlers(createBffEvents({
     HaxNotification, Role,
     announcementColor, errorColor, infoColor, welcomeColor, redColor, blueColor,
     masterList, maxPlayers, discordBot,
-    getDate, getRole, getGoalString, getLastTouchOfTheBall, getPlayerComp, getStartingLineups,
+    getDate, getRole, getGoalString, getPlayerComp, getStartingLineups,
     handleLineupChangeLeave, handleLineupChangeTeamChange,
     ghostKickHandle, updateTeams, calculateStadiumVariables, checkOverflowPassword, endGame,
     matchFlow, bffRoomStats, teamSize,

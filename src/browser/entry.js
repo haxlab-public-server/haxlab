@@ -285,6 +285,9 @@ const {
     HaxNotification,
     announcementColor,
     errorColor,
+    infoColor,
+    achievementColor,
+    warningColor,
     formatCoins,
     getRandomInt,
     playSmokeAnimation,
@@ -397,6 +400,15 @@ state.possession = [0, 0];
 state.actionZoneHalf = [0, 0];
 state.lastWinner = Team.SPECTATORS;
 state.streak = 0;
+// Who won the last QUALIFYING (full 4v4) match — kept separate from
+// state.lastWinner (requested 2026-08-18: "в 1х1 легко заабузить и
+// накрутить" серию побед). state.lastWinner is overwritten on EVERY match
+// regardless of size (other systems — ELO, coins — rely on that), so it
+// can't double as "who to compare against for streak continuity": a 1v1
+// played between two real 4v4s would otherwise silently reset or continue
+// the streak based on an irrelevant small match's winner. See endGame's
+// own isFullHouse check.
+state.streakWinner = Team.SPECTATORS;
 
 /* AUTH */
 
@@ -871,34 +883,58 @@ async function endGame(winner) {
     // the SAME team had actually just won again — so a blue team on a real
     // 3-win streak displayed "Текущая серия: 1" for every one of those
     // wins, and a red win immediately after ANY blue win kept incrementing
-    // from blue's stale count instead of restarting at 1. Captured BEFORE
-    // state.lastWinner is overwritten below, so it still holds who won
-    // last time.
-    const previousWinner = state.lastWinner;
+    // from blue's stale count instead of restarting at 1. Compared against
+    // state.streakWinner (its own SEPARATE tracking, see that field's own
+    // comment), not state.lastWinner — captured BEFORE it's overwritten
+    // below, so it still holds who won the last QUALIFYING match.
+    const previousStreakWinner = state.streakWinner;
     const scores = room.getScores();
     state.game.scores = scores;
     state.lastWinner = winner;
     state.endGameVariable = true;
+    // Streak only tracks genuine full 4v4 matches (requested 2026-08-18 —
+    // easy to farm a fake win streak via quick, low-effort 1v1s otherwise).
+    // Same "qualifying match" definition roomStats.js's own updateStats()
+    // already uses for whether a match even counts towards games/wins/ELO
+    // — a match too small to count for stats shouldn't count for the
+    // streak either. A non-qualifying match's own winner is announced
+    // normally, just without any streak text, and never touches
+    // state.streak/state.streakWinner at all — so an odd 1v1 played
+    // between two real 4v4s can't reset OR silently continue the streak.
+    const isFullHouse = state.teamRedStats.length >= teamSize && state.teamBlueStats.length >= teamSize;
     if (winner == Team.RED) {
-        state.streak = previousWinner === Team.RED ? state.streak + 1 : 1;
+        let streakText = ' !';
+        if (isFullHouse) {
+            state.streak = previousStreakWinner === Team.RED ? state.streak + 1 : 1;
+            state.streakWinner = Team.RED;
+            streakText = ` ! ${formatStreakText(state.streak)}`;
+        }
         room.sendAnnouncement(
-            `✨ Красная команда выиграла ${scores.red} - ${scores.blue} ! ${formatStreakText(state.streak)}`,
+            `✨ Красная команда выиграла ${scores.red} - ${scores.blue}${streakText}`,
             null,
             redColor,
             'bold',
             HaxNotification.CHAT
         );
     } else if (winner == Team.BLUE) {
-        state.streak = previousWinner === Team.BLUE ? state.streak + 1 : 1;
+        let streakText = ' !';
+        if (isFullHouse) {
+            state.streak = previousStreakWinner === Team.BLUE ? state.streak + 1 : 1;
+            state.streakWinner = Team.BLUE;
+            streakText = ` ! ${formatStreakText(state.streak)}`;
+        }
         room.sendAnnouncement(
-            `✨ Синяя команда выиграла ${scores.blue} - ${scores.red} ! ${formatStreakText(state.streak)}`,
+            `✨ Синяя команда выиграла ${scores.blue} - ${scores.red}${streakText}`,
             null,
             blueColor,
             'bold',
             HaxNotification.CHAT
         );
     } else {
-        state.streak = 0;
+        if (isFullHouse) {
+            state.streak = 0;
+            state.streakWinner = Team.SPECTATORS;
+        }
         room.sendAnnouncement(
             '💤 Лимит ничьих достигнут !',
             null,
@@ -919,7 +955,12 @@ async function endGame(winner) {
     } catch (err) {
         console.error('[endGame] recordHeadToHead failed:', err);
     }
-    if (winner == Team.RED || winner == Team.BLUE) {
+    // isFullHouse-gated (see the streak block above's own comment) — a
+    // non-qualifying match never touched state.streak, so checking it again
+    // here would either be a harmless no-op or, worse, misattribute an
+    // already-set record to whichever captain happened to win this
+    // unrelated small match.
+    if ((winner == Team.RED || winner == Team.BLUE) && isFullHouse) {
         try {
             const captain = winner == Team.RED ? state.teamRed[0] : state.teamBlue[0];
             await checkWinStreakRecord(db, room, HaxNotification, achievementColor, authArray, captain, state.streak);
@@ -934,13 +975,27 @@ async function endGame(winner) {
     let actionBluePct = 100 - actionRedPct;
     let actionString = `🔴 ${actionRedPct.toFixed(0)}% - ${actionBluePct.toFixed(0)}% 🔵`;
     let CSString = getCSString(scores);
+    // Split into 3 separately-styled announcements (requested 2026-08-18 —
+    // same "visual hierarchy over one dense bold block" treatment as !rating
+    // /!me/!tops, applied to the single highest-frequency output in the room:
+    // this fires after literally every match). Possession/action-zone stay
+    // small print (routine post-match trivia), the clean-sheet line gets
+    // its own call so it can be highlighted in successColor when it's a
+    // real achievement (someone actually kept a clean sheet) instead of
+    // blending into the same bold block regardless of outcome.
     room.sendAnnouncement(
         `📊 Владение: 🔴 ${possessionString}\n` +
-        `📊 Зоны действия: 🔴 ${actionString}\n` +
-        `${CSString}`,
+        `📊 Зоны действия: 🔴 ${actionString}`,
         null,
-        announcementColor,
-        'bold',
+        infoColor,
+        'small',
+        HaxNotification.NONE
+    );
+    room.sendAnnouncement(
+        CSString,
+        null,
+        getCS(scores).length > 0 ? successColor : infoColor,
+        'small-bold',
         HaxNotification.NONE
     );
     // 28-metric advanced analytics (see core/stats/analytics/, !rating) —
@@ -1303,6 +1358,8 @@ const {
     infoColor,
     announcementColor,
     achievementColor,
+    successColor,
+    warningColor,
     teamSize,
     getAssistsPlayer,
     getCSPlayer,
@@ -1436,12 +1493,18 @@ const {
     errorColor,
     infoColor,
     successColor,
+    achievementColor,
+    warningColor,
+    vipChatColor,
+    adminChatColor,
+    masterChatColor,
     HaxNotification,
     getCommand,
     getRole,
     handlePlayersJoin,
     handlePlayersLeave,
     printPlayerStats,
+    getTimeStats,
     printRankings,
     printAllRankings,
     printClubRankings,

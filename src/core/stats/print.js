@@ -9,7 +9,12 @@
 const { formatRatingDisplay, formatRankPrefix } = require('../utils');
 
 const STAT_LABELS = { games: 'Игры', wins: 'Победы', goals: 'Голы', assists: 'Ассисты', CS: 'Сухие матчи', playtime: 'Время игры', elo: 'ELO' };
+// Same emoji this codebase already uses for these exact categories in !me/
+// !vs/!rating (see commands/player.js) — reused here purely for visual
+// consistency, not introducing a new convention.
+const STAT_EMOJI = { games: '🕹️', wins: '🏆', goals: '⚽', assists: '🅰️', CS: '🧤', playtime: '⏱️', elo: '🎯' };
 const CLUB_STAT_LABEL = 'Клубы';
+const CLUB_EMOJI = '🛡️';
 
 // Every category !tops/`/tops` can show, in display order. Exported (not
 // just a local const) so core/bff/roomStats.js can build its own combined
@@ -37,6 +42,13 @@ const RANKING_STAT_KEYS = ['games', 'wins', 'goals', 'assists', 'CS', 'playtime'
 // requested 2026-08-16: the leaderboard used to be a dead end for anyone
 // not already on it). Silently skipped if they have no player_stats row at
 // all yet (nothing to rank).
+// One name per line (requested 2026-08-18 — the old comma-joined "🥇 A : 1,
+// 🥈 B : 2, ..." read as a single dense run-on list, same "wall of text"
+// complaint already fixed elsewhere for !tops' combined view and !shop).
+// Line 1 is always the emoji+label header, lines 2-6 are the 5 ranked
+// entries, and an optional trailing "Ты: #N из M" line — callers that split
+// this back apart (room-side color/style staging, see roomStats.js) can
+// rely on that fixed shape.
 async function buildRankingString(db, getTimeStats, statKey, auth) {
     const key = statKey == 'cs' ? 'CS' : statKey;
     const leaderboard = await db.getLeaderboard(key, 5);
@@ -47,25 +59,24 @@ async function buildRankingString(db, getTimeStats, statKey, auth) {
     // getVips() itself sweeps expired grants, so this is always live, never
     // a stale badge on a grant that already lapsed.
     const vipAuths = new Set((await db.getVips()).map((v) => v.auth));
-    let rankingString = `${STAT_LABELS[key] ?? key}> `;
+    const lines = [`${STAT_EMOJI[key] ?? ''} ${STAT_LABELS[key] ?? key} — топ 5`];
     for (let i = 0; i < 5; i++) {
         let playerName = leaderboard[i].playerName;
         let playerStat = leaderboard[i].value;
         if (key == 'playtime') playerStat = getTimeStats(playerStat);
         const vipBadge = vipAuths.has(leaderboard[i].auth) ? '⭐' : '';
-        rankingString += `${formatRankPrefix(i + 1)} ${vipBadge}${playerName} : ${playerStat}, `;
+        lines.push(`${formatRankPrefix(i + 1)} ${vipBadge}${playerName} : ${playerStat}`);
     }
-    rankingString = rankingString.substring(0, rankingString.length - 2);
     if (auth && !leaderboard.some((row) => row.auth === auth)) {
         const stats = await db.getPlayerStats(auth);
         if (stats) {
             const rankInfo = await db.getStatRank(key, stats[key]);
             if (rankInfo.total > 0) {
-                rankingString += `\nТы: #${rankInfo.rank} из ${rankInfo.total}`;
+                lines.push(`Ты: #${rankInfo.rank} из ${rankInfo.total}`);
             }
         }
     }
-    return rankingString;
+    return lines.join('\n');
 }
 
 // BFF-only leaderboard (see core/bff/rating.js/dbBridge.js) — the main
@@ -82,20 +93,19 @@ async function buildRatingRankingString(db, auth) {
     const leaderboard = await db.getRatingLeaderboard(5);
     if (leaderboard.length < 5) return null;
     const vipAuths = new Set((await db.getVips()).map((v) => v.auth));
-    let rankingString = `Рейтинг> `;
+    const lines = [`⚔️ Рейтинг — топ 5`];
     for (let i = 0; i < 5; i++) {
         const vipBadge = vipAuths.has(leaderboard[i].auth) ? '⭐' : '';
-        rankingString += `${formatRankPrefix(i + 1)} ${vipBadge}${leaderboard[i].playerName} : ${formatRatingDisplay(leaderboard[i].ordinal)}, `;
+        lines.push(`${formatRankPrefix(i + 1)} ${vipBadge}${leaderboard[i].playerName} : ${formatRatingDisplay(leaderboard[i].ordinal)}`);
     }
-    rankingString = rankingString.substring(0, rankingString.length - 2);
     if (auth) {
         const fullLeaderboard = await db.getRatingLeaderboard(9999);
         const index = fullLeaderboard.findIndex((row) => row.auth === auth);
         if (index >= 5) {
-            rankingString += `\nТы: #${index + 1} из ${fullLeaderboard.length}`;
+            lines.push(`Ты: #${index + 1} из ${fullLeaderboard.length}`);
         }
     }
-    return rankingString;
+    return lines.join('\n');
 }
 
 // Condensed, leader-only versions of the three builders above — real bug
@@ -115,13 +125,13 @@ async function buildTopLeaderLine(db, getTimeStats, statKey) {
     if (leaderboard.length < 5) return null;
     let value = leaderboard[0].value;
     if (key == 'playtime') value = getTimeStats(value);
-    return `${STAT_LABELS[key] ?? key}: ${leaderboard[0].playerName} (${value})`;
+    return `${STAT_EMOJI[key] ?? ''} ${STAT_LABELS[key] ?? key}: ${leaderboard[0].playerName} (${value})`;
 }
 
 async function buildRatingLeaderLine(db) {
     const leaderboard = await db.getRatingLeaderboard(5);
     if (leaderboard.length < 5) return null;
-    return `Рейтинг: ${leaderboard[0].playerName} (${formatRatingDisplay(leaderboard[0].ordinal)})`;
+    return `⚔️ Рейтинг: ${leaderboard[0].playerName} (${formatRatingDisplay(leaderboard[0].ordinal)})`;
 }
 
 // Main-room-only ELO leaderboard (see stats/elo.js) — kept OUT of
@@ -136,25 +146,24 @@ async function buildEloRankingString(db, auth) {
     const leaderboard = await db.getLeaderboard('elo', 5);
     if (leaderboard.length < 5) return null;
     const vipAuths = new Set((await db.getVips()).map((v) => v.auth));
-    let rankingString = `ELO> `;
+    const lines = [`${STAT_EMOJI.elo} ELO — топ 5`];
     for (let i = 0; i < 5; i++) {
         const vipBadge = vipAuths.has(leaderboard[i].auth) ? '⭐' : '';
-        rankingString += `${formatRankPrefix(i + 1)} ${vipBadge}${leaderboard[i].playerName} : ${leaderboard[i].value}, `;
+        lines.push(`${formatRankPrefix(i + 1)} ${vipBadge}${leaderboard[i].playerName} : ${leaderboard[i].value}`);
     }
-    rankingString = rankingString.substring(0, rankingString.length - 2);
     if (auth && !leaderboard.some((row) => row.auth === auth)) {
         const rankInfo = await db.getStatRank('elo', (await db.getPlayerStats(auth))?.elo ?? 1000);
         if (rankInfo.total > 0) {
-            rankingString += `\nТы: #${rankInfo.rank} из ${rankInfo.total}`;
+            lines.push(`Ты: #${rankInfo.rank} из ${rankInfo.total}`);
         }
     }
-    return rankingString;
+    return lines.join('\n');
 }
 
 async function buildEloLeaderLine(db) {
     const leaderboard = await db.getLeaderboard('elo', 5);
     if (leaderboard.length < 5) return null;
-    return `ELO: ${leaderboard[0].playerName} (${leaderboard[0].value})`;
+    return `${STAT_EMOJI.elo} ELO: ${leaderboard[0].playerName} (${leaderboard[0].value})`;
 }
 
 async function buildClubLeaderLine(db) {
@@ -162,7 +171,7 @@ async function buildClubLeaderLine(db) {
     if (topClubs.length === 0) return null;
     const club = topClubs[0];
     const tag = `${club.emoji ?? ''}${club.prefix}`;
-    return `${CLUB_STAT_LABEL}: [${tag}] ${club.name} (${club.score})`;
+    return `${CLUB_EMOJI} ${CLUB_STAT_LABEL}: [${tag}] ${club.name} (${club.score})`;
 }
 
 // !tops clubs — ranks clubs by combined goals+assists+clean_sheets (each
@@ -173,12 +182,12 @@ async function buildClubLeaderLine(db) {
 async function buildClubRankingString(db) {
     const topClubs = await db.getTopClubs(5);
     if (topClubs.length === 0) return null;
-    let rankingString = `${CLUB_STAT_LABEL}> `;
+    const lines = [`${CLUB_EMOJI} ${CLUB_STAT_LABEL} — топ ${topClubs.length}`];
     topClubs.forEach((club, i) => {
         const tag = `${club.emoji ?? ''}${club.prefix}`;
-        rankingString += `${formatRankPrefix(i + 1)} [${tag}] ${club.name} : ${club.score} (${club.goals}г/${club.assists}а/${club.cleanSheets}с), `;
+        lines.push(`${formatRankPrefix(i + 1)} [${tag}] ${club.name} : ${club.score} (${club.goals}г/${club.assists}а/${club.cleanSheets}с)`);
     });
-    return rankingString.substring(0, rankingString.length - 2);
+    return lines.join('\n');
 }
 
 // Every category in one block, skipping any that don't have the 5-player
@@ -202,7 +211,12 @@ async function buildAllRankingsText(db, getTimeStats, { extraLines = [], extraCa
     const lines = [...playerLines, clubLine, ...extraLines].filter((line) => line != null);
     if (lines.length === 0) return null;
     const categories = [...RANKING_STAT_KEYS.map((k) => k.toLowerCase()), 'clubs', ...extraCategories];
-    return `${lines.join('\n')}\nПолная таблица по категории: !tops <${categories.join('|')}>`;
+    // Leading header line (requested 2026-08-18) — room-side splits this
+    // block back apart by '\n' to color/style the header, the leader lines,
+    // and the trailing hint separately (see roomStats.js's printAllRankings);
+    // discord.js just posts the whole string as-is, so it stays one line
+    // there, harmlessly.
+    return `📊 Топ игроков по категориям\n${lines.join('\n')}\nПолная таблица по категории: !tops <${categories.join('|')}>`;
 }
 
 module.exports = function createPrintStats({
@@ -224,7 +238,12 @@ module.exports = function createPrintStats({
 
     // Multi-line layout (requested 2026-08-17 — the original single "Name
     // [bracket] [bracket] [bracket]" line read as one dense run-on
-    // sentence). Same substrings as before (rank/value pairs, labels),
+    // sentence). Line order is a fixed contract now (requested 2026-08-18):
+    // name, then win%/games, then the category breakdown, then an optional
+    // trailing rating/ELO line — commands/player.js's globalStatsCommand
+    // splits this string back apart by index to color/style each part
+    // separately for the room, so don't reorder without updating that too.
+    // Same substrings as before (rank/value pairs, labels),
     // just grouped onto their own lines instead of comma-joined inside
     // brackets — identity, then volume, then per-category ranks, then
     // room-specific rating lines (BFF's ratingOrdinal / main room's ELO),

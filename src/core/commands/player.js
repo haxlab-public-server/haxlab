@@ -27,12 +27,18 @@ module.exports = function createPlayerCommands({
     errorColor,
     infoColor,
     successColor,
+    achievementColor,
+    warningColor,
+    vipChatColor,
+    adminChatColor,
+    masterChatColor,
     HaxNotification,
     getCommand,
     getRole,
     handlePlayersJoin,
     handlePlayersLeave,
     printPlayerStats,
+    getTimeStats,
     printRankings,
     printAllRankings,
     printClubRankings,
@@ -148,29 +154,61 @@ module.exports = function createPlayerCommands({
     function helpCommand(player, message) {
         const msgArray = message.split(/ +/).slice(1);
         if (msgArray.length == 0) {
-            let commandString = `Доступные команды игрока :\n${buildHelpCategoryBlock(Role.PLAYER)}`;
+            // One announcement per role tier now, each in THAT role's own
+            // established chat color (requested 2026-08-18 — reusing
+            // vipChatColor/adminChatColor/masterChatColor rather than
+            // inventing a new palette, same colors those roles' own chat
+            // messages already use elsewhere) — a player instantly sees
+            // where their own commands end and a higher tier's begin,
+            // instead of one long undifferentiated bold dump.
+            room.sendAnnouncement(
+                `Доступные команды игрока :\n${buildHelpCategoryBlock(Role.PLAYER)}`,
+                player.id,
+                infoColor,
+                'bold',
+                HaxNotification.CHAT
+            );
             if (getRole(player) >= Role.VIP) {
-                commandString += `\n\nДоступные команды VIP :\n${buildHelpCategoryBlock(Role.VIP) || 'None'}`;
+                room.sendAnnouncement(
+                    `⭐ Доступные команды VIP :\n${buildHelpCategoryBlock(Role.VIP) || 'None'}`,
+                    player.id,
+                    vipChatColor,
+                    'bold',
+                    HaxNotification.CHAT
+                );
             }
             if (getRole(player) >= Role.ADMIN_TEMP) {
-                commandString += `\n\nДоступные команды администратора :\n${buildHelpCategoryBlock(Role.ADMIN_TEMP) || 'None'}`;
+                room.sendAnnouncement(
+                    `🛡 Доступные команды администратора :\n${buildHelpCategoryBlock(Role.ADMIN_TEMP) || 'None'}`,
+                    player.id,
+                    adminChatColor,
+                    'bold',
+                    HaxNotification.CHAT
+                );
             }
             if (getRole(player) >= Role.MASTER) {
-                commandString += `\n\nДоступные команды владельца :\n${buildHelpCategoryBlock(Role.MASTER) || 'None'}`;
+                room.sendAnnouncement(
+                    `👑 Доступные команды владельца :\n${buildHelpCategoryBlock(Role.MASTER) || 'None'}`,
+                    player.id,
+                    masterChatColor,
+                    'bold',
+                    HaxNotification.CHAT
+                );
             }
-            commandString += "\n\nДля получения информации о конкретной команде, введите '!help <имя команды>'.";
             // Unified index pointer (requested 2026-08-15): !club and !vip*
             // are each their OWN multi-command group with a separate help
             // entry point (!club help / !viphelp) that nothing in this list
             // otherwise hints at — spelled out here explicitly so the two-hop
             // "!help club" -> "see !club help" path isn't the only way to
-            // discover it.
-            commandString += "\nДополнительно: '!club help' — все команды клуба, '!viphelp' — все команды VIP.";
+            // discover it. Small-italic + warningColor (requested
+            // 2026-08-18) gives it the same "psst, more detail" tone as
+            // !tops' own trailing hint line.
             room.sendAnnouncement(
-                commandString,
+                "Для получения информации о конкретной команде, введите '!help <имя команды>'.\n" +
+                "Дополнительно: '!club help' — все команды клуба, '!viphelp' — все команды VIP.",
                 player.id,
-                infoColor,
-                'bold',
+                warningColor,
+                'small-italic',
                 HaxNotification.CHAT
             );
         } else if (msgArray.length >= 1) {
@@ -211,13 +249,21 @@ module.exports = function createPlayerCommands({
         const lastMatchReport = await db.getLatestMatchAnalyticsReport(authArray[player.id][0]);
         stats.lastMatchRating = lastMatchReport?.rating ?? null;
         const statsString = await printPlayerStats(stats);
-        room.sendAnnouncement(
-            statsString,
-            player.id,
-            infoColor,
-            'bold',
-            HaxNotification.CHAT
-        );
+        // Split into styled announcements (requested 2026-08-18 — real
+        // visual hierarchy, not just content: HaxBall can't style a single
+        // message per-line, only per-call, same pattern roomStats.js's
+        // sendRankingBlock now uses for !tops). printPlayerStats' own line
+        // order is fixed (name, then win%/games, then the category
+        // breakdown, then an optional ELO+rating line) — that shape is
+        // documented on printPlayerStats itself, so indexing into it here is
+        // safe as long as that order doesn't change.
+        const [nameLine, summaryLine, categoriesLine, ...rest] = statsString.split('\n');
+        room.sendAnnouncement(nameLine, player.id, stats.isVip ? achievementColor : announcementColor, 'bold', HaxNotification.CHAT);
+        room.sendAnnouncement(summaryLine, player.id, infoColor, 'small-bold', HaxNotification.CHAT);
+        room.sendAnnouncement(categoriesLine, player.id, infoColor, 'small', HaxNotification.CHAT);
+        if (rest.length > 0) {
+            room.sendAnnouncement(rest.join('\n'), player.id, successColor, 'small-bold', HaxNotification.CHAT);
+        }
     }
 
     // !vs #<id> (requested 2026-08-17, item #2) — head-to-head comparison,
@@ -228,6 +274,15 @@ module.exports = function createPlayerCommands({
     // — auth pairs recorded whenever a match ends (entry.js's endGame),
     // for opposing-team pairings only, so this stays empty for two people
     // who've only ever been teammates.
+    // Coarse day-bucket only (today/yesterday/N дней назад) — good enough
+    // for "is this rivalry still active", not meant as a precise clock.
+    function daysAgoText(isoString) {
+        const days = Math.floor((Date.now() - new Date(isoString).getTime()) / 86400000);
+        if (days <= 0) return 'сегодня';
+        if (days === 1) return 'вчера';
+        return `${days} дн. назад`;
+    }
+
     async function vsCommand(player, message) {
         const msgArray = message.split(/ +/).slice(1);
         if (msgArray.length == 0 || msgArray[0][0] != '#' || room.getPlayer(parseInt(msgArray[0].substring(1))) == null) {
@@ -247,21 +302,53 @@ module.exports = function createPlayerCommands({
         }
         const authSelf = authArray[player.id][0];
         const authTarget = authArray[target.id][0];
-        const [statsSelf, statsTarget] = await Promise.all([db.getPlayerStats(authSelf), db.getPlayerStats(authTarget)]);
+        const [statsSelf, statsTarget, reportSelf, reportTarget] = await Promise.all([
+            db.getPlayerStats(authSelf),
+            db.getPlayerStats(authTarget),
+            db.getLatestMatchAnalyticsReport(authSelf),
+            db.getLatestMatchAnalyticsReport(authTarget),
+        ]);
         const a = statsSelf ?? new HaxStatistics(player.name);
         const b = statsTarget ?? new HaxStatistics(target.name);
         const h2h = await db.getHeadToHead(authSelf, authTarget);
-        const h2hLine = h2h
-            ? `\nЛичные встречи: ${h2h.winsFor}-${h2h.winsAgainst} (${h2h.winsFor > h2h.winsAgainst ? 'в твою пользу' : h2h.winsFor < h2h.winsAgainst ? 'не в твою пользу' : 'ничья'})`
-            : `\nЛичных встреч друг против друга ещё не было.`;
-        const text = `⚔️ ${a.playerName} vs ${b.playerName}\n` +
-            `🏆 Победы: ${a.wins} — ${b.wins}\n` +
-            `🕹️ Игры: ${a.games} — ${b.games}\n` +
-            `⚽ Голы: ${a.goals} — ${b.goals}\n` +
-            `🅰️ Ассисты: ${a.assists} — ${b.assists}\n` +
-            `🧤 Сухие матчи: ${a.CS} — ${b.CS}` +
-            h2hLine;
-        room.sendAnnouncement(text, player.id, infoColor, 'bold', HaxNotification.CHAT);
+
+        // 4-part styled breakdown (requested 2026-08-18 — "добавь больше
+        // информации"): header, then career totals, then recent form (last
+        // analyzed match's 0-10 rating each — "who's hot right now", same
+        // source !rating uses), then the head-to-head line highlighted by
+        // outcome — same header/body/highlight shape !me/!rating/!tops
+        // already use, so a denser comparison still reads in layers instead
+        // of one more wall of text.
+        room.sendAnnouncement(`⚔️ ${a.playerName} vs ${b.playerName}`, player.id, achievementColor, 'bold', HaxNotification.CHAT);
+        room.sendAnnouncement(
+            `🏆 Победы: ${a.wins} — ${b.wins} (${a.winrate} — ${b.winrate})\n` +
+            `🕹️ Игры: ${a.games} — ${b.games} · ⏱️ Время: ${getTimeStats(a.playtime)} — ${getTimeStats(b.playtime)}\n` +
+            `🎯 ELO: ${a.elo} — ${b.elo}\n` +
+            `⚽ Голы: ${a.goals} — ${b.goals} · 🅰️ Ассисты: ${a.assists} — ${b.assists} · 🧤 Сухие: ${a.CS} — ${b.CS}`,
+            player.id,
+            infoColor,
+            'small',
+            HaxNotification.CHAT
+        );
+        if (reportSelf != null || reportTarget != null) {
+            const formSelf = reportSelf != null ? reportSelf.rating.toFixed(1) : '—';
+            const formTarget = reportTarget != null ? reportTarget.rating.toFixed(1) : '—';
+            room.sendAnnouncement(`📈 Форма (посл. матч): ${formSelf} — ${formTarget}`, player.id, achievementColor, 'small-bold', HaxNotification.CHAT);
+        }
+        if (h2h) {
+            const draws = h2h.games - h2h.winsFor - h2h.winsAgainst;
+            const outcome = h2h.winsFor > h2h.winsAgainst ? 'в твою пользу' : h2h.winsFor < h2h.winsAgainst ? 'не в твою пользу' : 'ничья';
+            const outcomeColor = h2h.winsFor > h2h.winsAgainst ? successColor : h2h.winsFor < h2h.winsAgainst ? warningColor : infoColor;
+            room.sendAnnouncement(
+                `Личные встречи: ${h2h.winsFor}-${h2h.winsAgainst}${draws > 0 ? `-${draws}н` : ''} (${outcome}) · последняя ${daysAgoText(h2h.lastPlayedAt)}`,
+                player.id,
+                outcomeColor,
+                'small-bold',
+                HaxNotification.CHAT
+            );
+        } else {
+            room.sendAnnouncement(`Личных встреч друг против друга ещё не было.`, player.id, infoColor, 'small-italic', HaxNotification.CHAT);
+        }
     }
 
     async function tipCommand(player, message) {
@@ -357,6 +444,18 @@ module.exports = function createPlayerCommands({
         return '🔻';
     }
 
+    // Same 4 tiers as ratingEmoji, mapped onto colors this codebase already
+    // uses for exactly these meanings elsewhere (achievementColor for a
+    // standout/milestone-tier result, successColor for a solidly good one,
+    // warningColor/errorColor for below-average) — reused for consistency,
+    // not a new palette.
+    function ratingColor(rating) {
+        if (rating >= 8.5) return achievementColor;
+        if (rating >= 7) return successColor;
+        if (rating >= 5.5) return warningColor;
+        return errorColor;
+    }
+
     async function ratingCommand(player, message) {
         const auth = authArray[player.id][0];
         const report = await db.getLatestMatchAnalyticsReport(auth);
@@ -370,15 +469,35 @@ module.exports = function createPlayerCommands({
             );
             return;
         }
-        const text = `${ratingEmoji(report.rating)} Оценка за последний матч — ${report.playerName}: ${report.rating.toFixed(1)}/10\n` +
-            `⚽ Голы ${report.goals} | Передачи ${report.assists} | Удары ${report.shotsTaken} (xG ${report.xgCreated})\n` +
+        // 3-part styled breakdown (requested 2026-08-18 — real visual
+        // hierarchy, not one dense bold block): headline rating tier-colored
+        // and prominent, the goal-contribution numbers right below it as a
+        // secondary highlight, and the full 24-metric breakdown de-emphasized
+        // as small print underneath — same "header/highlight/detail" shape
+        // globalStatsCommand and roomStats.js's sendRankingBlock now use, for
+        // a consistent feel across !me/!rating/!tops.
+        room.sendAnnouncement(
+            `${ratingEmoji(report.rating)} Оценка за последний матч — ${report.playerName}: ${report.rating.toFixed(1)}/10`,
+            player.id,
+            ratingColor(report.rating),
+            'bold',
+            HaxNotification.CHAT
+        );
+        room.sendAnnouncement(
+            `⚽ Голы ${report.goals} | Передачи ${report.assists} | Удары ${report.shotsTaken} (xG ${report.xgCreated})`,
+            player.id,
+            achievementColor,
+            'small-bold',
+            HaxNotification.CHAT
+        );
+        const detailText =
             `🎯 Владение: касания ${report.posTouches} | голевые ${report.scoringPct}% | скорость решений ${report.decisionSpeed}\n` +
             `⏩ Прогресс: прог. передачи ${report.progPasses} (${report.progDistance}px) | выход в финальную треть ${report.final3rdEntries} | ключевые передачи ${report.keyPasses}\n` +
             `🅰️ Цепочка: 2-й ассист ${report.secondAssists} | 3-й ассист ${report.thirdAssists} | добивания ${report.rebounds} (забрал ${report.reboundsRecovered}) | контратаки ${report.counters}\n` +
             `🛡️ Оборона: потери ${report.turnoverTouches} (опасных ${report.dangerousTurnovers}) | отборы ${report.forcedTakeaways} | перехваты ${report.intercDuels} | подборы ${report.recoveries} (в атаке ${report.f3Recoveries}) | выносы ${report.clearances} (сохранено ${report.clearancesRecovered})\n` +
             `🤺 Дуэли: ${report.duels} (${report.duelsWon}П / ${report.duelsLost}П) | без давления ${report.pressRelief}%\n` +
             `🧤 Вратарь: xG соперника ${report.xgFaced} | предотвращено ${report.xgPrevented} | подчистки ${report.sweeperActions}`;
-        room.sendAnnouncement(text, player.id, infoColor, 'bold', HaxNotification.CHAT);
+        room.sendAnnouncement(detailText, player.id, infoColor, 'small', HaxNotification.CHAT);
     }
 
     async function renameCommand(player, message) {

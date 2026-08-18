@@ -67,6 +67,8 @@ module.exports = function createRoomStats({
     infoColor,
     announcementColor,
     achievementColor,
+    successColor,
+    warningColor,
     teamSize,
     getAssistsPlayer,
     getCSPlayer,
@@ -280,6 +282,30 @@ module.exports = function createRoomStats({
         }
     }
 
+    // Splits the fixed shape buildRankingString/buildEloRankingString/
+    // buildRatingRankingString/buildClubRankingString now return (header
+    // line, then N ranked entries, then an optional trailing "Ты: #N из M"
+    // self-position line) into 2-3 separately-styled announcements
+    // (requested 2026-08-18 — "very beautiful" was interpreted as real
+    // visual hierarchy, not just content: HaxBall can't style a single
+    // message per-line, so a multi-part message means multiple
+    // room.sendAnnouncement calls, same pattern !tip's public+private split
+    // already uses). Header gets the bold+achievementColor treatment
+    // (matches milestone/top-5-ping announcements elsewhere), the ranked
+    // list is de-emphasized as 'small' body text, and a personal "Ты:" line
+    // (if present) gets its own small-bold successColor highlight — it's the
+    // one line THIS asker actually cares most about.
+    function sendRankingBlock(text, id) {
+        const lines = text.split('\n');
+        const selfLine = lines[lines.length - 1].startsWith('Ты:') ? lines.pop() : null;
+        const [header, ...body] = lines;
+        room.sendAnnouncement(header, id, achievementColor, 'bold', HaxNotification.CHAT);
+        room.sendAnnouncement(body.join('\n'), id, infoColor, 'small', HaxNotification.CHAT);
+        if (selfLine != null) {
+            room.sendAnnouncement(selfLine, id, successColor, 'small-bold', HaxNotification.CHAT);
+        }
+    }
+
     async function printRankings(statKey, id = 0) {
         // Item #2 (requested 2026-08-16) — only resolved for a real asking
         // player (id=0 is the "no specific asker" sentinel default), so
@@ -305,13 +331,7 @@ module.exports = function createRoomStats({
             }
             return;
         }
-        room.sendAnnouncement(
-            rankingString,
-            id,
-            null,
-            'bold',
-            HaxNotification.CHAT
-        );
+        sendRankingBlock(rankingString, id);
     }
 
     // !tops with no argument — every category in one message, skipping any
@@ -338,13 +358,17 @@ module.exports = function createRoomStats({
             );
             return;
         }
-        room.sendAnnouncement(
-            text,
-            id,
-            null,
-            'bold',
-            HaxNotification.CHAT
-        );
+        // Same 3-part header/body/hint split as sendRankingBlock, but the
+        // trailing line here is the "!tops <category>" pointer, not a
+        // personal position — small-italic + warningColor gives it a
+        // "psst, there's more" tone distinct from the successColor used for
+        // an actual personal highlight in sendRankingBlock.
+        const lines = text.split('\n');
+        const hint = lines.pop();
+        const [header, ...body] = lines;
+        room.sendAnnouncement(header, id, achievementColor, 'bold', HaxNotification.CHAT);
+        room.sendAnnouncement(body.join('\n'), id, infoColor, 'small', HaxNotification.CHAT);
+        room.sendAnnouncement(hint, id, warningColor, 'small-italic', HaxNotification.CHAT);
     }
 
     // !tops clubs — separate from printRankings since clubs rank by a
@@ -365,13 +389,7 @@ module.exports = function createRoomStats({
             }
             return;
         }
-        room.sendAnnouncement(
-            rankingString,
-            id,
-            null,
-            'bold',
-            HaxNotification.CHAT
-        );
+        sendRankingBlock(rankingString, id);
     }
 
     return {

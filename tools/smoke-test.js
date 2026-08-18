@@ -85,7 +85,7 @@ console.log('--- stats/print.js: !stats shows the full stat block ---');
     ];
     const ratingDbFull = { getRatingLeaderboard: async () => ratingRows, getVips: async () => [] };
     const ratingRankingText = await require(path.join(CORE, 'stats', 'print')).buildRatingRankingString(ratingDbFull);
-    check('buildRatingRankingString shows all 5 at quorum, display-rescaled, top-3 medalled', ratingRankingText, 'Рейтинг> 🥇 Top : 1812, 🥈 Second : 1604, 🥉 Third : 1418, #4 Fourth : 1202, #5 Fifth : 1008');
+    check('buildRatingRankingString shows all 5 at quorum, display-rescaled, top-3 medalled, one per line', ratingRankingText, '⚔️ Рейтинг — топ 5\n🥇 Top : 1812\n🥈 Second : 1604\n🥉 Third : 1418\n#4 Fourth : 1202\n#5 Fifth : 1008');
 
     const ratingRows2 = ratingRows.map((r, i) => ({ ...r, auth: i === 1 ? 'AUTH_SECOND' : `AUTH_${r.playerName}` }));
     const ratingDbVip2 = { getRatingLeaderboard: async () => ratingRows2, getVips: async () => [{ auth: 'AUTH_SECOND' }] };
@@ -655,7 +655,7 @@ console.log('\n--- db + roomStats.js/player.js: player data actually round-trips
 
     const roomStats = require(path.join(CORE, 'stats', 'roomStats'))({
         room, state, Team, authArray, db, HaxStatistics, HaxNotification,
-        errorColor: 3, infoColor: 5, announcementColor: 1, achievementColor: 99, teamSize: 4,
+        errorColor: 3, infoColor: 5, announcementColor: 1, achievementColor: 99, successColor: 6, warningColor: 7, teamSize: 4,
         getAssistsPlayer: (p) => perPlayerStat[p.id].assists,
         getCSPlayer: (p) => perPlayerStat[p.id].CS,
         getGametimePlayer: (p) => perPlayerStat[p.id].playtime,
@@ -687,31 +687,41 @@ console.log('\n--- db + roomStats.js/player.js: player data actually round-trips
     db.savePlayerStats('AUTH_FILLER2', Object.assign(new HaxStatistics('Filler2'), { goals: 100 }));
     sent.length = 0;
     await roomStats.printRankings('goals', 0);
-    check('leaderboard is announced once 5 players exist, top scorer first, with a medal not a bare "#1"', /^Голы> 🥇 Filler2 : 100/.test(sent[0].msg), true);
+    // Split into a styled header + de-emphasized body now (requested
+    // 2026-08-18 — see sendRankingBlock's own comment): header is its own
+    // bold+achievementColor announcement, the ranked list is a separate
+    // small+infoColor one. No "Ты:" self-line here since id=0 (no asker).
+    check('printRankings sends exactly 2 announcements when there is no self-position line', sent.length, 2);
+    check('header announces the category, bold + achievementColor', sent[0], { msg: '⚽ Голы — топ 5', id: 0, color: 99, style: 'bold' });
+    check('leaderboard is announced once 5 players exist, top scorer first, with a medal not a bare "#1"', /^🥇 Filler2 : 100/.test(sent[1].msg), true);
+    check('...body is small print', sent[1].style, 'small');
 
     // !tops with no argument (roomStats.printAllRankings) — every category
     // in one message now that all 5 rows exist, not six separate commands.
     // Leader-only per category since 2026-08-15 (real wall-of-text bug fix,
     // see buildAllRankingsText's own comment) — 6 categories + 1 trailing
     // "!tops <category>" hint line, no club line yet (no club has scored
-    // anything at this point in the test).
+    // anything at this point in the test). Split into header/body/hint
+    // announcements (requested 2026-08-18, see printAllRankings' own comment).
     sent.length = 0;
     await roomStats.printAllRankings(0);
-    // 6 categories + the ELO line + hint line (all 5 rows sit at the
-    // elo_rating DEFAULT 1000 at this point — the quorum only needs 5 rows
-    // to exist, not 5 players who've actually had ELO moved).
-    check('printAllRankings combines every category into one message', sent[0].msg.split('\n').length, 8);
-    check('printAllRankings includes the goals leader', /Голы: Filler2 \(100\)/.test(sent[0].msg), true);
-    check('printAllRankings includes the playtime leader too', /Время игры:/.test(sent[0].msg), true);
+    check('printAllRankings sends exactly 3 announcements: header, body, hint', sent.length, 3);
+    check('header is the fixed "top by category" title', sent[0].msg, '📊 Топ игроков по категориям');
+    // 6 categories + the ELO line = 7 lines in the body (all 5 rows sit at
+    // the elo_rating DEFAULT 1000 at this point — the quorum only needs 5
+    // rows to exist, not 5 players who've actually had ELO moved).
+    check('printAllRankings combines every category into one body message', sent[1].msg.split('\n').length, 7);
+    check('printAllRankings includes the goals leader', /⚽ Голы: Filler2 \(100\)/.test(sent[1].msg), true);
+    check('printAllRankings includes the playtime leader too', /Время игры:/.test(sent[1].msg), true);
     // Real bug fixed 2026-08-17: the hint line used to render ABOVE the ELO
     // line (ELO was appended after buildAllRankingsText's already-complete
     // return value, hint included) — now ELO is folded into the SAME lines
     // array the hint is built from, so it lands before the hint, and the
     // hint itself now also lists 'elo' as a valid !tops <category>.
-    const eloLineIndex = sent[0].msg.split('\n').findIndex((line) => /^ELO: \w+ \(1000\)/.test(line));
-    const hintLineIndex = sent[0].msg.split('\n').findIndex((line) => line.startsWith('Полная таблица по категории'));
-    check('the ELO leader line appears BEFORE the "full table" hint, not after it', eloLineIndex >= 0 && eloLineIndex < hintLineIndex, true);
-    check('...and the hint now also advertises elo as a valid !tops <category>', /Полная таблица по категории: !tops <games\|wins\|goals\|assists\|cs\|playtime\|clubs\|elo>/.test(sent[0].msg), true);
+    const eloLineIndex = sent[1].msg.split('\n').findIndex((line) => /^🎯 ELO: \w+ \(1000\)/.test(line));
+    check('the ELO leader line is present in the body, before the separately-sent hint', eloLineIndex >= 0, true);
+    check('...and the hint now also advertises elo as a valid !tops <category>', sent[2].msg, 'Полная таблица по категории: !tops <games|wins|goals|assists|cs|playtime|clubs|elo>');
+    check('...hint is small-italic + warningColor, a "psst, more detail" tone', { color: sent[2].color, style: sent[2].style }, { color: 7, style: 'small-italic' });
 
     const printRankingsCalls = [];
     const printAllRankingsCalls = [];
@@ -727,9 +737,10 @@ console.log('\n--- db + roomStats.js/player.js: player data actually round-trips
         hiddenVipSet: hiddenVipSetForPlayerTest,
         silencedAuths: silencedAuthsForPlayerTest,
         minAFKDuration: 0, maxAFKDuration: 0, AFKCooldown: 0,
-        announcementColor: 1, errorColor: 3, infoColor: 5, successColor: 6, HaxNotification,
+        announcementColor: 1, errorColor: 3, infoColor: 5, successColor: 6, achievementColor: 7, warningColor: 8, HaxNotification,
         getCommand: () => false, getRole: () => 0, handlePlayersJoin: () => {}, handlePlayersLeave: () => {},
-        printPlayerStats: (s) => `stats-for-${s.playerName}`,
+        printPlayerStats: (s) => `stats-for-${s.playerName}\nsummary-line\ncategories-line\nrating-line`,
+        getTimeStats: (seconds) => `${Math.floor(seconds / 60)}m`,
         printRankings: async (key, id) => { printRankingsCalls.push({ key, id }); },
         printAllRankings: async (id) => { printAllRankingsCalls.push(id); },
         printClubRankings: async (id) => { printClubRankingsCalls.push(id); },
@@ -773,7 +784,14 @@ console.log('\n--- db + roomStats.js/player.js: player data actually round-trips
 
     sent.length = 0;
     await player.globalStatsCommand({ id: 1, name: 'Alice' }, '!me');
+    // Split into 4 styled announcements now (requested 2026-08-18 — real
+    // visual hierarchy for !me: name header, win%/games summary, category
+    // breakdown, and the trailing ELO/rating line each get their own
+    // color+style, same pattern !tops' sendRankingBlock uses).
     check('globalStatsCommand reads the same row updatePlayerStats wrote', sent[0].msg, 'stats-for-Alice');
+    check('globalStatsCommand splits printPlayerStats into 4 separately-styled announcements', sent.map((s) => s.msg), ['stats-for-Alice', 'summary-line', 'categories-line', 'rating-line']);
+    check('...the name header is bold', sent[0].style, 'bold');
+    check('...the trailing rating/ELO line is small-bold, highlighted like a personal callout', sent[3].style, 'small-bold');
 
     sent.length = 0;
     await player.renameCommand({ id: 1, name: 'Alice' }, '!rename Queen Alice');
@@ -818,14 +836,15 @@ console.log('\n--- db + roomStats.js/player.js: player data actually round-trips
     // shared cooldown/discordBotCalls state used by the tests below.
     {
         const helpSent = [];
-        const helpRoom = { sendAnnouncement: (msg, id, color, style) => helpSent.push({ msg, id, style }) };
+        const helpRoom = { sendAnnouncement: (msg, id, color, style) => helpSent.push({ msg, id, color, style }) };
         const RoleForHelp = { PLAYER: 0, VIP: 1, ADMIN_TEMP: 2, ADMIN_PERM: 3, MASTER: 4 };
         const helpPlayer = require(path.join(CORE, 'commands', 'player'))({
             room: helpRoom, state, Team, Role: RoleForHelp, HaxStatistics, authArray, db,
             AFKSet: new Set(), AFKMinSet: new Set(), AFKCooldownSet: new Set(),
             hiddenVipSet: new Set(),
             minAFKDuration: 0, maxAFKDuration: 0, AFKCooldown: 0,
-            announcementColor: 1, errorColor: 3, infoColor: 5, successColor: 6, HaxNotification,
+            announcementColor: 1, errorColor: 3, infoColor: 5, successColor: 6, achievementColor: 7, warningColor: 8,
+            vipChatColor: 9, adminChatColor: 10, masterChatColor: 11, HaxNotification,
             getCommand: () => false,
             getRole: () => RoleForHelp.VIP,
             handlePlayersJoin: () => {}, handlePlayersLeave: () => {},
@@ -843,11 +862,18 @@ console.log('\n--- db + roomStats.js/player.js: player data actually round-trips
             discordBot: { sendAdminCall: () => {}, checkVipRoleOnLink: () => {} },
         });
         helpPlayer.helpCommand({ id: 1 }, '!help');
+        // Split into one announcement per role tier now (requested
+        // 2026-08-18) — [0] player tier, [1] VIP tier (this test's getRole
+        // always returns VIP), [2] the trailing hint footer. Each tier gets
+        // its own established chat color instead of one undifferentiated bold dump.
         const helpMsg = helpSent[0].msg;
         check('!help groups player commands by category with an emoji header', helpMsg.includes('📊 Статистика: !me, !tops'), true);
         check('...category order puts shop before misc', helpMsg.indexOf('🛒 Магазин') < helpMsg.indexOf('🛠 Прочее'), true);
         check('...a command with no category field still shows, filed under misc', /🛠 Прочее:.*!legacyNoCat/.test(helpMsg), true);
-        check('...VIP tier (for a VIP player) gets its own grouped block', helpMsg.includes('⭐ VIP: !vipcolor'), true);
+        check('...player tier is bold + infoColor', { color: helpSent[0].color, style: helpSent[0].style }, { color: 5, style: 'bold' });
+        check('...VIP tier (for a VIP player) gets its own grouped block', helpSent[1].msg.includes('⭐ VIP: !vipcolor'), true);
+        check('...VIP tier uses vipChatColor', helpSent[1].color, 9);
+        check('...trailing hint footer is small-italic + warningColor', { color: helpSent[2].color, style: helpSent[2].style }, { color: 8, style: 'small-italic' });
 
         helpSent.length = 0;
         helpPlayer.vipHelpCommand({ id: 1 });
@@ -1114,10 +1140,14 @@ console.log('\n--- db + roomStats.js/player.js: player data actually round-trips
     }
 
     // printClubRankings (!tops clubs) — real formatted chat output, not
-    // mocked, for the exact "5г/1а/1с" breakdown format.
+    // mocked, for the exact "5г/1а/1с" breakdown format. Split into
+    // header+body like every other sendRankingBlock caller now; no
+    // self-position line for clubs.
     sent.length = 0;
     await roomStats.printClubRankings(0);
-    check('printClubRankings announces the real formatted club leaderboard', sent[0].msg, 'Клубы> 🥇 [SCR] ScorerClub : 7 (5г/1а/1с)');
+    check('printClubRankings sends header + body', sent.length, 2);
+    check('printClubRankings header', sent[0].msg, '🛡️ Клубы — топ 1');
+    check('printClubRankings announces the real formatted club leaderboard', sent[1].msg, '🥇 [SCR] ScorerClub : 7 (5г/1а/1с)');
 
     state.clubMembers = [];
 
@@ -1222,24 +1252,43 @@ console.log('\n--- db + roomStats.js/player.js: player data actually round-trips
     // this point, so read the actual current values instead of assuming.
     const aliceGoalsAtThisPoint = db.getPlayerStats('AUTH_ALICE').goals;
     const bobGoalsAtThisPoint = db.getPlayerStats('AUTH_BOB').goals;
+    // 3-part split now (requested 2026-08-18 — "добавь больше информации",
+    // plus the same header/body/highlight visual-hierarchy treatment as
+    // !me/!rating/!tops): [0] header, [1] career stats, [2] head-to-head
+    // (the "recent form" message in between is skipped entirely here since
+    // neither Alice nor Bob has an analyzed match report in this test).
     sent.length = 0;
     await player.vsCommand({ id: 1, name: 'Alice' }, '!vs #2');
     check('!vs shows both player names', /Alice.*vs.*Bob/.test(sent[0].msg), true);
-    check('!vs compares real stat numbers straight off the db', sent[0].msg.includes(`⚽ Голы: ${aliceGoalsAtThisPoint} — ${bobGoalsAtThisPoint}`), true);
-    check('...with no head-to-head history yet, says so explicitly', /Личных встреч.*ещё не было/.test(sent[0].msg), true);
+    check('!vs sends exactly 3 messages when neither side has a recent-form report', sent.length, 3);
+    check('!vs compares real stat numbers straight off the db', sent[1].msg.includes(`⚽ Голы: ${aliceGoalsAtThisPoint} — ${bobGoalsAtThisPoint}`), true);
+    check('...and now also compares winrate/games/playtime/ELO', /🏆 Победы:.*\(.*%.*—.*%\)/.test(sent[1].msg) && /🎯 ELO: \d+ — \d+/.test(sent[1].msg), true);
+    check('...with no head-to-head history yet, says so explicitly', /Личных встреч.*ещё не было/.test(sent[2].msg), true);
 
     db.recordHeadToHead('AUTH_ALICE', 'AUTH_BOB', 'AUTH_ALICE');
     db.recordHeadToHead('AUTH_ALICE', 'AUTH_BOB', 'AUTH_ALICE');
     db.recordHeadToHead('AUTH_ALICE', 'AUTH_BOB', 'AUTH_BOB');
     sent.length = 0;
     await player.vsCommand({ id: 1, name: 'Alice' }, '!vs #2');
-    check('!vs shows the real head-to-head record, oriented to the CALLER (Alice: 2 wins, 1 loss)', /Личные встречи: 2-1/.test(sent[0].msg), true);
-    check('...and calls out that it favors the caller', /\(в твою пользу\)/.test(sent[0].msg), true);
+    check('!vs shows the real head-to-head record, oriented to the CALLER (Alice: 2 wins, 1 loss)', /Личные встречи: 2-1/.test(sent[2].msg), true);
+    check('...and calls out that it favors the caller', /\(в твою пользу\)/.test(sent[2].msg), true);
+    check('...highlighted in successColor for a favorable record', sent[2].color, 6);
 
     sent.length = 0;
     await player.vsCommand({ id: 2, name: 'Bob' }, '!vs #1');
-    check('the SAME record, asked from Bob\'s side, correctly flips to 1-2', /Личные встречи: 1-2/.test(sent[0].msg), true);
-    check('...and reads as not in Bob\'s favor', /\(не в твою пользу\)/.test(sent[0].msg), true);
+    check('the SAME record, asked from Bob\'s side, correctly flips to 1-2', /Личные встречи: 1-2/.test(sent[2].msg), true);
+    check('...and reads as not in Bob\'s favor', /\(не в твою пользу\)/.test(sent[2].msg), true);
+    check('...highlighted in warningColor for an unfavorable record', sent[2].color, 8);
+
+    // Recent-form line only appears when at least one side has an analyzed
+    // match report — Bob gets one here, Alice still has none, so the line
+    // should show his real rating and a "—" placeholder for Alice.
+    db.saveMatchAnalyticsReport({ auth: 'AUTH_BOB', playerName: 'Bob', rating: 7.3 });
+    sent.length = 0;
+    await player.vsCommand({ id: 1, name: 'Alice' }, '!vs #2');
+    check('!vs now sends a 4th message for recent form once either side has a report', sent.length, 4);
+    check('...showing Bob\'s real rating and "—" for Alice (no report)', sent[2].msg, '📈 Форма (посл. матч): — — 7.3');
+    check('...and the head-to-head line moved to index 3', /Личные встречи: 2-1/.test(sent[3].msg), true);
 
     sent.length = 0;
     await player.linkDiscordCommand({ id: 1, name: 'Alice' }, '!discord 123456789012345678');
@@ -1462,7 +1511,7 @@ console.log('\n--- stats/roomStats.js + stats/elo.js: main-room ELO exchange (re
     };
     const roomStatsElo = require(path.join(CORE, 'stats', 'roomStats'))({
         room: roomElo, state: stateElo, Team, authArray: authArrayElo, db: dbElo, HaxStatistics: HaxStatisticsElo, HaxNotification,
-        errorColor: 3, infoColor: 5, announcementColor: 1, achievementColor: 99, teamSize: 2,
+        errorColor: 3, infoColor: 5, announcementColor: 1, achievementColor: 99, successColor: 6, warningColor: 7, teamSize: 2,
         getAssistsPlayer: () => 0, getCSPlayer: () => 0, getGametimePlayer: () => 60, getGoalsPlayer: () => 0,
         getOwnGoalsPlayer: () => 0, getPlayerComp: (player) => player, getTimeStats: (s) => `${s}s`,
         applyVipGrant: async () => {}, random: () => 1, // 1 >= VIP_LOTTERY_CHANCE always, so the lottery never fires
@@ -1633,7 +1682,7 @@ console.log('\n--- stats/roomStats.js: private top-5 entry ping (requested 2026-
     const perPlayerStat2 = { 5: { goals: 50, assists: 0, CS: 0, playtime: 0 }, 6: { goals: 200, assists: 0, CS: 0, playtime: 0 } };
     const roomStats2 = require(path.join(CORE, 'stats', 'roomStats'))({
         room: room2, state: state2, Team, authArray: authArray2, db: db2, HaxStatistics: HaxStatistics2, HaxNotification,
-        errorColor: 3, infoColor: 5, announcementColor: 1, achievementColor: 99, teamSize: 4,
+        errorColor: 3, infoColor: 5, announcementColor: 1, achievementColor: 99, successColor: 6, warningColor: 7, teamSize: 4,
         getAssistsPlayer: (p) => perPlayerStat2[p.id].assists,
         getCSPlayer: (p) => perPlayerStat2[p.id].CS,
         getGametimePlayer: (p) => perPlayerStat2[p.id].playtime,
@@ -1706,7 +1755,7 @@ console.log('\n--- stats/roomStats.js: VIP lottery — 0.5% roll per WINNING-tea
     let randomValue = 0;
     const roomStats = require(path.join(CORE, 'stats', 'roomStats'))({
         room, state, Team, authArray, db, HaxStatistics, HaxNotification: HaxNotificationMock,
-        errorColor: 2, infoColor: 1, announcementColor: 5, achievementColor: 99, teamSize: 1,
+        errorColor: 2, infoColor: 1, announcementColor: 5, achievementColor: 99, successColor: 6, warningColor: 7, teamSize: 1,
         getAssistsPlayer: () => 0, getCSPlayer: () => 0, getGametimePlayer: () => 0, getGoalsPlayer: () => 0,
         getOwnGoalsPlayer: () => 0, getPlayerComp: (p) => p, getTimeStats: (s) => `${s}s`,
         applyVipGrant: async (auth, name, expiresAt) => {
@@ -2365,7 +2414,7 @@ console.log('\n--- core/commands/trophies.js + db.getTopPlayers(): top-3 trophie
     const rsAuthArray = { 1: ['AUTH_1'], 2: ['AUTH_2'] };
     const roomStats = require(path.join(CORE, 'stats', 'roomStats'))({
         room, state: rsState, Team, authArray: rsAuthArray, db, HaxStatistics, HaxNotification,
-        errorColor: 2, infoColor: 1, announcementColor: 5, teamSize: 1,
+        errorColor: 2, infoColor: 1, announcementColor: 5, achievementColor: 99, successColor: 6, warningColor: 7, teamSize: 1,
         getAssistsPlayer: () => 0, getCSPlayer: () => 0, getGametimePlayer: () => 0, getGoalsPlayer: () => 0,
         getOwnGoalsPlayer: () => 0, getPlayerComp: (p) => p, getTimeStats: (s) => `${s}s`,
         applyVipGrant: async () => {},
@@ -3042,15 +3091,17 @@ console.log('\n--- discord.js: message/interaction-handling logic (no live Disco
     for (let i = 1; i <= 4; i++) {
         db.savePlayerStats(`AUTH_FILLER${i}`, { playerName: `Filler${i}`, games: 1, wins: 0, goals: i, assists: 0, ownGoals: 0, CS: 0, playtime: 0 });
     }
-    check('!tops goals shows the real leaderboard once the quorum is met, top-3 medalled', await handleIncomingMessage(msg('U1', '!tops goals'), deps), 'Голы> 🥇 Xara : 7, 🥈 Filler4 : 4, 🥉 Filler3 : 3, #4 Filler2 : 2, #5 Filler1 : 1');
+    check('!tops goals shows the real leaderboard once the quorum is met, top-3 medalled, one per line', await handleIncomingMessage(msg('U1', '!tops goals'), deps), '⚽ Голы — топ 5\n🥇 Xara : 7\n🥈 Filler4 : 4\n🥉 Filler3 : 3\n#4 Filler2 : 2\n#5 Filler1 : 1');
     check('!tops pt resolves the "pt" alias to "playtime"', await handleIncomingMessage(msg('U1', '!tops pt'), deps), await handleIncomingMessage(msg('U1', '!tops playtime'), deps));
     const topsSlashReply = await handleSlashCommand(interaction('U1', 'tops', { stat: 'goals' }), deps);
-    check('/tops <stat> matches !tops <stat> exactly', topsSlashReply, { content: 'Голы> 🥇 Xara : 7, 🥈 Filler4 : 4, 🥉 Filler3 : 3, #4 Filler2 : 2, #5 Filler1 : 1', ephemeral: true });
+    check('/tops <stat> matches !tops <stat> exactly', topsSlashReply, { content: '⚽ Голы — топ 5\n🥇 Xara : 7\n🥈 Filler4 : 4\n🥉 Filler3 : 3\n#4 Filler2 : 2\n#5 Filler1 : 1', ephemeral: true });
     // Leader-only per category since 2026-08-15 (real wall-of-text fix) —
-    // 6 categories + 1 trailing "!tops <category>" hint line + the ELO line
-    // appended after it (see buildTopsReply's own comment — 'elo' is
-    // deliberately outside the generic RANKING_STAT_KEYS list).
-    check('!tops with no argument now shows every category combined (leader-only)', (await handleIncomingMessage(msg('U1', '!tops'), deps)).split('\n').length, 8);
+    // a fixed header line + 6 categories + 1 trailing "!tops <category>"
+    // hint line + the ELO line appended before it (see buildTopsReply's own
+    // comment — 'elo' is deliberately outside the generic RANKING_STAT_KEYS
+    // list). Discord gets this as one plain-text message (no per-line
+    // color/style like the room gets — see roomStats.js's sendRankingBlock).
+    check('!tops with no argument now shows every category combined (leader-only)', (await handleIncomingMessage(msg('U1', '!tops'), deps)).split('\n').length, 9);
     check('...including an ELO leader line', (await handleIncomingMessage(msg('U1', '!tops'), deps)).includes('ELO: '), true);
 
     // Auto-role on join: every new Discord member gets the configured role,
@@ -6960,7 +7011,7 @@ console.log('\n--- commands/player.js: !tip #<id> — once per match + role-base
 console.log('\n--- commands/player.js: !rating — 28-metric analytics report lookup ---');
 (async () => {
     const sentRating = [];
-    const roomMockRating = { sendAnnouncement: (msg, id, color) => sentRating.push({ msg, id, color }) };
+    const roomMockRating = { sendAnnouncement: (msg, id, color, style) => sentRating.push({ msg, id, color, style }) };
     const authArrayRating = { 1: ['AUTH_RATING_ALICE'] };
     const dbRating = {
         reports: new Map(),
@@ -6971,7 +7022,7 @@ console.log('\n--- commands/player.js: !rating — 28-metric analytics report lo
         AFKSet: new Set(), AFKMinSet: new Set(), AFKCooldownSet: new Set(),
         hiddenVipSet: new Set(), silencedAuths: new Map(),
         minAFKDuration: 0, maxAFKDuration: 0, AFKCooldown: 0,
-        announcementColor: 1, errorColor: 3, infoColor: 5, successColor: 6,
+        announcementColor: 1, errorColor: 3, infoColor: 5, successColor: 6, achievementColor: 7, warningColor: 8,
         HaxNotification: { CHAT: 1 },
         getCommand: () => false, getRole: () => 0,
         handlePlayersJoin: () => {}, handlePlayersLeave: () => {},
@@ -6984,7 +7035,7 @@ console.log('\n--- commands/player.js: !rating — 28-metric analytics report lo
 
     sentRating.length = 0;
     await ratingCommand({ id: 1, name: 'Alice' }, '!rating');
-    check('no report yet -> a clear "play a match first" message, sent privately', sentRating[0], { msg: 'Пока нет данных о последнем матче — сыграйте хотя бы один полный матч.', id: 1, color: 3 });
+    check('no report yet -> a clear "play a match first" message, sent privately', sentRating[0], { msg: 'Пока нет данных о последнем матче — сыграйте хотя бы один полный матч.', id: 1, color: 3, style: 'bold' });
 
     const { PlayerMatchReport } = require(path.join(CORE, 'stats', 'analytics', 'PlayerMatchReport'));
     const report = new PlayerMatchReport('AUTH_RATING_ALICE', 'Alice', 1);
@@ -6998,18 +7049,28 @@ console.log('\n--- commands/player.js: !rating — 28-metric analytics report lo
 
     sentRating.length = 0;
     await ratingCommand({ id: 1, name: 'Alice' }, '!rating');
+    // 3 separately-styled announcements now (requested 2026-08-18): the
+    // tier-colored headline, a small-bold goal-contribution highlight, then
+    // the full metric breakdown de-emphasized as small print — see
+    // ratingCommand's own comment for the reasoning.
     check('a real report is looked up by the CALLER\'s own auth, not broadcast', sentRating[0].id, 1);
     check('...and shows the player\'s name', sentRating[0].msg.includes('Alice'), true);
     check('...and leads with the single 0-10 composite rating', sentRating[0].msg.includes('9.1/10'), true);
     check('...with the strong-game emoji for a rating this high', sentRating[0].msg.startsWith('🌟'), true);
-    check('...and shows match goals/assists', sentRating[0].msg.includes('Голы 2 | Передачи 1'), true);
-    check('...and reflects the actual stored metrics', sentRating[0].msg.includes('касания 12'), true);
-    check('...including a field that was never touched, defaulting to 0', sentRating[0].msg.includes('выносы 0'), true);
+    check('...headline uses achievementColor for a rating this high', sentRating[0].color, 7);
+    check('...headline is bold', sentRating[0].style, 'bold');
+    check('...and shows match goals/assists in the small-bold highlight line', sentRating[1].msg.includes('Голы 2 | Передачи 1'), true);
+    check('...highlight line style', sentRating[1].style, 'small-bold');
+    check('...and reflects the actual stored metrics in the detail block', sentRating[2].msg.includes('касания 12'), true);
+    check('...including a field that was never touched, defaulting to 0', sentRating[2].msg.includes('выносы 0'), true);
+    check('...detail block is small print', sentRating[2].style, 'small');
+    check('exactly 3 announcements for a real report', sentRating.length, 3);
 
     sentRating.length = 0;
     report.rating = 3.2;
     await ratingCommand({ id: 1, name: 'Alice' }, '!rating');
     check('a low rating gets the weak-game emoji instead', sentRating[0].msg.startsWith('🔻'), true);
+    check('...and errorColor for a rating this low', sentRating[0].color, 3);
 })();
 
 console.log('\n--- commands/player.js: !up — master exemption from the daily cap + hourly cooldown (requested 2026-08-17) ---');
@@ -7834,10 +7895,14 @@ console.log('\n--- core/economy.js: coin awards, playtime ticker, shop/inventory
     // into one, not an add-on to an otherwise still-full default view).
     sentLocal.length = 0;
     await economy.shopCommand({ id: 2, name: 'Blue1' }, '!shop');
+    // header/body/hint split now (requested 2026-08-18, see shopCommand's
+    // own comment) — balance in the bold header, category list as small
+    // print, usage hint separately.
+    check('!shop with no args sends header + body + hint', sentLocal.length, 3);
     check('!shop with no args shows the balance', /Магазин \(баланс: 100 монеток\)/.test(sentLocal[0].msg), true);
-    check('...and just the category list', /Категории: form \(Формы\), size \(.*\), avatar \(.*\), goalAnimation \(.*\)/.test(sentLocal[0].msg), true);
-    check('...pointing at !shop <категория> for the actual items', /Смотреть категорию: !shop <категория>/.test(sentLocal[0].msg), true);
-    check('...no actual item ids/prices leak into the bare no-arg view', /freebie/.test(sentLocal[0].msg), false);
+    check('...and just the category list', /Категории: form \(Формы\), size \(.*\), avatar \(.*\), goalAnimation \(.*\)/.test(sentLocal[1].msg), true);
+    check('...pointing at !shop <категория> for the actual items', /Смотреть категорию: !shop <категория>/.test(sentLocal[2].msg), true);
+    check('...no actual item ids/prices leak into the bare no-arg view', sentLocal.some((s) => /freebie/.test(s.msg)), false);
 
     sentLocal.length = 0;
     await economy.shopCommand({ id: 2, name: 'Blue1' }, '!shop freebie');
@@ -7869,8 +7934,8 @@ console.log('\n--- core/economy.js: coin awards, playtime ticker, shop/inventory
     sentLocal.length = 0;
     await economy.shopCommand({ id: 2, name: 'Blue1' }, '!shop form');
     check('!shop form shows only the form section header', /^🛒 Магазин — Формы/.test(sentLocal[0].msg), true);
-    check('...includes a real form item', /gold/.test(sentLocal[0].msg), true);
-    check('...but not a goalAnimation item', /smoke/.test(sentLocal[0].msg), false);
+    check('...includes a real form item', /gold/.test(sentLocal[1].msg), true);
+    check('...but not a goalAnimation item', /smoke/.test(sentLocal[1].msg), false);
 
     sentLocal.length = 0;
     await economy.shopCommand({ id: 2, name: 'Blue1' }, '!shop FORM');
@@ -7879,8 +7944,8 @@ console.log('\n--- core/economy.js: coin awards, playtime ticker, shop/inventory
     sentLocal.length = 0;
     await economy.shopCommand({ id: 2, name: 'Blue1' }, '!shop goalanimation');
     check('!shop goalanimation shows only that section', /^🛒 Магазин — Анимации после гола/.test(sentLocal[0].msg), true);
-    check('...includes smoke', /smoke —/.test(sentLocal[0].msg), true);
-    check('...but not a form item', /gold —/.test(sentLocal[0].msg), false);
+    check('...includes smoke', /smoke —/.test(sentLocal[1].msg), true);
+    check('...but not a form item', /gold —/.test(sentLocal[1].msg), false);
 
     // A word that's neither a category nor a real item id still falls
     // through to the ordinary "no such item" rejection, unchanged.
@@ -7894,11 +7959,11 @@ console.log('\n--- core/economy.js: coin awards, playtime ticker, shop/inventory
     // costs less.
     sentLocal.length = 0;
     await economy.shopCommand({ id: 2, name: 'Blue1' }, '!shop form');
-    check('an item costing more than the current balance is marked unaffordable', /crimson — Багровый \(150 монеток ❌ не хватает\)/.test(sentLocal[0].msg), true);
+    check('an item costing more than the current balance is marked unaffordable', /crimson — Багровый \(150 монеток ❌ не хватает\)/.test(sentLocal[1].msg), true);
 
     sentLocal.length = 0;
     await economy.shopCommand({ id: 2, name: 'Blue1' }, '!shop avatar');
-    check('an item the player CAN afford has no such marker', /star — Звезда \(50 монеток\)/.test(sentLocal[0].msg), true);
+    check('an item the player CAN afford has no such marker', /star — Звезда \(50 монеток\)/.test(sentLocal[1].msg), true);
 
     sentLocal.length = 0;
     await economy.equipCommand({ id: 15, name: 'RelicOwner' }, '!equip relic');
@@ -7906,7 +7971,10 @@ console.log('\n--- core/economy.js: coin awards, playtime ticker, shop/inventory
 
     sentLocal.length = 0;
     await economy.inventoryCommand({ id: 15, name: 'RelicOwner' }, '!inventory');
-    check('!inventory shows a retired item as "снят с продажи", not a price, with the ✅-equipped marker', /relic — Реликвия \(снят с продажи\) ✅ \[надето\]/.test(sentLocal[0].msg), true);
+    // header + one category section now (requested 2026-08-18, see
+    // inventoryCommand's own comment) — RelicOwner owns exactly 1 item, so
+    // exactly 1 category message follows the header.
+    check('!inventory shows a retired item as "снят с продажи", not a price, with the ✅-equipped marker', /relic — Реликвия \(снят с продажи\) ✅ \[надето\]/.test(sentLocal[1].msg), true);
 
     sentLocal.length = 0;
     await economy.shopCommand({ id: 2, name: 'Blue1' }, '!shop nope');
@@ -7952,8 +8020,8 @@ console.log('\n--- core/economy.js: coin awards, playtime ticker, shop/inventory
 
     sentLocal.length = 0;
     await economy.shopCommand({ id: 2, name: 'Blue1' }, '!shop goalAnimation'); // 'smoke' lives in this category
-    check('!shop <category> lists the merged smoke bundle entry', /smoke — Дым/.test(sentLocal[0].msg), true);
-    check('!shop <category> does not list the individual hidden smoke colors', /smoke-red/.test(sentLocal[0].msg), false);
+    check('!shop <category> lists the merged smoke bundle entry', /smoke — Дым/.test(sentLocal[1].msg), true);
+    check('!shop <category> does not list the individual hidden smoke colors', /smoke-red/.test(sentLocal[1].msg), false);
 
     roomCallsLocal.length = 0;
     sentLocal.length = 0;
@@ -7968,7 +8036,11 @@ console.log('\n--- core/economy.js: coin awards, playtime ticker, shop/inventory
 
     sentLocal.length = 0;
     await economy.inventoryCommand({ id: 2, name: 'Blue1' }, '!inventory');
-    check('!inventory lists an owned item', /fire — Огонь/.test(sentLocal[0].msg), true);
+    // header + avatar section + goalAnimation section (Blue1 owns fire +
+    // the whole smoke bundle at this point, no form/size items yet).
+    // header + form(freebie, bought earlier) + avatar(fire) + goalAnimation
+    // (smoke bundle) sections, in SHOP_CATEGORY_KEYS order.
+    check('!inventory lists an owned item', /fire — Огонь/.test(sentLocal[2].msg), true);
 
     // Equip.
     sentLocal.length = 0;
@@ -8020,11 +8092,11 @@ console.log('\n--- core/economy.js: coin awards, playtime ticker, shop/inventory
     rolesLocal[19] = Role.VIP;
     sentLocal.length = 0;
     await economy.inventoryCommand({ id: 19, name: 'VipEquipTest' }, '!inventory');
-    check('a current VIP sees every goalAnimation item in !inventory despite owning none', /fireworks — Фейерверк/.test(sentLocal[0].msg), true);
-    check('...every smoke color too', /smoke-red — Дым \(красный\)/.test(sentLocal[0].msg), true);
-    check('VIP-granted entries are tagged [VIP], not [куплено]', /fireworks — Фейерверк \(50 000 монеток\) \[VIP\]/.test(sentLocal[0].msg), true);
-    check('a VIP\'s !inventory never lists the smoke bundle id itself (never ownable/equippable)', /^smoke —/m.test(sentLocal[0].msg), false);
-    check('avatar items (fire/star/skull/crown) are never VIP-granted — no access tier above plain ownership', /star —/.test(sentLocal[0].msg), false);
+    check('a current VIP sees every goalAnimation item in !inventory despite owning none', /fireworks — Фейерверк/.test(sentLocal[1].msg), true);
+    check('...every smoke color too', /smoke-red — Дым \(красный\)/.test(sentLocal[1].msg), true);
+    check('VIP-granted entries are tagged [VIP], not [куплено]', /fireworks — Фейерверк \(50 000 монеток\) \[VIP\]/.test(sentLocal[1].msg), true);
+    check('a VIP\'s !inventory never lists the smoke bundle id itself (never ownable/equippable)', /^smoke —/m.test(sentLocal[1].msg), false);
+    check('avatar items (fire/star/skull/crown) are never VIP-granted — no access tier above plain ownership', /star —/.test(sentLocal[1].msg), false);
 
     rolesLocal[19] = Role.PLAYER;
     sentLocal.length = 0;
@@ -8038,8 +8110,8 @@ console.log('\n--- core/economy.js: coin awards, playtime ticker, shop/inventory
     rolesLocal[19] = Role.VIP;
     sentLocal.length = 0;
     await economy.inventoryCommand({ id: 19, name: 'VipEquipTest' }, '!inventory');
-    check('an item actually owned by a current VIP is tagged [куплено], not [VIP]', /fireworks — Фейерверк \(50 000 монеток\) \[куплено\]/.test(sentLocal[0].msg), true);
-    check('a sibling not actually owned is still tagged [VIP]', /smoke-blue — Дым \(синий\) \(300 монеток\) \[VIP\]/.test(sentLocal[0].msg), true);
+    check('an item actually owned by a current VIP is tagged [куплено], not [VIP]', /fireworks — Фейерверк \(50 000 монеток\) \[куплено\]/.test(sentLocal[1].msg), true);
+    check('a sibling not actually owned is still tagged [VIP]', /smoke-blue — Дым \(синий\) \(300 монеток\) \[VIP\]/.test(sentLocal[1].msg), true);
     rolesLocal[19] = Role.PLAYER;
 
     // Equipping a form goes through equipCommand -> applyTeamForms, i.e. one
@@ -8559,7 +8631,7 @@ console.log('\n--- core/economy.js: coin awards, playtime ticker, shop/inventory
 
     sentLocal.length = 0;
     await economy.shopCommand({ id: 8, name: 'Upgrader' }, '!shop size'); // 'small' lives in this category
-    check('!shop <category> shows a maxed-out item as "максимум", not a price to pay', /small.*уровень 5\/5, максимум/.test(sentLocal[0].msg), true);
+    check('!shop <category> shows a maxed-out item as "максимум", not a price to pay', /small.*уровень 5\/5, максимум/.test(sentLocal[1].msg), true);
 
     roomCallsLocal.length = 0;
     await economy.equipCommand({ id: 8, name: 'Upgrader' }, '!equip small');
@@ -11072,7 +11144,7 @@ console.log('--- core/bff/roomStats.js: stats persistence, trimmed (no clubs, no
     db.saveRating('AUTH_B5', 'B5', 15, 3);
     sentLocal.length = 0;
     await bffRoomStats.printRankings('rating', 0);
-    check('printRankings(\'rating\') shows the rating leaderboard once 5 players are rated', /^Рейтинг>/.test(sentLocal[0].msg), true);
+    check('printRankings(\'rating\') shows the rating leaderboard once 5 players are rated', /^⚔️ Рейтинг — топ 5/.test(sentLocal[0].msg), true);
 
     sentLocal.length = 0;
     await bffRoomStats.printAllRankings(0);
@@ -11607,7 +11679,15 @@ console.log('--- core/bff/events.js: room.onXxx handlers, trimmed of economy/pok
     check('...and endGameVariable is set', stateLocal.endGameVariable, true);
     check('playSituation is set to GOAL', stateLocal.playSituation, SituationLocal.GOAL);
     check('getGoalString is called exactly once, not twice (it has a side effect — double-calling would double-record the goal)', goalStringCalls, 1);
-    check('onTeamGoal forces one last getLastTouchOfTheBall() before reading attribution (closes an onGameTick/onTeamGoal ordering race)', lastTouchCalls, 1);
+    // Real regression fixed 2026-08-18: onTeamGoal no longer forces an
+    // extra getLastTouchOfTheBall() re-scan at goal time — that re-scan
+    // used the ball's CURRENT (often post-goal, near-the-net) position,
+    // which could silently reattribute the goal to whichever player (often
+    // the keeper) happened to be standing closest to the ball AFTER it
+    // crossed the line, instead of the real scorer. Matches the main
+    // room's own onTeamGoal (events/gameManagement.js), which never did
+    // this extra call either.
+    check('onTeamGoal no longer force-rescans touches at goal time (matches the main room)', lastTouchCalls, 0);
 
     // --- team goal: golden goal ends the match on ANY goal, well below the
     // score limit — draws are not possible, same as the main room ---
@@ -12051,6 +12131,45 @@ console.log('\n--- stats/analytics/detectors/ProgressionDetector.js: a turnover 
     detector.analyze({ touchChain: passChain, reports: reportsB, authOf: () => 'AR1' });
     check('the identical forward movement IS credited when the next toucher is a teammate', reportsB.get('AR1').progPasses, 1);
     check('...with the real distance', reportsB.get('AR1').progDistance, 400);
+}
+
+console.log('\n--- stats/analytics/detectors/DecisionSpeedScorer.js: rescaled so 0/100 are actually reachable (found 2026-08-18: players reported never seeing above ~60) ---');
+{
+    // Real bug: the old raw per-touch score (baseline 50 +/- speed +/-
+    // outcome) could only ever land in [10, 75] — nobody could reach 100 no
+    // matter how they played, confirmed against 500 real match reports
+    // (observed max was exactly 75). Now linearly rescaled from that true
+    // achievable range onto the advertised 0-100 one.
+    const { TouchChain } = require(path.join(CORE, 'stats', 'analytics', 'TouchChain'));
+    const { DecisionSpeedScorer, RAW_MIN, RAW_MAX } = require(path.join(CORE, 'stats', 'analytics', 'detectors', 'DecisionSpeedScorer'));
+    const { PlayerMatchReport } = require(path.join(CORE, 'stats', 'analytics', 'PlayerMatchReport'));
+    const pointDistance = () => 0;
+
+    check('the raw achievable range is [10, 75], not [0, 100] — the whole reason this needed fixing', [RAW_MIN, RAW_MAX], [10, 75]);
+
+    const R1 = { id: 1, team: Team.RED };
+    const R2 = { id: 2, team: Team.RED };
+    const B1 = { id: 3, team: Team.BLUE };
+    const detector = new DecisionSpeedScorer();
+
+    function scoreFor(touches) {
+        const reports = new Map([['AR1', new PlayerMatchReport('AR1', 'R1', Team.RED)]]);
+        detector.analyze({ touchChain: new TouchChain(touches, { pointDistance }), reports, authOf: () => 'AR1' });
+        return reports.get('AR1').decisionSpeed;
+    }
+
+    // Best case: instant release (holdTime <= 1s) into a teammate (no
+    // turnover) — the theoretical ceiling, must now actually reach 100.
+    check('the best possible touch (instant + kept possession) now reaches exactly 100', scoreFor([{ player: R1, time: 0 }, { player: R2, time: 0.5 }]), 100);
+
+    // Worst case: a slow release (> 3s) that's then lost to the opponent —
+    // the theoretical floor, must now actually reach 0.
+    check('the worst possible touch (slow + turnover) now reaches exactly 0', scoreFor([{ player: R1, time: 0 }, { player: B1, time: 5 }]), 0);
+
+    // A middling, very ordinary touch (2s hold, kept possession) used to
+    // display as a flat 60 — exactly the "why can't I get above 60" range
+    // players were reporting — and now reads as a more representative ~77.
+    check('an ordinary "held it a bit, kept the ball" touch now reads well above the old flat 60', scoreFor([{ player: R1, time: 0 }, { player: R2, time: 2 }]), 77);
 }
 
 console.log('\n--- stats/analytics/detectors/ShotQualityModel.js: attacker-side xG (shotsTaken/xgCreated), added 2026-08-17 ---');
