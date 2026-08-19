@@ -293,6 +293,23 @@ async function launchRoom() {
             '--disable-features=WebRtcHideLocalIpsWithMdns,AsyncDns',
             '--no-sandbox',
             '--disable-setuid-sandbox',
+            // Real bug found 2026-08-18: the room's own tick-jitter monitor
+            // (entry.js) fired far more often with an EMPTY room than a
+            // full one — backwards from what real CPU/hypervisor contention
+            // would look like (that gets WORSE under our own load, not
+            // better). Chrome throttles/coalesces setInterval/setTimeout on
+            // pages it judges "backgrounded" (no visible changes, no real
+            // input) to save power — a headless page that's never actually
+            // foregrounded as a real window, sitting quiet with nobody
+            // playing, is exactly what trips that heuristic. An active
+            // match's constant rendering/network activity was masking it.
+            // These three flags are the standard, well-documented fix for
+            // long-running Puppeteer automation — without them, Chrome's
+            // own power-saving was likely the source of at least SOME of
+            // the "jitter" the monitor was reporting as external stutter.
+            '--disable-background-timer-throttling',
+            '--disable-backgrounding-occluded-windows',
+            '--disable-renderer-backgrounding',
         ],
     });
 

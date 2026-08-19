@@ -209,6 +209,13 @@ async function launchRoom() {
             '--disable-features=WebRtcHideLocalIpsWithMdns,AsyncDns',
             '--no-sandbox',
             '--disable-setuid-sandbox',
+            // Same fix as src/index.js — see its own comment for the full
+            // reasoning (Chrome's background-tab timer throttling, tripped
+            // by an empty/quiet room, was the likely source of at least
+            // some of the "jitter" the main room's own monitor reported).
+            '--disable-background-timer-throttling',
+            '--disable-backgrounding-occluded-windows',
+            '--disable-renderer-backgrounding',
         ],
     });
 
