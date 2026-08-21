@@ -162,6 +162,35 @@ module.exports = function createTeamBalance({
     // every direct balanceTeams() caller's expectation of seeing an
     // immediate effect; any further moves, or the whole sequence when
     // there WAS something to pull first, stay staggered.
+    // Both staggered batches below (the pull loop and the cross-move loop)
+    // used to be N independent `setTimeout(fn, 5 * i)` calls plus one more
+    // `setTimeout(finish, 5 * N)` guessed to land after all of them — correct
+    // only as long as the runtime's timer resolution is fine enough that N
+    // timers spaced 5ms apart actually fire in that exact order. Windows'
+    // default timer granularity is coarse enough (~15ms) that several of
+    // these can get coalesced into the same tick and fire out of order,
+    // so `finish` (and this function's own `callback`) could run BEFORE
+    // every pull/move had actually applied — reproduced live as
+    // tools/smoke-test.js's "nobody was left stranded in spectators" check
+    // failing 100% of the time on Windows while passing on Linux (2026-08-21).
+    // Fixed by chaining each step off the PREVIOUS one's own timeout instead
+    // of scheduling all of them up front against a shared clock — ordering
+    // is then guaranteed by construction, not by timer precision, on any
+    // platform.
+    function runStaggered(count, step, onDone) {
+        let remaining = count;
+        const next = () => {
+            if (remaining <= 0) {
+                onDone();
+                return;
+            }
+            step();
+            remaining--;
+            setTimeout(next, 5);
+        };
+        next();
+    }
+
     function pullSpectatorsToParity(callback) {
         const n = computeSpectatorsToInsert();
         const runCrossMove = () => {
@@ -177,16 +206,9 @@ module.exports = function createTeamBalance({
                     room.setPlayerTeam(biggerTeam[biggerTeam.length - 1].id, smallerSide);
                 }
             };
-            for (let i = 0; i < movesNeeded; i++) {
-                if (i === 0) {
-                    moveOneAcross();
-                } else {
-                    setTimeout(moveOneAcross, 5 * i);
-                }
-            }
-            setTimeout(() => {
+            runStaggered(movesNeeded, moveOneAcross, () => {
                 if (callback) callback();
-            }, 5 * movesNeeded);
+            });
         };
         if (n === 0) {
             runCrossMove();
@@ -194,14 +216,7 @@ module.exports = function createTeamBalance({
             const pullOne = () => {
                 safeMoveNextSpec(state.teamRed.length <= state.teamBlue.length ? Team.RED : Team.BLUE);
             };
-            for (let i = 0; i < n; i++) {
-                if (i === 0) {
-                    pullOne();
-                } else {
-                    setTimeout(pullOne, 5 * i);
-                }
-            }
-            setTimeout(runCrossMove, 5 * n);
+            runStaggered(n, pullOne, runCrossMove);
         }
     }
 
@@ -448,7 +463,22 @@ module.exports = function createTeamBalance({
                 // one and the real next-in-line stuck spectating (a 3v3
                 // growing to 3v4 instead of 4v4, one waiting spectator
                 // ignored).
-                for (let i = 0; i < 2 * n; i++) {
+                // Chained (each move only scheduled once the previous one's
+                // own timeout has actually fired), not N independent
+                // `setTimeout(fn, 5*i)` calls from the same tick — the old
+                // parallel form assumed a fine enough timer to keep them in
+                // order, which a coarse system clock (seen live on Windows)
+                // can violate. Reproduced concretely: the i=1 (BLUE) move
+                // firing before i=0 (RED) both read teamSpec[0] as whoever
+                // was still first at THAT moment, landing the first waiting
+                // spectator on BLUE and the second on RED — swapped from the
+                // intended alternation, not just delayed (see the identical
+                // 2026-08-21 fix/comment on runStaggered above).
+                let pairMoveIndex = 0;
+                const runNextPairMove = () => {
+                    if (pairMoveIndex >= 2 * n) return;
+                    const i = pairMoveIndex;
+                    pairMoveIndex++;
                     setTimeout(() => {
                         // n was computed once, up front, from teamRed/
                         // teamSpec's length at that moment — but a
@@ -471,8 +501,10 @@ module.exports = function createTeamBalance({
                         if (targetSize < liveCap) {
                             safeMoveNextSpec(targetTeam);
                         }
-                    }, 5 * i);
-                }
+                        runNextPairMove();
+                    }, 5);
+                };
+                runNextPairMove();
             }
             // Bug: none of the branches above ever reassert the stadium —
             // by design, since switching mid-play would interrupt a live
@@ -782,6 +814,27 @@ module.exports = function createTeamBalance({
                 }, 5);
                 scheduleRestart(RANDOM_RESTART_DELAY_MS);
             } else if (state.players.length == 3 || state.players.length == 5 || state.players.length == 7 || state.players.length >= 2 * teamSize) {
+                // Bug (reported live, 2026-08-21): the "genuine full-house
+                // surplus, activate real picking" check 80ish lines below
+                // re-read state.players.length LIVE, 10ms into this branch
+                // (deferred so the bench above has landed) — but an
+                // unrelated join/leave/AFK-exit landing in that exact 10ms
+                // gap (e.g. a player exiting AFK right as a match ends
+                // short of a full house) could bump the live count up to
+                // 2*teamSize AFTER this branch was already entered on the
+                // ORIGINAL, smaller count. That flips the live check from
+                // false to true using a snapshot that was never true when
+                // handlePlayersStop actually decided which branch to take,
+                // spuriously activating captain-picking for what looked to
+                // everyone else like an ordinary auto-restart — the pick
+                // session then has no real "surplus" to work with (this
+                // was a 3-vs-4-away-from-8 house, not an 8+ one) and gets
+                // stuck. Snapshotted once, here, before any of the
+                // staggered benching below runs — the decision now matches
+                // what was actually true when this branch was entered,
+                // same principle as every other "read state fresh vs. use
+                // what was true at entry" fix in this file.
+                const wasFullHouseAtStop = state.players.length >= 2 * teamSize;
                 // Bug: 7 was missing entirely from this list — every OTHER
                 // total from 2 up to a full house (2, 3, 4, 5, 6) had a
                 // branch, plus 8 and 9+, but a match ending at exactly 7
@@ -867,7 +920,7 @@ module.exports = function createTeamBalance({
                         // resumeGame() (meant for resuming an interactive
                         // pick session, not a fresh post-match round) and
                         // race scheduleRestart()'s own timer below.
-                        if (state.players.length >= 2 * teamSize && diff < state.teamSpec.length) {
+                        if (wasFullHouseAtStop && diff < state.teamSpec.length) {
                             state.insertingPlayers = false;
                             // The bench itself (and, on the swapped path,
                             // the swap) has already fully landed by this

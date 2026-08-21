@@ -23,6 +23,7 @@ module.exports = function createAdminCommands({
     Role,
     announcementColor,
     errorColor,
+    warningColor,
     HaxNotification,
     hiddenAdminsSet,
     instantRestart,
@@ -257,6 +258,59 @@ module.exports = function createAdminCommands({
         }
     }
 
+    // Private warning (requested 2026-08-21) — unlike mute/kick/ban, this
+    // has no effect on the target at all, it's purely a message. Visibility
+    // is the whole point: sent as two separate targeted announcements
+    // (player.id / targetPlayer.id), never a broadcast (null target), so
+    // nobody else in the room — not even other admins — sees either side
+    // of it. The target's copy uses HaxNotification.MENTION specifically so
+    // it can't be missed/scrolled past the way a silent chat line could.
+    function warnCommand(player, message) {
+        const msgArray = message.split(/ +/).slice(1);
+        const target = msgArray[0];
+        const usage = () => room.sendAnnouncement(
+            `Использование: !warn <#id> <причина>. Введите "!help warn" для получения информации.`,
+            player.id,
+            errorColor,
+            'bold',
+            HaxNotification.CHAT
+        );
+        if (!target || target[0] != '#') {
+            usage();
+            return;
+        }
+        const targetPlayer = room.getPlayer(parseInt(target.substring(1)));
+        if (targetPlayer == null) {
+            room.sendAnnouncement(
+                `Игрока с таким ID нет в комнате. Введите "!help warn" для получения информации.`,
+                player.id,
+                errorColor,
+                'bold',
+                HaxNotification.CHAT
+            );
+            return;
+        }
+        const reason = msgArray.slice(1).join(' ');
+        if (!reason) {
+            usage();
+            return;
+        }
+        room.sendAnnouncement(
+            `⚠️ Вам вынесено предупреждение: ${reason}`,
+            targetPlayer.id,
+            warningColor,
+            'bold',
+            HaxNotification.MENTION
+        );
+        room.sendAnnouncement(
+            `✔️ Вы предупредили ${targetPlayer.name}: ${reason}`,
+            player.id,
+            warningColor,
+            'bold',
+            HaxNotification.CHAT
+        );
+    }
+
     // Toggles the room admin crown + chat prefix without touching
     // adminList/masterList — role/permissions stay exactly as they were,
     // only the visible indicators change. onPlayerAdminChange (misc.js)
@@ -367,6 +421,7 @@ module.exports = function createAdminCommands({
         unmuteCommand,
         muteListCommand,
         hideCommand,
+        warnCommand,
         muteByAuth,
         unmuteByAuth,
     };

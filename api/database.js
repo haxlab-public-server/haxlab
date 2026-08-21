@@ -58,6 +58,15 @@ function createDatabaseApi(options = {}) {
         removeAdmin(auth) {
             return sqlite.removeAdmin(auth);
         },
+        getHelpers() {
+            return sqlite.getHelpers();
+        },
+        addHelper(auth, playerName) {
+            return sqlite.addHelper(auth, playerName);
+        },
+        removeHelper(auth) {
+            return sqlite.removeHelper(auth);
+        },
         getVips() {
             return sqlite.getVips();
         },

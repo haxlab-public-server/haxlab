@@ -73,6 +73,7 @@ const {
     defaultColor,
     masterChatColor,
     adminChatColor,
+    helperChatColor,
     vipChatColor,
 } = require('../core/constants');
 const {
@@ -415,6 +416,9 @@ state.streakWinner = Team.SPECTATORS;
 // Masters and permanent admins are configured in the database (see
 // scripts/add-master.js) rather than granted at runtime by any bot command.
 state.adminList = (await db.getAdmins()).map((a) => [a.auth, a.playerName]);
+// Role.HELPER (2026-08-21) — same DB-configured-only shape as adminList
+// above, just its own table/role tier (see getRole() below).
+state.helperList = (await db.getHelpers()).map((h) => [h.auth, h.playerName]);
 // Third tuple element is the VIP's expiry (ISO string, or null for a
 // permanent grant, see !setvip in commands/master.js) — getRole() below
 // checks it live on every message, since a grant can expire mid-session
@@ -677,6 +681,7 @@ const {
     hideCommand,
     muteByAuth,
     unmuteByAuth,
+    warnCommand,
 } = createAdminCommands({
     room,
     state,
@@ -696,6 +701,7 @@ const {
     Role,
     announcementColor,
     errorColor,
+    warningColor,
     HaxNotification,
     hiddenAdminsSet,
     instantRestart,
@@ -720,6 +726,9 @@ const {
     adminListCommand,
     setAdminCommand,
     removeAdminCommand,
+    helperListCommand,
+    setHelperCommand,
+    removeHelperCommand,
     setVipCommand,
     removeVipCommand,
     vipListCommand,
@@ -1141,6 +1150,7 @@ function updateTeams() {
 function getRole(player) {
     const auth = authArray[player.id][0];
     if (masterList.includes(auth)) return Role.MASTER;
+    if (state.helperList.some((h) => h[0] == auth)) return Role.HELPER;
     if (state.adminList.some((a) => a[0] == auth)) return Role.ADMIN_PERM;
     if (player.admin) return Role.ADMIN_TEMP;
     // Checked live rather than trusting the cache alone — a time-limited
@@ -1691,11 +1701,15 @@ const commands = createCommands({
     unmuteCommand,
     muteListCommand,
     hideCommand,
+    warnCommand,
     clearbansCommand,
     banListCommand,
     adminListCommand,
     setAdminCommand,
     removeAdminCommand,
+    helperListCommand,
+    setHelperCommand,
+    removeHelperCommand,
     setVipCommand,
     removeVipCommand,
     vipListCommand,
@@ -1804,6 +1818,7 @@ Object.assign(room, wrapEventHandlers(createActivityEvents({
     Team,
     Trophies,
     adminChatColor,
+    helperChatColor,
     commands,
     discordBot,
     errorColor,

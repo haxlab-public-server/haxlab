@@ -16,6 +16,7 @@ module.exports = function createActivityEvents({
     Team,
     Trophies,
     adminChatColor,
+    helperChatColor,
     commands,
     discordBot,
     errorColor,
@@ -233,6 +234,13 @@ module.exports = function createActivityEvents({
         if (showAdminPrefix && role == Role.MASTER) {
             rolePrefix = '[👑СЗД]';
             prefixColor = masterChatColor;
+        } else if (showAdminPrefix && role == Role.HELPER) {
+            // Must be checked before the generic `role >= Role.ADMIN_TEMP`
+            // branch below — HELPER's numeric value is above ADMIN_TEMP/
+            // ADMIN_PERM (see constants.js's Role ladder), so that branch
+            // would otherwise swallow it and show the generic admin prefix.
+            rolePrefix = '[🛟HLP]';
+            prefixColor = helperChatColor;
         } else if (showAdminPrefix && role >= Role.ADMIN_TEMP) {
             rolePrefix = '[🛡️АДМ]';
             prefixColor = adminChatColor;

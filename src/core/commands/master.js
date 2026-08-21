@@ -250,7 +250,7 @@ module.exports = function createMasterCommands({
                         HaxNotification.CHAT
                     );
                 }
-            } else if (msgArray[0].length > 0 && parseInt(msgArray[0]) < state.adminList.length) {
+            } else if (msgArray[0].length > 0 && parseInt(msgArray[0]) >= 0 && parseInt(msgArray[0]) < state.adminList.length) {
                 const index = parseInt(msgArray[0]);
                 const playerAdmin = state.adminList[index];
                 if (state.playersAll.findIndex((p) => authArray[p.id][0] == playerAdmin[0]) != -1) {
@@ -258,7 +258,7 @@ module.exports = function createMasterCommands({
                     const indexRem = state.playersAll.findIndex((p) => authArray[p.id][0] == playerAdmin[0]);
                     room.setPlayerAdmin(state.playersAll[indexRem].id, false);
                 }
-                state.adminList.splice(index);
+                state.adminList.splice(index, 1);
                 await db.removeAdmin(playerAdmin[0]);
                 room.sendAnnouncement(
                     `${playerAdmin[1]} больше не администратор комнаты !`,
@@ -294,6 +294,179 @@ module.exports = function createMasterCommands({
     // string directly — works even if they're offline right now, same as
     // !banauth. Duration (in days) is optional — omitted means a permanent
     // grant, same as before that existed.
+    // Role.HELPER (2026-08-21) — same shape as setAdminCommand/
+    // removeAdminCommand/adminListCommand above, own table (see
+    // db.getHelpers/addHelper/removeHelper), own state.helperList. Also
+    // grants the native admin crown (room.setPlayerAdmin) same as
+    // ADMIN_PERM does, since the room owner's own request was "права у неё
+    // как у админа" — full admin capability for now, with the door open to
+    // diverge later (see getRole() in entry.js for where HELPER sits in the
+    // role ladder: above ADMIN_PERM, below MASTER).
+    function helperListCommand(player, message) {
+        if (state.helperList.length == 0) {
+            room.sendAnnouncement(
+                "📢 В списке хелперов никого нет.",
+                player.id,
+                announcementColor,
+                'bold',
+                null
+            );
+            return false;
+        }
+        let cstm = '📢 Список хелперов : ';
+        for (let i = 0; i < state.helperList.length; i++) {
+            cstm += state.helperList[i][1] + `[${i}], `;
+        }
+        cstm = cstm.substring(0, cstm.length - 2) + '.';
+        room.sendAnnouncement(
+            cstm,
+            player.id,
+            announcementColor,
+            'bold',
+            null
+        );
+    }
+
+    async function setHelperCommand(player, message) {
+        const msgArray = message.split(/ +/).slice(1);
+        if (msgArray.length > 0) {
+            if (msgArray[0].length > 0 && msgArray[0][0] == '#') {
+                msgArray[0] = msgArray[0].substring(1, msgArray[0].length);
+                if (room.getPlayer(parseInt(msgArray[0])) != null) {
+                    const playerHelper = room.getPlayer(parseInt(msgArray[0]));
+
+                    if (!state.helperList.map((h) => h[0]).includes(authArray[playerHelper.id][0])) {
+                        if (!masterList.includes(authArray[playerHelper.id][0])) {
+                            room.setPlayerAdmin(playerHelper.id, true);
+                            state.helperList.push([authArray[playerHelper.id][0], playerHelper.name]);
+                            await db.addHelper(authArray[playerHelper.id][0], playerHelper.name);
+                            room.sendAnnouncement(
+                                `${playerHelper.name} теперь хелпер комнаты !`,
+                                null,
+                                announcementColor,
+                                'bold',
+                                HaxNotification.CHAT
+                            );
+                        } else {
+                            room.sendAnnouncement(
+                                `Этот игрок уже является владельцем !`,
+                                player.id,
+                                errorColor,
+                                'bold',
+                                HaxNotification.CHAT
+                            );
+                        }
+                    } else {
+                        room.sendAnnouncement(
+                            `Этот игрок уже является хелпером !`,
+                            player.id,
+                            errorColor,
+                            'bold',
+                            HaxNotification.CHAT
+                        );
+                    }
+                } else {
+                    room.sendAnnouncement(
+                        `Такого игрока нет в комнате. Введите "!help sethelper" для получения информации.`,
+                        player.id,
+                        errorColor,
+                        'bold',
+                        HaxNotification.CHAT
+                    );
+                }
+            } else {
+                room.sendAnnouncement(
+                    `Неверный формат вашего аргумента. Введите "!help sethelper" для получения информации.`,
+                    player.id,
+                    errorColor,
+                    'bold',
+                    HaxNotification.CHAT
+                );
+            }
+        } else {
+            room.sendAnnouncement(
+                `Неверное количество аргументов. Введите "!help sethelper" для получения информации.`,
+                player.id,
+                errorColor,
+                'bold',
+                HaxNotification.CHAT
+            );
+        }
+    }
+
+    async function removeHelperCommand(player, message) {
+        const msgArray = message.split(/ +/).slice(1);
+        if (msgArray.length > 0) {
+            if (msgArray[0].length > 0 && msgArray[0][0] == '#') {
+                msgArray[0] = msgArray[0].substring(1, msgArray[0].length);
+                if (room.getPlayer(parseInt(msgArray[0])) != null) {
+                    const playerHelper = room.getPlayer(parseInt(msgArray[0]));
+
+                    if (state.helperList.map((h) => h[0]).includes(authArray[playerHelper.id][0])) {
+                        room.setPlayerAdmin(playerHelper.id, false);
+                        state.helperList = state.helperList.filter((h) => h[0] != authArray[playerHelper.id][0]);
+                        await db.removeHelper(authArray[playerHelper.id][0]);
+                        room.sendAnnouncement(
+                            `${playerHelper.name} больше не хелпер комнаты !`,
+                            null,
+                            announcementColor,
+                            'bold',
+                            HaxNotification.CHAT
+                        );
+                    } else {
+                        room.sendAnnouncement(
+                            `Этот игрок не является хелпером !`,
+                            player.id,
+                            errorColor,
+                            'bold',
+                            HaxNotification.CHAT
+                        );
+                    }
+                } else {
+                    room.sendAnnouncement(
+                        `Такого игрока нет в комнате. Введите "!help removehelper" для получения информации.`,
+                        player.id,
+                        errorColor,
+                        'bold',
+                        HaxNotification.CHAT
+                    );
+                }
+            } else if (msgArray[0].length > 0 && parseInt(msgArray[0]) >= 0 && parseInt(msgArray[0]) < state.helperList.length) {
+                const index = parseInt(msgArray[0]);
+                const playerHelper = state.helperList[index];
+                if (state.playersAll.findIndex((p) => authArray[p.id][0] == playerHelper[0]) != -1) {
+                    const indexRem = state.playersAll.findIndex((p) => authArray[p.id][0] == playerHelper[0]);
+                    room.setPlayerAdmin(state.playersAll[indexRem].id, false);
+                }
+                state.helperList.splice(index, 1);
+                await db.removeHelper(playerHelper[0]);
+                room.sendAnnouncement(
+                    `${playerHelper[1]} больше не хелпер комнаты !`,
+                    null,
+                    announcementColor,
+                    'bold',
+                    HaxNotification.CHAT
+                );
+            } else {
+                room.sendAnnouncement(
+                    `Неверный формат вашего аргумента. Введите "!help removehelper" для получения информации.`,
+                    player.id,
+                    errorColor,
+                    'bold',
+                    HaxNotification.CHAT
+                );
+            }
+        } else {
+            room.sendAnnouncement(
+                `Неверное количество аргументов. Введите "!help removehelper" для получения информации.`,
+                player.id,
+                errorColor,
+                'bold',
+                HaxNotification.CHAT
+            );
+        }
+    }
+
     async function setVipCommand(player, message) {
         await purgeExpiredVips();
         const msgArray = message.split(/ +/).slice(1);
@@ -882,6 +1055,9 @@ module.exports = function createMasterCommands({
         adminListCommand,
         setAdminCommand,
         removeAdminCommand,
+        helperListCommand,
+        setHelperCommand,
+        removeHelperCommand,
         setVipCommand,
         removeVipCommand,
         vipListCommand,

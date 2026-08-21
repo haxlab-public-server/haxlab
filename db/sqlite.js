@@ -58,6 +58,20 @@ function createSqliteDatabase(filePath = path.join(__dirname, 'haxlab.sqlite')) 
         );
     `);
 
+    // Role.HELPER (2026-08-21) — above admin, below master. Own table
+    // rather than reusing admins, since a helper's permission set is meant
+    // to diverge from ADMIN_PERM's over time (currently identical — see
+    // getRole() in entry.js), and granting/revoking each independently
+    // (both are !set*/!remove*, Role.MASTER-gated) would otherwise be
+    // ambiguous about which list a given auth is actually in.
+    const helpersStatement = database.prepare(`
+        CREATE TABLE IF NOT EXISTS helpers (
+            auth TEXT PRIMARY KEY,
+            player_name TEXT NOT NULL,
+            added_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+    `);
+
     // VIPs get no extra permissions (no command role check treats them
     // specially) — this is purely cosmetic, a chat prefix. Same DB-backed
     // pattern as admins/masters rather than a runtime-only list, so it
@@ -344,6 +358,7 @@ function createSqliteDatabase(filePath = path.join(__dirname, 'haxlab.sqlite')) 
         reportStatement.run();
         mastersStatement.run();
         adminsStatement.run();
+        helpersStatement.run();
         vipsStatement.run();
         addColumnIfMissing('vips', 'expires_at TEXT');
         discordLinksStatement.run();
@@ -659,6 +674,25 @@ function createSqliteDatabase(filePath = path.join(__dirname, 'haxlab.sqlite')) 
 
     function removeAdmin(auth) {
         database.prepare('DELETE FROM admins WHERE auth = ?').run(auth);
+    }
+
+    function getHelpers() {
+        return database
+            .prepare('SELECT auth, player_name AS playerName FROM helpers')
+            .all();
+    }
+
+    function addHelper(auth, playerName) {
+        database
+            .prepare(
+                `INSERT INTO helpers (auth, player_name) VALUES (?, ?)
+                 ON CONFLICT(auth) DO UPDATE SET player_name = excluded.player_name`
+            )
+            .run(auth, playerName);
+    }
+
+    function removeHelper(auth) {
+        database.prepare('DELETE FROM helpers WHERE auth = ?').run(auth);
     }
 
     // Sweeps expired grants (like getAuthBans does for bans) before
@@ -1631,6 +1665,9 @@ function createSqliteDatabase(filePath = path.join(__dirname, 'haxlab.sqlite')) 
         getAdmins,
         addAdmin,
         removeAdmin,
+        getHelpers,
+        addHelper,
+        removeHelper,
         getVips,
         addVip,
         removeVip,

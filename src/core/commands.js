@@ -32,6 +32,10 @@ module.exports = function createCommands({
     adminListCommand,
     setAdminCommand,
     removeAdminCommand,
+    helperListCommand,
+    setHelperCommand,
+    removeHelperCommand,
+    warnCommand,
     setVipCommand,
     removeVipCommand,
     vipListCommand,
@@ -408,6 +412,18 @@ module.exports = function createCommands({
         Эта команда показывает список заглушенных игроков.`,
         function: muteListCommand,
     },
+    warn: {
+        aliases: ['варн'],
+        roles: Role.ADMIN_TEMP,
+        category: 'moderation',
+        desc: `
+        Эта команда выносит игроку приватное предупреждение с причиной — его видите только вы и сам игрок (с уведомлением), больше никто.
+    Она принимает 2 аргумента:
+    Аргумент 1: #<id> где <id> это id целевого игрока.
+    Аргумент 2: <причина> — причина предупреждения, обязательна.
+    Пример: !warn #3 неспортивное поведение вынесет игроку с id 3 предупреждение с этой причиной.`,
+        function: warnCommand,
+    },
     hide: {
         aliases: [],
         roles: Role.ADMIN_TEMP,
@@ -464,6 +480,39 @@ module.exports = function createCommands({
     Пример: !removeadmin #300 удалит администратора с id 300,
          !removeadmin 2 удалит администратора с номером 2 согласно команде 'admins'.`,
         function: removeAdminCommand,
+    },
+    helpers: {
+        aliases: ['helperlist'],
+        roles: Role.MASTER,
+        category: 'moderation',
+        desc: `
+    Эта команда показывает всех игроков, которые являются хелперами.`,
+        function: helperListCommand,
+    },
+    sethelper: {
+        aliases: ['helper'],
+        roles: Role.MASTER,
+        category: 'moderation',
+        desc: `
+    Эта команда назначает кого-то хелпером — роль выше администратора, но ниже владельца. Права сейчас как у администратора.
+    Она принимает 1 аргумент:
+    Аргумент 1: #<id> где <id> это id целевого игрока.
+    Пример: !sethelper #3 сделает игрока с id 3 хелпером.`,
+        function: setHelperCommand,
+    },
+    removehelper: {
+        aliases: ['unhelper'],
+        roles: Role.MASTER,
+        category: 'moderation',
+        desc: `
+	Эта команда убирает у кого-то роль хелпера.
+    Она принимает 1 аргумент:
+    Аргумент 1: #<id> где <id> это id целевого игрока.
+    ИЛИ
+    Аргумент 1: <number> где <number> это номер, связанный с хелпером, данным командой 'helpers'.
+    Пример: !removehelper #300 уберет хелпера с id 300,
+         !removehelper 2 уберет хелпера с номером 2 согласно команде 'helpers'.`,
+        function: removeHelperCommand,
     },
     setvip: {
         aliases: [],

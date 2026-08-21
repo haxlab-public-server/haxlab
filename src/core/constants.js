@@ -1,7 +1,7 @@
 module.exports = {
     Team: { SPECTATORS: 0, RED: 1, BLUE: 2 },
     State: { PLAY: 0, PAUSE: 1, STOP: 2 },
-    Role: { PLAYER: 0, VIP: 1, ADMIN_TEMP: 2, ADMIN_PERM: 3, MASTER: 4 },
+    Role: { PLAYER: 0, VIP: 1, ADMIN_TEMP: 2, ADMIN_PERM: 3, HELPER: 4, MASTER: 5 },
     HaxNotification: { NONE: 0, CHAT: 1, MENTION: 2 },
     Situation: { STOP: 0, KICKOFF: 1, PLAY: 2, GOAL: 3 },
     // Top-3-in-a-stat chat prefixes (!trophy, see commands/trophies.js) —
@@ -34,5 +34,10 @@ module.exports = {
     defaultColor: null,
     masterChatColor: 0xffd700,
     adminChatColor: 0x00bfff,
+    // Role above admin, below master (see scripts/add-master.js-style
+    // grants — 2026-08-21, requested as "Хелпер"/[HLP]). Distinct from
+    // both admin's cyan and master's gold so the prefix is unmistakable
+    // in chat.
+    helperChatColor: 0x5cff8f,
     vipChatColor: 0xc77dff,
 };

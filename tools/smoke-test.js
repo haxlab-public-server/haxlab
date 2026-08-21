@@ -4621,6 +4621,20 @@ console.log('\n--- team/balance.js: an already-full match never auto-upgrades to
     });
 
     const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+    // A fixed wait before inspecting roomCallsLocal below is the wrong tool
+    // for the same reason documented elsewhere in this file (2026-08-21):
+    // under this file's own many-concurrent-timers load, a real chain of N
+    // staggered moves can take far longer wall-clock than its nominal
+    // 5ms/step (600ms+ measured live for just 2 hops) — no fixed guess
+    // stays safe as more tests get added. Poll for the actual expected call
+    // count instead, bounded by a ceiling that only trips if something is
+    // genuinely broken.
+    const waitForCallCount = async (count, deadlineMs = 2000) => {
+        const deadline = Date.now() + deadlineMs;
+        while (roomCallsLocal.length < count && Date.now() < deadline) {
+            await wait(10);
+        }
+    };
 
     (async () => {
         calls.length = 0;
@@ -4653,7 +4667,7 @@ console.log('\n--- team/balance.js: an already-full match never auto-upgrades to
         // actually executes first isn't reliably pinned down — what
         // matters functionally is that both id 3 and id 4 landed, one on
         // each team, not which specific one got which.
-        await wait(40);
+        await waitForCallCount(2);
         check('a running 1v1 on classic pulls in exactly one pair from spectators to make 2v2', roomCallsLocal.length, 2);
         check('...and id 3 and id 4 landed on different teams (one each)', new Set(roomCallsLocal.map((c) => c.split(':')[2])).size, 2);
         check('...and no other spectator was touched', roomCallsLocal.every((c) => c.startsWith('setPlayerTeam:3:') || c.startsWith('setPlayerTeam:4:')), true);
@@ -4680,7 +4694,7 @@ console.log('\n--- team/balance.js: an already-full match never auto-upgrades to
         roomCallsLocal.length = 0;
         calls.length = 0;
         balance.balanceTeams();
-        await wait(40);
+        await waitForCallCount(2);
         // Checked as a set of {id -> team}, not exact call order — same
         // reasoning as the identical fix on the "pulls in exactly one
         // pair" test above: under this whole test file's many-concurrent-
@@ -4708,12 +4722,14 @@ console.log('\n--- team/balance.js: an already-full match never auto-upgrades to
         roomCallsLocal.length = 0;
         calls.length = 0;
         balance.balanceTeams();
-        // Two pairs this time (4 individually-staggered calls) — a longer
-        // wait. Widened from 40ms, then 200ms (still occasionally flaky),
-        // to 500ms once this file's own growing pile of concurrent async
-        // test blocks (bff/rating.js, bff/matchFlow.js) started starving a
-        // tighter window under real machine load.
-        await wait(500);
+        // Two pairs this time (4 individually-staggered calls). This used
+        // to be a fixed wait, widened three times (40ms, then 200ms, then
+        // 500ms) chasing this file's growing pile of concurrent timers —
+        // a losing battle against a number that only ever needed to grow.
+        // Polling for the real call count (see waitForCallCount above)
+        // ends that: it's bounded by a generous ceiling that only trips if
+        // something is genuinely broken, not just slow.
+        await waitForCallCount(4);
         check('a running 1v1 on big pulls in BOTH waiting pairs (used to crash/skip past the first)', roomCallsLocal, [
             `setPlayerTeam:3:${Team.RED}`, `setPlayerTeam:4:${Team.BLUE}`,
             `setPlayerTeam:5:${Team.RED}`, `setPlayerTeam:6:${Team.BLUE}`,
@@ -5036,7 +5052,15 @@ console.log('\n--- team/balance.js: a bigger gap (4v0) with zero spectators full
     balance.balanceTeams();
     check('a 4v0 gap of 4 makes its first move synchronously', [state.teamRed.length, state.teamBlue.length], [3, 1]);
     (async () => {
-        await new Promise((resolve) => setTimeout(resolve, 20));
+        // The second move is chained off the first's own real setTimeout
+        // (see balance.js's runStaggered — deliberately chained rather than
+        // scheduled up front, so ordering can't race under a coarse system
+        // timer; see its own comment for the 2026-08-21 incident this
+        // fixed). The chain's nominal 5ms step can round up to a full
+        // timer tick (~15ms on Windows) in the worst case — 20ms cut it too
+        // close and made THIS check itself flaky on exactly that platform;
+        // 60ms gives real headroom without slowing the suite meaningfully.
+        await new Promise((resolve) => setTimeout(resolve, 60));
         check('...and its second move lands a tick later, reaching a clean 2v2 (not stuck at 3v1)', [state.teamRed.length, state.teamBlue.length], [2, 2]);
     })();
 }
@@ -5088,7 +5112,30 @@ console.log('\n--- team/balance.js: a partial bench (some non-AFK spectators, no
     balance.balanceTeams();
     check('the first available spectator is pulled in synchronously', [state.teamRed.length, state.teamBlue.length, state.teamSpec.length], [4, 1, 1]);
     (async () => {
-        await new Promise((resolve) => setTimeout(resolve, 30));
+        // Two chained real-timer hops to get here (the second pull, then
+        // the cross-move it unblocks — see runStaggered's own comment in
+        // balance.js). A fixed sleep-then-check here is fundamentally the
+        // wrong tool: measured live, this took 609ms in the full suite
+        // (thousands of OTHER tests' own pending timers competing for the
+        // event loop by the time this block's chain runs) vs ~36ms in
+        // isolation — no fixed guess is safe, and the "right" number only
+        // grows as more tests get added earlier in this file. Poll for the
+        // actual settled state instead (bounded by a generous ceiling that
+        // only trips if something is genuinely broken, not just slow — kept
+        // safely under the file's own final tally timeout below, ~3x the
+        // 609ms worst case measured live, not the full 4200ms budget).
+        // spec hitting 0 only means the PULL phase is done — the cross-move
+        // that closes the remaining 4v2 gap is a separate step chained
+        // after it (see runCrossMove in balance.js), one more real timer
+        // hop later. Poll for the actual target shape, not just the pull's
+        // own halfway signal.
+        const deadline = Date.now() + 2000;
+        while (
+            (state.teamRed.length !== 3 || state.teamBlue.length !== 3 || state.teamSpec.length !== 0)
+            && Date.now() < deadline
+        ) {
+            await new Promise((resolve) => setTimeout(resolve, 10));
+        }
         check('both spectators land AND the remaining gap closes via cross-move, reaching a clean 3v3', [state.teamRed.length, state.teamBlue.length, state.teamSpec.length], [3, 3, 0]);
     })();
 }
@@ -12431,5 +12478,19 @@ console.log('\n--- stats/analytics/detectors/MatchRatingDetector.js: zero-spread
 // Give all of them time to run before tallying and exiting.
 setTimeout(() => {
     console.log(`\n${pass} passed, ${fail} failed`);
-    process.exit(fail ? 1 : 0);
+    // process.exit() here used to truncate output under redirection —
+    // documented 3 times before this (2026-08-18/19) as "some check() PASS
+    // lines genuinely don't appear in piped/redirected output even though
+    // the code ran correctly," each time re-diagnosed from scratch as a
+    // tooling mystery. Root cause: on Windows, a non-TTY stdout (any pipe
+    // or `>` redirect) writes asynchronously — process.exit() tears the
+    // process down immediately, dropping whatever's still queued rather
+    // than just the last line. Fixed properly: set the intended exit code
+    // and let Node exit naturally once the event loop actually empties,
+    // which waits for pending stdout writes to flush. The 2000ms fallback
+    // below is a safety net only, in case some test elsewhere in this file
+    // leaves a real timer/interval running and the process would otherwise
+    // never exit on its own — should essentially never fire in practice.
+    process.exitCode = fail ? 1 : 0;
+    setTimeout(() => process.exit(process.exitCode), 2000).unref();
 }, 4200);

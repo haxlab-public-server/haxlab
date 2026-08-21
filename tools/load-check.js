@@ -60,10 +60,11 @@ global.window = {
     __secrets: { token: '', roomPassword: '' },
     __dbCall: (method) => {
         dbCalls.push(method);
-        // getAdmins/getVips/getMasters are awaited directly during init
-        // (state.adminList/vipList, masterList) — every other bridged
-        // method only ever runs later, from an actual command/event.
-        if (method === 'getAdmins' || method === 'getVips') return Promise.resolve([]);
+        // getAdmins/getHelpers/getVips/getMasters are awaited directly
+        // during init (state.adminList/helperList/vipList, masterList) —
+        // every other bridged method only ever runs later, from an actual
+        // command/event.
+        if (method === 'getAdmins' || method === 'getHelpers' || method === 'getVips') return Promise.resolve([]);
         if (method === 'getMasters') return Promise.resolve([]);
         // getEquipped is chained straight into `.form`/`.avatar` reads
         // (economy.js's determineSideForm, applyTeamForms) — only reached

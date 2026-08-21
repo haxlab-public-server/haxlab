@@ -116,11 +116,36 @@ module.exports = function createSwapHelpers({
 
     // Called from handlePlayersLeave whenever a leave lands mid-swap-window
     // — the roster/teamSpec indices a captain was just shown can no longer
-    // be trusted, so this bails out entirely (no swap performed) rather
-    // than trying to carry on with stale numbers, same "abort, don't limp
-    // on" policy chooseMode's own leave-triggered aborts use.
+    // be trusted, so this never acts on stale numbers (same "abort, don't
+    // limp on" policy chooseMode's own leave-triggered aborts use).
+    //
+    // Bug (reported live, 2026-08-21): unconditionally ending the whole
+    // window here (old behavior) called completionCallback -> resumeGame()
+    // immediately, regardless of team balance — a leave that left the
+    // roster uneven (e.g. 4v3) started the match shorthanded with NO
+    // chance for the affected captain to swap in a replacement. Worse: the
+    // fallthrough `safeBalanceTeams()` at the end of handlePlayersLeave
+    // WOULD eventually notice the imbalance and prompt a pick — but only
+    // after resumeGame() had already unpaused things, so it played out
+    // live/unpaused instead of during the usual pre-match pause ("капитан
+    // мог допикать игрока во время игры, матч просто не паузился как
+    // обычно").
+    //
+    // Fixed: if the leave left the teams uneven AND there's still someone
+    // in teamSpec to swap in, give the SHORT side's captain an immediate
+    // extra turn instead of ending the window — state.swapMode stays true,
+    // so balanceTeams()'s own guard (`!state.chooseMode && !state.swapMode`)
+    // keeps that same fallthrough safeBalanceTeams() call a no-op, same as
+    // it already was during an ordinary in-order turn. Only actually ends
+    // the window (old behavior) when nothing productive is left to do —
+    // teams already even, or no spectators left to draw from.
     function cancelSwapPhase() {
         if (!state.swapMode) return;
+        if (state.teamRed.length != state.teamBlue.length && state.teamSpec.length > 0) {
+            const shortTeam = state.teamRed.length < state.teamBlue.length ? Team.RED : Team.BLUE;
+            beginCaptainTurn(shortTeam);
+            return;
+        }
         endSwapPhase();
     }
 
