@@ -171,24 +171,25 @@ console.log('\n--- core/matchHistory.js: head-to-head recording + win-streak rec
     const roomMock = { sendAnnouncement: (msg, id, color, style, sound) => sentLocal.push({ msg, color, style, sound }) };
     const HaxNotificationMock = { CHAT: 1, MENTION: 2 };
 
-    await checkWinStreakRecord(db, roomMock, HaxNotificationMock, 99, authArray, { id: 1, name: 'Alice' }, 5);
+    const { buildBox } = require(path.join(CORE, 'utils'));
+    await checkWinStreakRecord(db, roomMock, HaxNotificationMock, 99, authArray, { id: 1, name: 'Alice' }, 5, buildBox);
     check('a first-ever record is set and announced', db.getRecord('winStreak'), { value: 5, holderAuth: 'AUTH_ALICE', holderName: 'Alice', achievedAt: db.getRecord('winStreak').achievedAt });
     check('...in the achievementColor passed through', sentLocal[0].color, 99);
     check('...and MENTION sound, not CHAT', sentLocal[0].sound, HaxNotificationMock.MENTION);
-    check('...names no previous record the first time', sentLocal[0].msg.includes('прошлый рекорд'), false);
+    check('...names no previous record the first time', sentLocal[0].msg.includes('Прошлый рекорд'), false);
 
     sentLocal.length = 0;
-    await checkWinStreakRecord(db, roomMock, HaxNotificationMock, 99, authArray, { id: 2, name: 'Bob' }, 3);
+    await checkWinStreakRecord(db, roomMock, HaxNotificationMock, 99, authArray, { id: 2, name: 'Bob' }, 3, buildBox);
     check('a LOWER streak than the current record does not overwrite it', db.getRecord('winStreak').value, 5);
     check('...and sends nothing at all', sentLocal, []);
 
     sentLocal.length = 0;
-    await checkWinStreakRecord(db, roomMock, HaxNotificationMock, 99, authArray, { id: 2, name: 'Bob' }, 8);
+    await checkWinStreakRecord(db, roomMock, HaxNotificationMock, 99, authArray, { id: 2, name: 'Bob' }, 8, buildBox);
     check('a genuinely higher streak overwrites the record', db.getRecord('winStreak'), { value: 8, holderAuth: 'AUTH_BOB', holderName: 'Bob', achievedAt: db.getRecord('winStreak').achievedAt });
-    check('...and names the previous holder in the announcement', sentLocal[0].msg.includes('прошлый рекорд: 5, держал(а) Alice'), true);
+    check('...and names the previous holder in the announcement', sentLocal[0].msg.includes('Прошлый рекорд: 5 (держал(а) Alice)'), true);
 
     sentLocal.length = 0;
-    await checkWinStreakRecord(db, roomMock, HaxNotificationMock, 99, authArray, null, 100);
+    await checkWinStreakRecord(db, roomMock, HaxNotificationMock, 99, authArray, null, 100, buildBox);
     check('a falsy captain (defensive case) is a silent no-op, not a crash', sentLocal, []);
 
     db.close();
@@ -663,6 +664,7 @@ console.log('\n--- db + roomStats.js/player.js: player data actually round-trips
         getOwnGoalsPlayer: () => 0,
         getPlayerComp: (player) => player,
         getTimeStats: (seconds) => `${Math.floor(seconds / 60)}m`,
+        buildBox: require(path.join(CORE, 'utils')).buildBox,
     });
 
     // state.lastWinner is Team.RED: Alice is reported as playing RED (wins),
@@ -1515,6 +1517,7 @@ console.log('\n--- stats/roomStats.js + stats/elo.js: main-room ELO exchange (re
         getAssistsPlayer: () => 0, getCSPlayer: () => 0, getGametimePlayer: () => 60, getGoalsPlayer: () => 0,
         getOwnGoalsPlayer: () => 0, getPlayerComp: (player) => player, getTimeStats: (s) => `${s}s`,
         applyVipGrant: async () => {}, random: () => 1, // 1 >= VIP_LOTTERY_CHANCE always, so the lottery never fires
+        buildBox: require(path.join(CORE, 'utils')).buildBox,
     });
 
     await roomStatsElo.updateStats();
@@ -1690,6 +1693,7 @@ console.log('\n--- stats/roomStats.js: private top-5 entry ping (requested 2026-
         getOwnGoalsPlayer: () => 0,
         getPlayerComp: (player) => player,
         getTimeStats: (s) => `${s}s`,
+        buildBox: require(path.join(CORE, 'utils')).buildBox,
     });
 
     // Only 4 EXISTING rows before this match (Riser's own row doesn't
@@ -1706,7 +1710,7 @@ console.log('\n--- stats/roomStats.js: private top-5 entry ping (requested 2026-
     sent2.length = 0;
     await roomStats2.updatePlayerStats({ id: 6, name: 'Riser2' }, Team.RED);
     const pingMsg = sent2.find((s) => /📈/.test(s.msg));
-    check('a fresh player who vaults straight into top-5 in one match gets pinged', pingMsg?.msg, '📈 Ты теперь в топ-5 по категории «Голы» !');
+    check('a fresh player who vaults straight into top-5 in one match gets pinged', pingMsg?.msg.includes('📈 Ты теперь в топ-5 по категории «Голы» !'), true);
     check('...sent privately to them, not broadcast to the room', pingMsg?.id, 6);
     check('...in the dedicated achievement color, not the routine announcementColor (requested 2026-08-16)', pingMsg?.color, 99);
 
@@ -1763,6 +1767,7 @@ console.log('\n--- stats/roomStats.js: VIP lottery — 0.5% roll per WINNING-tea
             state.vipList.push([auth, name, expiresAt]);
         },
         random: () => randomValue,
+        buildBox: require(path.join(CORE, 'utils')).buildBox,
     });
 
     randomValue = 0; // forces every roll to "win"
@@ -2268,22 +2273,23 @@ console.log('\n--- core/commands/trophies.js + db.getTopPlayers(): top-3 trophie
     const db = createSqliteDatabase(':memory:');
     db.init();
 
-    db.savePlayerStats('AUTH_1', Object.assign(new HaxStatistics('P1'), { games: 10, wins: 9, goals: 20, assists: 1, CS: 1, playtime: 100 }));
-    check('getTopPlayers requires a >=5-player quorum before awarding anything', db.getTopPlayers(), { goals: [], assists: [], cs: [], wr: [], pt: [] });
+    db.savePlayerStats('AUTH_1', Object.assign(new HaxStatistics('P1'), { games: 10, wins: 9, goals: 20, assists: 1, CS: 1, playtime: 100, elo: 1400 }));
+    check('getTopPlayers requires a >=5-player quorum before awarding anything', db.getTopPlayers(), { goals: [], assists: [], cs: [], pt: [], elo: [] });
 
     // Distinct values per category, and AUTH_5 last everywhere, so each
     // category's top-3 order is unambiguous (no tie-breaking to worry about).
-    db.savePlayerStats('AUTH_2', Object.assign(new HaxStatistics('P2'), { games: 10, wins: 1, goals: 15, assists: 20, CS: 2, playtime: 90 }));
-    db.savePlayerStats('AUTH_3', Object.assign(new HaxStatistics('P3'), { games: 10, wins: 2, goals: 10, assists: 15, CS: 20, playtime: 80 }));
-    db.savePlayerStats('AUTH_4', Object.assign(new HaxStatistics('P4'), { games: 10, wins: 8, goals: 5, assists: 10, CS: 15, playtime: 500 }));
-    db.savePlayerStats('AUTH_5', Object.assign(new HaxStatistics('P5'), { games: 10, wins: 0, goals: 1, assists: 1, CS: 1, playtime: 1 }));
+    db.savePlayerStats('AUTH_2', Object.assign(new HaxStatistics('P2'), { games: 10, wins: 1, goals: 15, assists: 20, CS: 2, playtime: 90, elo: 1300 }));
+    db.savePlayerStats('AUTH_3', Object.assign(new HaxStatistics('P3'), { games: 10, wins: 2, goals: 10, assists: 15, CS: 20, playtime: 80, elo: 1200 }));
+    db.savePlayerStats('AUTH_4', Object.assign(new HaxStatistics('P4'), { games: 10, wins: 8, goals: 5, assists: 10, CS: 15, playtime: 500, elo: 1100 }));
+    db.savePlayerStats('AUTH_5', Object.assign(new HaxStatistics('P5'), { games: 10, wins: 0, goals: 1, assists: 1, CS: 1, playtime: 1, elo: 900 }));
 
     const top = db.getTopPlayers();
     check('goals top-3, in order, once 5 players exist', top.goals.map((e) => e.auth), ['AUTH_1', 'AUTH_2', 'AUTH_3']);
     check('assists top-3, in order', top.assists.map((e) => e.auth), ['AUTH_2', 'AUTH_3', 'AUTH_4']);
     check('clean-sheets top-3, in order', top.cs.map((e) => e.auth), ['AUTH_3', 'AUTH_4', 'AUTH_2']);
     check('playtime top-3, in order', top.pt.map((e) => e.auth), ['AUTH_4', 'AUTH_1', 'AUTH_2']);
-    check('winrate top-3, in order (90/80/20%)', top.wr.map((e) => e.auth), ['AUTH_1', 'AUTH_4', 'AUTH_3']);
+    check('ELO top-3, in order (requested 2026-08-21)', top.elo.map((e) => e.auth), ['AUTH_1', 'AUTH_2', 'AUTH_3']);
+    check('winrate trophy category removed (requested 2026-08-21)', top.wr, undefined);
     check('only the top 3 are returned, not every player', top.goals.length, 3);
 
     check('getEquipped starts with no trophy', db.getEquipped('AUTH_1').trophy, null);
@@ -2306,7 +2312,7 @@ console.log('\n--- core/commands/trophies.js + db.getTopPlayers(): top-3 trophie
     db.addCoins('AUTH_NOT_TOP', 'Regular', 0);
     const { encodeLegacyTrophyKey, resolveTrophyRank } = require(path.join(CORE, 'utils'));
     const state = {
-        topPlayers: { goals: [{ auth: 'AUTH_TOP' }, { auth: 'AUTH_SECOND' }], assists: [], cs: [], wr: [], pt: [] },
+        topPlayers: { goals: [{ auth: 'AUTH_TOP' }, { auth: 'AUTH_SECOND' }], assists: [], cs: [], pt: [], elo: [] },
         equippedTrophies: {},
         // currentSeason=5 (an arbitrary non-zero/non-one value) so these
         // tests actually prove the season number is threaded through, not
@@ -2419,6 +2425,7 @@ console.log('\n--- core/commands/trophies.js + db.getTopPlayers(): top-3 trophie
         getOwnGoalsPlayer: () => 0, getPlayerComp: (p) => p, getTimeStats: (s) => `${s}s`,
         applyVipGrant: async () => {},
         random: () => 1, // always "loses" the 1% roll — this test doesn't care about the lottery
+        buildBox: require(path.join(CORE, 'utils')).buildBox,
     });
     await roomStats.updateStats();
     check('updateStats() refreshes state.topPlayers via db.getTopPlayers()', rsState.topPlayers.goals[0].auth, 'AUTH_1');
@@ -2704,6 +2711,18 @@ console.log('\n--- core/voteBan.js: !voteban — 61% of ALL eligible voters, top
     check('a restricted initiator is refused before usage/target checks even run', /запрещено использовать !voteban.*токсик/.test(sent[0].msg), true);
     check('...and no session is started', state.votebanSession, null);
     await db.unrestrictCommand('AUTH_ALICE', 'voteban');
+
+    // Room-size gate (requested 2026-08-21) — checked right after the
+    // restriction check, before usage/target validation even runs. Shrinks
+    // the roster to exactly MIN_ROOM_SIZE (5) — still not enough, since the
+    // check is "> 5", not ">=" — then restores it for every test below.
+    const fullRoster = state.playersAll;
+    state.playersAll = fullRoster.slice(0, 5);
+    sent.length = 0;
+    await voteBan.votebanCommand({ id: 1, name: 'Alice' }, '!voteban #6');
+    check('!voteban is refused at exactly 5 players (not more than 5)', /больше 5 игроков/.test(sent[0].msg), true);
+    check('...and no session is started', state.votebanSession, null);
+    state.playersAll = fullRoster;
 
     sent.length = 0;
     await voteBan.votebanCommand({ id: 1, name: 'Alice' }, '!voteban');
@@ -3875,7 +3894,7 @@ console.log('\n--- events/movement.js: auth-bans block a join regardless of conn
         room, state, authArray, db, AFKSet: AFKSetLocal, AFKMinSet: AFKMinSetLocal, AFKCooldownSet: AFKCooldownSetLocal, HaxNotification, Role: { MASTER: 3 }, State: {}, Team,
         announcementColor: 1, debugMode: false, disableBans: false, discordBot,
         errorColor: 2, infoColor: 5, masterList: [], maxPlayers: 8, welcomeColor: 6,
-        getDate: () => 'DATE', checkCaptainLeave: noop, checkOverflowPassword: noop, getRole: () => 0,
+        getDate: () => 'DATE', buildBox: require(path.join(CORE, 'utils')).buildBox, checkCaptainLeave: noop, checkOverflowPassword: noop, getRole: () => 0,
         ghostKickHandle: (oldPlayer, newPlayer) => ghostKicks.push({ oldId: oldPlayer.id, newId: newPlayer.id }),
         // Daily login bonus (economy.js's claimDailyBonus) — irrelevant to
         // this test's join/leave/ban assertions, just needs to exist and
@@ -4014,6 +4033,7 @@ console.log('\n--- events/gameManagement.js: in-match comeback detection (item #
         playGoalAnimation: async () => {}, playGoalSizeEffect: async () => {},
         resetPauseVotes: () => {}, updateTeams: () => {},
         achievementColor: 42, infoColor: 5, authArray: {}, db: { getHeadToHead: async () => null },
+        buildBox: require(path.join(CORE, 'utils')).buildBox,
     });
 
     gm.onGameStart(null);
@@ -6910,9 +6930,10 @@ console.log('\n--- commands/admin.js: !hide toggles the admin badge without touc
 console.log('\n--- stats/goalAttribution.js: an assist can never be the same player as the scorer ---');
 {
     const { Goal } = require(path.join(__dirname, '..', 'src', 'core', 'models'));
+    const { buildBox } = require(path.join(CORE, 'utils'));
     const state = { lastTouches: [null, null], game: { scores: { time: 120 }, goals: [] } };
     const goalAttribution = require(path.join(CORE, 'stats', 'goalAttribution'))({
-        state, Team, Goal, getTimeGame: (t) => `[${t}]`,
+        state, Team, Goal, getTimeGame: (t) => `[${t}]`, buildBox,
     });
 
     const scorer = { id: 1, name: 'Alice', team: Team.RED };

@@ -9,6 +9,7 @@ module.exports = function createGoalAttribution({
     Team,
     Goal,
     getTimeGame,
+    buildBox,
 }) {
     function getGoalAttribution(team) {
         let goalAttribution = Array(2).fill(null);
@@ -45,23 +46,8 @@ module.exports = function createGoalAttribution({
     // а/о/е/р/с/т/у and others), so applying it to Russian labels would
     // render as broken/mixed-case garbage for half the alphabet. Skipped
     // for that reason; the box/emoji/separator styling carries the look
-    // instead.
-    //
-    // Border width is computed from the actual content line (each emoji
-    // counted as 2 columns, roughly matching how emoji render at ~double
-    // the width of a text character in HaxBall's chat font) rather than a
-    // fixed guess, so it stays visually correct for short and long names
-    // alike instead of only looking right at whatever length happened to
-    // be tested.
-    function buildGoalBox(line) {
-        const width = [...line].reduce(
-            (w, ch) => w + (/\p{Emoji_Presentation}/u.test(ch) ? 2 : 1),
-            0
-        );
-        const border = '─'.repeat(width + 2);
-        return `┌${border}┐\n ${line}\n└${border}┘`;
-    }
-
+    // instead. buildBox (core/utils.js) does the actual width/border math
+    // — shared with entry.js's post-match summary box.
     function getGoalString(team) {
         const scores = state.game.scores;
         const time = getTimeGame(scores.time).slice(1, -1);
@@ -99,7 +85,7 @@ module.exports = function createGoalAttribution({
             );
         }
 
-        return buildGoalBox(line);
+        return buildBox([line]);
     }
 
     return {

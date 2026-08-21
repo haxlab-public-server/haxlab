@@ -40,9 +40,6 @@ module.exports = function createMiscEvents({
     // rather than wiring BFF into the real analytics module, matching this
     // feature's original main-room-only scope decision.
     recordMatchAnalyticsTick = () => {},
-    // Same "default no-op, main-room-only for now" pattern as
-    // recordMatchAnalyticsTick above — see core/stats/wallkick.js.
-    checkWallkick = () => {},
 }) {
     function onRoomLink(url) {
         console.log(url);
@@ -118,7 +115,6 @@ module.exports = function createMiscEvents({
         getLastTouchOfTheBall();
         getGameStats();
         recordMatchAnalyticsTick();
-        checkWallkick();
         handleActivity();
     }
 

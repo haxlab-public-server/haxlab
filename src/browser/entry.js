@@ -111,6 +111,7 @@ const {
     formatTrophyLabel,
     encodeLegacyTrophyKey,
     resolveTrophyRank,
+    buildBox,
 } = require('../core/utils');
 const {
     getIdReport,
@@ -911,46 +912,47 @@ async function endGame(winner) {
     // state.streak/state.streakWinner at all — so an odd 1v1 played
     // between two real 4v4s can't reset OR silently continue the streak.
     const isFullHouse = state.teamRedStats.length >= teamSize && state.teamBlueStats.length >= teamSize;
+    // Blowout wording (requested 2026-08-21) — a 4+ goal final margin gets
+    // called out distinctly from a routine win, same "worth a different
+    // headline" reasoning as the comeback/rivalry storylines in
+    // gameManagement.js. Draws can't blow out by definition, so this only
+    // ever applies inside the RED/BLUE branches below.
+    const isBlowout = Math.abs(scores.red - scores.blue) >= 4;
+    // Winner/streak text folded into the post-match summary box below
+    // (requested 2026-08-21) instead of its own separate announcement —
+    // captured here since the streak bookkeeping stays exactly where it
+    // was (still needs to happen synchronously, before anything below
+    // could read a stale state.streak).
+    let summaryColor = announcementColor;
+    let winnerLine;
     if (winner == Team.RED) {
-        let streakText = ' !';
+        let streakText = '';
         if (isFullHouse) {
             state.streak = previousStreakWinner === Team.RED ? state.streak + 1 : 1;
             state.streakWinner = Team.RED;
-            streakText = ` ! ${formatStreakText(state.streak)}`;
+            streakText = ` ${formatStreakText(state.streak)}`;
         }
-        room.sendAnnouncement(
-            `✨ Красная команда выиграла ${scores.red} - ${scores.blue}${streakText}`,
-            null,
-            redColor,
-            'bold',
-            HaxNotification.CHAT
-        );
+        winnerLine = isBlowout
+            ? `🧹 Разгром! Красная команда размазала соперника ${scores.red} - ${scores.blue}${streakText}`
+            : `✨ Красная команда выиграла${streakText}`;
+        summaryColor = redColor;
     } else if (winner == Team.BLUE) {
-        let streakText = ' !';
+        let streakText = '';
         if (isFullHouse) {
             state.streak = previousStreakWinner === Team.BLUE ? state.streak + 1 : 1;
             state.streakWinner = Team.BLUE;
-            streakText = ` ! ${formatStreakText(state.streak)}`;
+            streakText = ` ${formatStreakText(state.streak)}`;
         }
-        room.sendAnnouncement(
-            `✨ Синяя команда выиграла ${scores.blue} - ${scores.red}${streakText}`,
-            null,
-            blueColor,
-            'bold',
-            HaxNotification.CHAT
-        );
+        winnerLine = isBlowout
+            ? `🧹 Разгром! Синяя команда размазала соперника ${scores.blue} - ${scores.red}${streakText}`
+            : `✨ Синяя команда выиграла${streakText}`;
+        summaryColor = blueColor;
     } else {
         if (isFullHouse) {
             state.streak = 0;
             state.streakWinner = Team.SPECTATORS;
         }
-        room.sendAnnouncement(
-            '💤 Лимит ничьих достигнут !',
-            null,
-            announcementColor,
-            'bold',
-            HaxNotification.CHAT
-        );
+        winnerLine = '💤 Лимит ничьих достигнут !';
     }
     // Head-to-head recording + room-wide win-streak record (items #2/#10/
     // #11/#13, requested 2026-08-17) — see core/matchHistory.js's own doc
@@ -972,41 +974,41 @@ async function endGame(winner) {
     if ((winner == Team.RED || winner == Team.BLUE) && isFullHouse) {
         try {
             const captain = winner == Team.RED ? state.teamRed[0] : state.teamBlue[0];
-            await checkWinStreakRecord(db, room, HaxNotification, achievementColor, authArray, captain, state.streak);
+            await checkWinStreakRecord(db, room, HaxNotification, achievementColor, authArray, captain, state.streak, buildBox);
         } catch (err) {
             console.error('[endGame] win-streak record check failed:', err);
         }
     }
     let possessionRedPct = (state.possession[0] / (state.possession[0] + state.possession[1])) * 100;
-    let possessionBluePct = 100 - possessionRedPct;
-    let possessionString = `🔴 ${possessionRedPct.toFixed(0)}% - ${possessionBluePct.toFixed(0)}% 🔵`;
-    let actionRedPct = (state.actionZoneHalf[0] / (state.actionZoneHalf[0] + state.actionZoneHalf[1])) * 100;
-    let actionBluePct = 100 - actionRedPct;
-    let actionString = `🔴 ${actionRedPct.toFixed(0)}% - ${actionBluePct.toFixed(0)}% 🔵`;
-    let CSString = getCSString(scores);
-    // Split into 3 separately-styled announcements (requested 2026-08-18 —
-    // same "visual hierarchy over one dense bold block" treatment as !rating
-    // /!me/!tops, applied to the single highest-frequency output in the room:
-    // this fires after literally every match). Possession/action-zone stay
-    // small print (routine post-match trivia), the clean-sheet line gets
-    // its own call so it can be highlighted in successColor when it's a
-    // real achievement (someone actually kept a clean sheet) instead of
-    // blending into the same bold block regardless of outcome.
-    room.sendAnnouncement(
-        `📊 Владение: 🔴 ${possessionString}\n` +
-        `📊 Зоны действия: 🔴 ${actionString}`,
-        null,
-        infoColor,
-        'small',
-        HaxNotification.NONE
-    );
-    room.sendAnnouncement(
-        CSString,
-        null,
-        getCS(scores).length > 0 ? successColor : infoColor,
-        'small-bold',
-        HaxNotification.NONE
-    );
+    // Dot bar instead of "55% - 45%" (requested 2026-08-21) — reads at a
+    // glance rather than requiring the reader to compare two numbers.
+    // Anchored to red's share only: the ● run visually IS red's slice,
+    // the ○ run IS blue's. No percentage alongside it either (dropped
+    // 2026-08-21 — pairing a number with the bar just made the reader
+    // check whether it agreed with what they were already seeing instead
+    // of trusting the bar itself).
+    const possessionFilled = Math.round(possessionRedPct / 10);
+    const possessionBar = '●'.repeat(possessionFilled) + '○'.repeat(10 - possessionFilled);
+    let possessionString = `🔴 ${possessionBar} 🔵`;
+    // Post-match summary box (requested 2026-08-21, matching a style seen
+    // on another server) — replaces what used to be 4 separate
+    // announcements (winner+streak / possession+action-zone / clean sheet
+    // / MVP, added 2026-08-18 for visual hierarchy) with one consolidated
+    // box. buildBox (core/utils.js) computes the border from actual
+    // content width, same helper the live goal announcement uses — no
+    // small-caps for the Russian labels, same reasoning as the goal box
+    // (incomplete Cyrillic coverage in Unicode's small-caps block).
+    // Action-zone dropped from the display (was in the old small-print
+    // line) to keep the box to what the reference format itself shows —
+    // still tracked in state.actionZoneHalf either way, just not surfaced
+    // here anymore.
+    const summaryLines = [
+        winnerLine,
+        `🔴 ${scores.red} - ${scores.blue} 🔵 ┊ ${getTimeGame(scores.time).slice(1, -1)} ┊ Владение ${possessionString}`,
+    ];
+    if (getCS(scores).length > 0) {
+        summaryLines.push(getCSString(scores));
+    }
     // 28-metric advanced analytics (see core/stats/analytics/, !rating) —
     // independent of updateStats()'s quals-only gate, runs for every match
     // that reaches endGame() regardless of team size. Now runs BEFORE
@@ -1027,18 +1029,60 @@ async function endGame(winner) {
         // continuous z-score) and not worth a tiebreak rule of its own.
         if (analyticsReports.length > 0) {
             const mvp = analyticsReports.reduce((best, r) => (r.rating > best.rating ? r : best));
-            room.sendAnnouncement(
-                `⭐ MVP матча: ${mvp.playerName} (${mvp.rating.toFixed(1)}/10)`,
-                null,
-                achievementColor,
-                'bold',
-                HaxNotification.MENTION
-            );
+            summaryLines.push(`⭐ MVP: ${mvp.playerName} (${mvp.rating.toFixed(1)}/10)`);
         }
     } catch (err) {
         console.error('[endGame] analyzeMatch failed:', err);
         discordBot.sendLog(`⚠️ Не удалось посчитать продвинутую статистику: ${err.message}`);
     }
+    // Per-player goal/assist recap (requested 2026-08-21) — tallied from
+    // this match's own state.game.goals. Originally one line per
+    // contributor (icons repeated per occurrence), but that meant up to 8
+    // lines in a full house where everyone touches a goal — collapsed
+    // 2026-08-21 into one line per TEAM instead, "Name (NГ+NА)" per
+    // contributor, comma-joined, so the box height stays bounded regardless
+    // of roster size.
+    const contributionsById = new Map();
+    for (const goal of state.game.goals) {
+        if (goal.striker != null) {
+            const entry = contributionsById.get(goal.striker.id) ?? { name: goal.striker.name, goals: 0, assists: 0 };
+            entry.goals++;
+            contributionsById.set(goal.striker.id, entry);
+        }
+        if (goal.assist != null) {
+            const entry = contributionsById.get(goal.assist.id) ?? { name: goal.assist.name, goals: 0, assists: 0 };
+            entry.assists++;
+            contributionsById.set(goal.assist.id, entry);
+        }
+    }
+    // Grouped by final-roster team membership (state.teamRed/teamBlue),
+    // not the live goal.striker.team — those are mutable player references
+    // that can drift from what they were at the moment of the goal (see
+    // state-object doc comments elsewhere in this file) if a player later
+    // switches sides. A contributor who left mid-match and isn't on either
+    // final roster is silently dropped from the recap — the same "final
+    // state, not blow-by-blow history" scope the rest of this box uses.
+    const redIds = new Set(state.teamRed.map((p) => p.id));
+    const blueIds = new Set(state.teamBlue.map((p) => p.id));
+    const redParts = [];
+    const blueParts = [];
+    for (const [id, entry] of contributionsById) {
+        const counts = [];
+        if (entry.goals > 0) counts.push(`${entry.goals}Г`);
+        if (entry.assists > 0) counts.push(`${entry.assists}А`);
+        const label = `${entry.name} (${counts.join('+')})`;
+        if (redIds.has(id)) redParts.push(label);
+        else if (blueIds.has(id)) blueParts.push(label);
+    }
+    if (redParts.length > 0) summaryLines.push(`🔴 ${redParts.join(', ')}`);
+    if (blueParts.length > 0) summaryLines.push(`🔵 ${blueParts.join(', ')}`);
+    room.sendAnnouncement(
+        buildBox(summaryLines, 'ИТОГИ МАТЧА'),
+        null,
+        summaryColor,
+        'bold',
+        HaxNotification.MENTION
+    );
     try {
         await updateStats(matchRatingsByAuth);
     } catch (err) {
@@ -1313,19 +1357,6 @@ const {
     updateTeams,
 });
 
-// Wallkick/double-shot detector (main room only for now — see its own
-// file for why, and the decision to hold off on a BFF port until this
-// has been watched live for a while).
-const createWallkickDetector = require('../core/stats/wallkick');
-const { checkWallkick } = createWallkickDetector({
-    room,
-    state,
-    HaxNotification,
-    getBallSpeed,
-    pointDistance,
-    achievementColor,
-});
-
 /* GOAL ATTRIBUTION FUNCTIONS */
 
 const createGoalAttribution = require('../core/stats/goalAttribution');
@@ -1337,6 +1368,7 @@ const {
     Team,
     Goal,
     getTimeGame,
+    buildBox,
 });
 
 /* GET STATS FUNCTIONS */
@@ -1393,6 +1425,7 @@ const {
     getTimeStats,
     applyVipGrant,
     random: Math.random,
+    buildBox,
 });
 
 /* PRINT FUNCTIONS */
@@ -1797,6 +1830,7 @@ Object.assign(room, wrapEventHandlers(createMovementEvents({
     maxPlayers,
     welcomeColor,
     getDate,
+    buildBox,
     applyTeamForms,
     claimDailyBonus,
     checkCaptainLeave,
@@ -1902,6 +1936,7 @@ Object.assign(room, wrapEventHandlers(createGameManagementEvents({
     infoColor,
     authArray,
     db,
+    buildBox,
     resetMatchAnalytics,
 })));
 
@@ -1927,7 +1962,6 @@ Object.assign(room, wrapEventHandlers(createMiscEvents({
     stadiumCommand,
     updateTeams,
     recordMatchAnalyticsTick,
-    checkWallkick,
 })));
 
 // Exposed on the resolved `ready` value (see below) purely for

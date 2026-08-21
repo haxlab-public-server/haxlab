@@ -648,6 +648,7 @@ const {
     clearbansCommand, banListCommand, adminListCommand, setAdminCommand, removeAdminCommand,
     setVipCommand, removeVipCommand, vipListCommand, banAuthCommand, unbanAuthCommand,
     authBanListCommand, playersListCommand, passwordCommand, purgeExpiredVips,
+    restrictCmdCommand, unrestrictCmdCommand, cmdRestrictionsCommand,
 } = createMasterCommands({
     room, state, authArray, db, masterList, announcementColor, errorColor, HaxNotification,
     formatBanRemaining, formatVipRemaining, discordBot,
@@ -714,6 +715,9 @@ const commands = {
     unmute: { aliases: ['um'], roles: Role.ADMIN_TEMP, function: chatGuard.unmuteCommand },
     mutes: { aliases: [], roles: Role.ADMIN_TEMP, function: chatGuard.muteListCommand },
     hide: { aliases: [], roles: Role.ADMIN_TEMP, function: chatGuard.hideCommand },
+    restrictcmd: { aliases: [], roles: Role.ADMIN_TEMP, function: restrictCmdCommand },
+    unrestrictcmd: { aliases: [], roles: Role.ADMIN_TEMP, function: unrestrictCmdCommand },
+    cmdrestrictions: { aliases: [], roles: Role.ADMIN_TEMP, function: cmdRestrictionsCommand },
     clearbans: { aliases: [], roles: Role.MASTER, function: clearbansCommand },
     banlist: { aliases: [], roles: Role.MASTER, function: banListCommand },
     admins: { aliases: ['adminlist'], roles: Role.MASTER, function: adminListCommand },

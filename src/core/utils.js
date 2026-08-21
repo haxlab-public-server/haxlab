@@ -11,6 +11,40 @@ function pointDistance(p1, p2) {
     return Math.sqrt(Math.pow(p1.x - p2.x, 2) + Math.pow(p1.y - p2.y, 2));
 }
 
+// Box-drawing helpers (requested 2026-08-21, matching a style seen on
+// other servers — a bordered frame around one or more announcement
+// lines, optionally with a title embedded in the top border). Shared
+// between goalAttribution.js's goal box and entry.js's post-match summary
+// box rather than each rolling its own width math.
+//
+// Width is computed from the actual content, not a fixed guess, so the
+// border stays visually correct for short and long lines alike. Each
+// emoji is counted as 2 columns (roughly how they render at double the
+// width of a text character in HaxBall's chat font) — plain text as 1.
+function visualWidth(text) {
+    return [...text].reduce(
+        (w, ch) => w + (/\p{Emoji_Presentation}/u.test(ch) ? 2 : 1),
+        0
+    );
+}
+
+function buildBox(lines, title = null) {
+    const contentWidth = Math.max(...lines.map(visualWidth));
+    const bodyWidth = contentWidth + 2;
+    let top;
+    if (title) {
+        const titleSegment = `┨ ${title} ┠`;
+        const remaining = Math.max(bodyWidth - visualWidth(titleSegment), 2);
+        const left = Math.floor(remaining / 2);
+        const right = remaining - left;
+        top = `┌${'─'.repeat(left)}${titleSegment}${'─'.repeat(right)}┐`;
+    } else {
+        top = `┌${'─'.repeat(bodyWidth)}┐`;
+    }
+    const bottom = `└${'─'.repeat(bodyWidth)}┘`;
+    return [top, ...lines.map((l) => ` ${l}`), bottom].join('\n');
+}
+
 function getHoursStats(time) {
     return Math.floor(time / 3600);
 }
@@ -261,4 +295,6 @@ module.exports = {
     parseEquippedTrophy,
     encodeLegacyTrophyKey,
     resolveTrophyRank,
+    visualWidth,
+    buildBox,
 };

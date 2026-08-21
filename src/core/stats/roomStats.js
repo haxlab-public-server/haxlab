@@ -35,7 +35,7 @@ const RANK_PING_QUORUM = 5;
 // outside the top 5 into it. `before`/`after` are the same 6 columns, read
 // straight off the HaxStatistics object pre/post-increment — no separate
 // DB round trip needed for the "did it even change" check.
-async function announceTopFiveEntries(room, db, HaxNotification, achievementColor, player, before, after) {
+async function announceTopFiveEntries(room, db, HaxNotification, achievementColor, player, before, after, buildBox) {
     for (const key of RANK_PING_CATEGORIES) {
         if (before[key] === after[key]) continue;
         const { rank: oldRank, total } = await db.getStatRank(key, before[key]);
@@ -43,7 +43,7 @@ async function announceTopFiveEntries(room, db, HaxNotification, achievementColo
         const { rank: newRank } = await db.getStatRank(key, after[key]);
         if (newRank > 5) continue;
         room.sendAnnouncement(
-            `📈 Ты теперь в топ-5 по категории «${STAT_LABELS[key]}» !`,
+            buildBox([`📈 Ты теперь в топ-5 по категории «${STAT_LABELS[key]}» !`]),
             player.id,
             achievementColor,
             'bold',
@@ -79,6 +79,7 @@ module.exports = function createRoomStats({
     getTimeStats,
     applyVipGrant,
     random,
+    buildBox,
 }) {
     const GAMES_MILESTONES = [50, 100, 250, 500, 1000, 2500, 5000];
 
@@ -122,7 +123,7 @@ module.exports = function createRoomStats({
         const expiresAt = new Date(Date.now() + VIP_LOTTERY_DAYS * 24 * 60 * 60000).toISOString();
         await applyVipGrant(auth, player.name, expiresAt);
         room.sendAnnouncement(
-            `🎰 ${player.name} выиграл(а) VIP на ${VIP_LOTTERY_DAYS} ${pluralizeDays(VIP_LOTTERY_DAYS)} по счастливому билету за победу в матче 4х4 !`,
+            buildBox([`🎰 ${player.name} выиграл(а) VIP на ${VIP_LOTTERY_DAYS} ${pluralizeDays(VIP_LOTTERY_DAYS)} по счастливому билету за победу в матче 4х4 !`]),
             null,
             achievementColor,
             'bold',
@@ -156,7 +157,7 @@ module.exports = function createRoomStats({
         // me". Querying after the save would let a player's own freshly-
         // written new value inflate their own "how many people are ahead of
         // me" count by one.
-        await announceTopFiveEntries(room, db, HaxNotification, achievementColor, player, before, stats);
+        await announceTopFiveEntries(room, db, HaxNotification, achievementColor, player, before, stats, buildBox);
 
         await db.savePlayerStats(auth, stats);
 
@@ -183,7 +184,7 @@ module.exports = function createRoomStats({
         // once, on the exact match that crosses the milestone.
         if (GAMES_MILESTONES.includes(stats.games)) {
             room.sendAnnouncement(
-                `🎉 ${stats.playerName} сыграл(а) ${stats.games}-й матч в этой комнате !`,
+                buildBox([`🎉 ${stats.playerName} сыграл(а) ${stats.games}-й матч в этой комнате !`]),
                 null, achievementColor, 'bold', HaxNotification.MENTION
             );
         }

@@ -43,6 +43,7 @@ const BRIDGED_METHODS = [
     'saveRatingHistory',
     'getRecentRatingDelta',
     'linkDiscordId',
+    'getDiscordIdByAuth',
     'getSetting',
     'setSetting',
     // Overflow password unification (requested 2026-08-17) — BFF-only alias

@@ -14,12 +14,15 @@ module.exports = {
         goals: 'голов',
         assists: 'ас-ов',
         cs: 'GK',
-        wr: 'WR',
         pt: 'PT',
+        elo: 'ELO',
     },
     welcomeColor: 0xc4ff65,
     announcementColor: 0xffefd6,
-    infoColor: 0xbebebe,
+    // Brightened 2026-08-21 (was 0xbebebe) — too dim to read at the 'small'
+    // text size this gets used at everywhere (tops list body, join/leave
+    // lines, etc.).
+    infoColor: 0xe0e0e0,
     privateMessageColor: 0xffc933,
     redColor: 0xff4c4c,
     blueColor: 0x62cbff,

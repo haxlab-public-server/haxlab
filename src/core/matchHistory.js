@@ -34,14 +34,17 @@ async function recordHeadToHead(db, authArray, teamRed, teamBlue, winner, Team) 
 // rosters carried it, not one individual. A no-op if `captain` is
 // falsy (an empty/left-mid-match roster — shouldn't normally happen at
 // this call site, kept defensive rather than assumed).
-async function checkWinStreakRecord(db, room, HaxNotification, achievementColor, authArray, captain, streak) {
+async function checkWinStreakRecord(db, room, HaxNotification, achievementColor, authArray, captain, streak, buildBox) {
     if (!captain) return;
     const record = await db.getRecord('winStreak');
     if (streak <= (record?.value ?? 0)) return;
-    const previousText = record ? ` (прошлый рекорд: ${record.value}, держал(а) ${record.holderName})` : '';
     await db.setRecord('winStreak', streak, authArray[captain.id][0], captain.name);
+    const lines = [`🚨 Новый рекорд комнаты! Серия побед подряд — ${streak} !`];
+    if (record) {
+        lines.push(`Прошлый рекорд: ${record.value} (держал(а) ${record.holderName})`);
+    }
     room.sendAnnouncement(
-        `🚨 Новый рекорд комнаты! Самая длинная серия побед подряд — ${streak}${previousText} !`,
+        buildBox(lines),
         null,
         achievementColor,
         'bold',

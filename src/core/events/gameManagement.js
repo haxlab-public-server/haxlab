@@ -41,6 +41,7 @@ module.exports = function createGameManagementEvents({
     infoColor,
     authArray,
     db,
+    buildBox,
     resetMatchAnalytics = () => {},
 }) {
     // Same-day rematch (item #13) takes priority over a general rivalry
@@ -284,6 +285,33 @@ module.exports = function createGameManagementEvents({
             HaxNotification.CHAT
         );
         discordBot.sendLog(`[${getDate()}] ${goalString}`);
+        // Hat-trick callout (requested 2026-08-21) — fires once, exactly
+        // when a player's OWN goal tally this match reaches 3 (not every
+        // goal past it, and not for a 4th/5th — kept to the one classic
+        // milestone rather than a whole naming ladder). getGoalString()
+        // above has already pushed this goal onto state.game.goals, so it's
+        // included in the count. `striker.team === goal.team` excludes own
+        // goals from counting toward a hat-trick — same idiom the analytics
+        // detectors (MatchRatingDetector, PossessionDetector, ShotDetector)
+        // already use to tell a real goal from an own goal. Guarded on
+        // state.game.goals actually being an array — getGoalString is an
+        // injected dependency and a test double (or any future caller) is
+        // free to not maintain it the way the real implementation does.
+        const lastGoal = Array.isArray(state.game?.goals) ? state.game.goals[state.game.goals.length - 1] : null;
+        if (lastGoal != null && lastGoal.striker != null && lastGoal.striker.team === lastGoal.team) {
+            const strikerGoalsThisMatch = state.game.goals.filter(
+                (g) => g.striker != null && g.striker.id === lastGoal.striker.id && g.striker.team === g.team
+            ).length;
+            if (strikerGoalsThisMatch === 3) {
+                room.sendAnnouncement(
+                    buildBox([`🎩 ХЕТ-ТРИК! ${lastGoal.striker.name} оформил(а) уже 3 гола в этом матче !`]),
+                    null,
+                    achievementColor,
+                    'bold',
+                    HaxNotification.MENTION
+                );
+            }
+        }
         // In-match comeback detection (item #12) — must run BEFORE updating
         // matchWorstDeficit below with THIS goal's own result: the check is
         // "how far behind were they at some point BEFORE this exact goal",
@@ -298,7 +326,7 @@ module.exports = function createGameManagementEvents({
             const teamName = team == Team.RED ? 'Красная команда' : 'Синяя команда';
             const verb = scores.red === scores.blue ? 'сравняла счёт' : 'вышла вперёд';
             room.sendAnnouncement(
-                `🔄 Какой камбэк ! ${teamName} отыгрывалась с отставания в ${scoringTeamOldWorstDeficit} мяча и только что ${verb} !`,
+                buildBox([`🔄 Какой камбэк ! ${teamName} отыгрывалась с отставания в ${scoringTeamOldWorstDeficit} мяча и только что ${verb} !`]),
                 null,
                 achievementColor,
                 'bold',

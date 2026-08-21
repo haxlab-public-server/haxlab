@@ -1264,25 +1264,19 @@ function createSqliteDatabase(filePath = path.join(__dirname, 'haxlab.sqlite')) 
     function getTopPlayers() {
         const total = database.prepare('SELECT COUNT(*) AS n FROM player_stats').get().n;
         if (total < TROPHY_QUORUM) {
-            return { goals: [], assists: [], cs: [], wr: [], pt: [] };
+            return { goals: [], assists: [], cs: [], pt: [], elo: [] };
         }
         function topByColumn(column) {
             return database
                 .prepare(`SELECT auth, player_name AS playerName, ${column} AS value FROM player_stats ORDER BY ${column} DESC LIMIT ?`)
                 .all(TROPHY_RANKS);
         }
-        const topWinrate = database
-            .prepare(
-                `SELECT auth, player_name AS playerName, (CAST(wins AS REAL) / games) AS value
-                 FROM player_stats WHERE games > 0 ORDER BY value DESC, games DESC LIMIT ?`
-            )
-            .all(TROPHY_RANKS);
         return {
             goals: topByColumn('goals'),
             assists: topByColumn('assists'),
             cs: topByColumn('clean_sheets'),
-            wr: topWinrate,
             pt: topByColumn('playtime'),
+            elo: topByColumn('elo_rating'),
         };
     }
 

@@ -26,6 +26,7 @@ module.exports = function createMovementEvents({
     maxPlayers,
     welcomeColor,
     getDate,
+    buildBox,
     applyTeamForms,
     claimDailyBonus,
     checkCaptainLeave,
@@ -72,18 +73,55 @@ module.exports = function createMovementEvents({
         // row yet reliably means "never finished a match here", same
         // reasoning as bff/events.js's own onPlayerJoin.
         const isReturning = (await db.getPlayerStats(player.auth)) != null;
-        let welcomeText = isReturning
-            ? `👋 С возвращением, ${player.name} !`
-            : `👋 Добро пожаловать ${player.name} !\n Следите за новостями в Discord: dsc.gg/haxlab\n Введите !help, чтобы увидеть список команд.`;
+        // Boxed welcome (requested 2026-08-21, drawing on a style seen on
+        // another server's own join box — deliberately not copied
+        // verbatim, own layout/content). The "login status" light from
+        // that reference became a Discord-link status dot here — the
+        // closest equivalent thing this room actually tracks per player.
+        const discordLinked = (await db.getDiscordIdByAuth(player.auth)) != null;
+        const welcomeLines = [
+            isReturning ? `👋 С возвращением, ${player.name} !` : `👋 Добро пожаловать, ${player.name} !`,
+            // The invite link itself lives HERE, not just in the new-player
+            // line below (fixed 2026-08-21: a returning player who never
+            // linked Discord previously had no way to find the server at
+            // all — "Следите за новостями" only ever showed for brand-new
+            // joiners).
+            discordLinked ? '🟢 Discord привязан' : '🔴 Discord не привязан ┊ dsc.gg/haxlab ┊ !discord <id> (+100 монет)',
+        ];
+        // Own role, shown ONLY above plain player (requested 2026-08-21,
+        // VIP included 2026-08-21 follow-up) — "Ваши права: Игрок" for
+        // every regular joiner would just be dead weight (that's the
+        // default for almost everyone); showing it for VIP/admin/helper/
+        // master makes it a useful confirmation instead of noise. VIP
+        // specifically doubles as a silent expiry check — getRole() reads
+        // state.vipList live including the expiry date (see its own
+        // comment in entry.js), so an expired VIP simply stops seeing this
+        // line on their next join, no separate "your VIP ran out" message
+        // needed. Checked via getRole(), same source of truth every
+        // command permission gate already uses — not player.admin
+        // directly, which may not be restored yet this exact tick (the
+        // native-crown restore below runs AFTER this message).
+        const role = getRole(player);
+        const roleLabel = role === Role.MASTER ? 'Владелец'
+            : role === Role.HELPER ? 'Хелпер'
+            : role >= Role.ADMIN_TEMP ? 'Админ'
+            : role === Role.VIP ? 'VIP'
+            : null;
+        if (roleLabel != null) {
+            welcomeLines.push(`Ваши права: ${roleLabel}`);
+        }
+        if (!isReturning) {
+            welcomeLines.push('!help — все команды');
+        }
         // Season-close notice (item #22, see entry.js's own boot-time
         // comparison) — every joiner sees it for the rest of this process's
         // lifetime, not just whoever happened to join first right after
         // the restart that picked up the closed season.
         if (state.newSeasonAnnounceNeeded) {
-            welcomeText += `\n🏆 Сезон S${state.currentSeason - 1} завершён, топ-3 увековечены ("!trophy <категория> ${state.currentSeason - 1}") — начался сезон S${state.currentSeason}, статистика обнулена.`;
+            welcomeLines.push(`🏆 Сезон S${state.currentSeason - 1} завершён, топ-3 увековечены ("!trophy <категория> ${state.currentSeason - 1}") — начался сезон S${state.currentSeason}, статистика обнулена.`);
         }
         room.sendAnnouncement(
-            welcomeText,
+            buildBox(welcomeLines, 'HAXLAB'),
             player.id,
             welcomeColor,
             'bold',
