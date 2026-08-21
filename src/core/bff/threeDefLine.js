@@ -21,7 +21,15 @@ module.exports = function createBffThreeDefLine({ room, state, Team, HaxNotifica
     const cf = room.CollisionFlags;
 
     function mostForward(players, team) {
+        // player.position is null for the brief window a player isn't yet
+        // physically placed on the field (right after a goal, kickoff
+        // reset, team change) — reading .x off it was throwing inside
+        // room.onGameTick every such tick (2026-08-20 incident: 4M+ log
+        // lines from the resulting per-tick error, one per BFF big-map
+        // match), silently disabling the rest of adjustDefenseLine for
+        // that tick too.
         return players.reduce((best, p) => {
+            if (p.position == null) return best;
             if (best == null) return p;
             const moreAdvanced = team === Team.RED ? p.position.x > best.position.x : p.position.x < best.position.x;
             return moreAdvanced ? p : best;
@@ -55,8 +63,12 @@ module.exports = function createBffThreeDefLine({ room, state, Team, HaxNotifica
         const blue = state.teamBlue;
         if (red.length === 0 || blue.length === 0) return;
 
-        restrictTeam(red, mostForward(red, Team.RED).id, cf.red, cf.red | cf.c0);
-        restrictTeam(blue, mostForward(blue, Team.BLUE).id, cf.blue, cf.blue | cf.c1);
+        // mostForward can return null if every player on a team currently
+        // has a null position (all mid-reset at once) — mfpId ends up
+        // undefined, which matches no real player.id, so restrictTeam just
+        // leaves everyone unrestricted for this tick instead of throwing.
+        restrictTeam(red, mostForward(red, Team.RED)?.id, cf.red, cf.red | cf.c0);
+        restrictTeam(blue, mostForward(blue, Team.BLUE)?.id, cf.blue, cf.blue | cf.c1);
     }
 
     return { adjustDefenseLine };
