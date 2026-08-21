@@ -1313,6 +1313,19 @@ const {
     updateTeams,
 });
 
+// Wallkick/double-shot detector (main room only for now — see its own
+// file for why, and the decision to hold off on a BFF port until this
+// has been watched live for a while).
+const createWallkickDetector = require('../core/stats/wallkick');
+const { checkWallkick } = createWallkickDetector({
+    room,
+    state,
+    HaxNotification,
+    getBallSpeed,
+    pointDistance,
+    achievementColor,
+});
+
 /* GOAL ATTRIBUTION FUNCTIONS */
 
 const createGoalAttribution = require('../core/stats/goalAttribution');
@@ -1914,6 +1927,7 @@ Object.assign(room, wrapEventHandlers(createMiscEvents({
     stadiumCommand,
     updateTeams,
     recordMatchAnalyticsTick,
+    checkWallkick,
 })));
 
 // Exposed on the resolved `ready` value (see below) purely for
