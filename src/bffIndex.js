@@ -210,6 +210,12 @@ async function launchRoom() {
             '--no-sandbox',
             '--disable-setuid-sandbox',
             // Same fix as src/index.js — see its own comment for the full
+            // reasoning (a QUIC-specific load failure on RUVDS's network
+            // left window.HBInit undefined, crashing init with a "JSON5 is
+            // not defined" error that belongs to HBInit's own code, not
+            // ours).
+            '--disable-quic',
+            // Same fix as src/index.js — see its own comment for the full
             // reasoning (Chrome's background-tab timer throttling, tripped
             // by an empty/quiet room, was the likely source of at least
             // some of the "jitter" the main room's own monitor reported).
@@ -233,6 +239,15 @@ async function launchRoom() {
         await newPage.exposeFunction('__dbCall', handleDbCall);
         await newPage.exposeFunction('__discordSend', handleDiscordSend);
 
+        // Same fix as src/index.js — see its own comment for the full
+        // incident (a bundle that injected fine but never actually finished
+        // initialising, forever, with no retry). Wired before addScriptTag
+        // so bffEntry.js's own __reportInit call always has something to
+        // call into.
+        let resolveInit;
+        const initPromise = new Promise((resolve) => { resolveInit = resolve; });
+        await newPage.exposeFunction('__reportInit', (result) => resolveInit(result));
+
         newPage.on('console', (msg) => {
             const text = msg.text();
             console.log(`[BFF PAGE ${msg.type()}]`, text);
@@ -252,6 +267,15 @@ async function launchRoom() {
 
         const bundle = await buildBffEntryBundle();
         await newPage.addScriptTag({ content: bundle });
+
+        const INIT_TIMEOUT_MS = 20000;
+        const initResult = await Promise.race([
+            initPromise,
+            new Promise((resolve) => setTimeout(() => resolve({ ok: false, error: 'bffEntry.js never reported init (timed out)' }), INIT_TIMEOUT_MS)),
+        ]);
+        if (!initResult.ok) {
+            throw new Error(`bffEntry.js failed to initialise: ${initResult.error}`);
+        }
 
         page = newPage;
         return { browser, page: newPage };

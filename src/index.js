@@ -293,6 +293,18 @@ async function launchRoom() {
             '--disable-features=WebRtcHideLocalIpsWithMdns,AsyncDns',
             '--no-sandbox',
             '--disable-setuid-sandbox',
+            // Found 2026-08-22 on a second VPS (RUVDS): some resource on
+            // haxball.com/headless loaded over QUIC (HTTP/3) failed with
+            // net::ERR_QUIC_PROTOCOL_ERROR on that network specifically,
+            // leaving window.HBInit undefined and crashing entry.js's own
+            // init with "JSON5 is not defined" (HBInit's own dependency,
+            // never ours — we don't reference JSON5 anywhere). Forcing
+            // regular HTTP/2 sidesteps whatever about that network breaks
+            // QUIC. Harmless on a network where QUIC already worked fine
+            // (Timeweb) — this only ever makes Chromium fall back to a more
+            // widely-compatible transport, never removes a capability we
+            // actually relied on.
+            '--disable-quic',
             // Real bug found 2026-08-18: the room's own tick-jitter monitor
             // (entry.js) fired far more often with an EMPTY room than a
             // full one — backwards from what real CPU/hypervisor contention
@@ -332,6 +344,20 @@ async function launchRoom() {
         await newPage.exposeFunction('__dbCall', handleDbCall);
         await newPage.exposeFunction('__discordSend', handleDiscordSend);
 
+        // Real bug found 2026-08-22: addScriptTag() below only confirms the
+        // bundle was INJECTED, not that entry.js's own async main() actually
+        // finished initialising — a failure partway through (some unrelated
+        // haxball.com resource failing to load, in the incident that
+        // surfaced this) used to leave a room that LOOKED launched (HBInit()
+        // itself, very early in main(), had already succeeded, so the join
+        // link was real and visible) but could never actually let a player
+        // in, forever, with no retry and no crash for pm2 to catch. Wired
+        // BEFORE addScriptTag so the bundle's own __reportInit call (see
+        // entry.js) always has something to call into.
+        let resolveInit;
+        const initPromise = new Promise((resolve) => { resolveInit = resolve; });
+        await newPage.exposeFunction('__reportInit', (result) => resolveInit(result));
+
         // Without this, everything the injected bundle logs (console.log/error
         // calls inside the page, including onRoomLink's own console.log(url))
         // only ever reaches the browser's own devtools console — invisible to
@@ -360,6 +386,15 @@ async function launchRoom() {
 
         const bundle = await buildEntryBundle();
         await newPage.addScriptTag({ content: bundle });
+
+        const INIT_TIMEOUT_MS = 20000;
+        const initResult = await Promise.race([
+            initPromise,
+            new Promise((resolve) => setTimeout(() => resolve({ ok: false, error: 'entry.js never reported init (timed out)' }), INIT_TIMEOUT_MS)),
+        ]);
+        if (!initResult.ok) {
+            throw new Error(`entry.js failed to initialise: ${initResult.error}`);
+        }
 
         page = newPage;
         return { browser, page: newPage };

@@ -1988,3 +1988,20 @@ const ready = main().catch((err) => {
     return err;
 });
 module.exports = { ready };
+
+// Real bug found 2026-08-22: a failure inside main() (e.g. some unrelated
+// haxball.com resource failing to load) was only ever visible as a console
+// line — the orchestrator (src/index.js) considered launchRoom() a success
+// the moment addScriptTag() resolved, regardless of whether the injected
+// script went on to actually finish initialising. The room link would still
+// get printed (HBInit() itself, very early in main(), had already
+// succeeded) even though none of our own event handlers further down ever
+// got wired up — a room players could see and try to join, that could never
+// actually let them in. window.__reportInit is exposed by launchRoom()
+// BEFORE the bundle is injected — absent in the non-browser tools/
+// load-check.js stub environment, hence the guard.
+if (typeof window !== 'undefined' && typeof window.__reportInit === 'function') {
+    ready.then((result) => {
+        window.__reportInit(result instanceof Error ? { ok: false, error: result.message } : { ok: true });
+    });
+}

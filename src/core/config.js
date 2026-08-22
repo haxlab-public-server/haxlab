@@ -56,14 +56,21 @@ const discordBffReportChannelId = process.env.DISCORD_BFF_REPORT_CHANNEL_ID ?? '
 // Local loopback port discordProcess.js listens on for the BFF orchestrator
 // (a separate, unrelated OS process — see src/bffIndex.js) to reach the
 // SAME running Discord bot/client, instead of spawning a second bot.
-const discordBridgePort = Number(process.env.DISCORD_BRIDGE_PORT ?? 47100);
+// `||`, not `??` — a .env line left as `DISCORD_BRIDGE_PORT=` (the
+// .env.example-recommended way to "leave unset") sets process.env to an
+// empty STRING, not undefined, so `??` never falls through to the default;
+// Number('') is 0, which the bridge server then silently binds to a
+// random OS-assigned port while every client still tries to connect to
+// literal port 0 and fails. Found 2026-08-22 on a from-scratch deploy.
+const discordBridgePort = Number(process.env.DISCORD_BRIDGE_PORT || 47100);
 
 // Same idea, for the MAIN room's orchestrator (src/index.js) — confirmed
 // 2026-08-15: discordProcess.js is now a genuinely independent pm2 process
 // (own ecosystem.config.js entry), not forked from src/index.js anymore, so
 // the main room needs the same kind of loopback TCP bridge BFF already had,
 // not fork()'s built-in IPC channel.
-const discordMainBridgePort = Number(process.env.DISCORD_MAIN_BRIDGE_PORT ?? 47101);
+// Same `||` reasoning as discordBridgePort above.
+const discordMainBridgePort = Number(process.env.DISCORD_MAIN_BRIDGE_PORT || 47101);
 
 // SOCKS5 proxy for the Discord process's own outbound traffic only (REST +
 // gateway), e.g. `socks5://user:pass@host:port` — see discordProcess.js's

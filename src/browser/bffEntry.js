@@ -73,6 +73,7 @@ const {
     findFirstNumberCharString,
     renderProgressBar,
     formatStreakText,
+    buildBox,
 } = require('../core/utils');
 const { getIdReport, getRecordingName, fetchRecording } = require('../core/reports');
 const wrapEventHandlers = require('../core/safeEventHandlers');
@@ -425,7 +426,7 @@ state.game = new Game(room, getStartingLineups);
 
 /* GOAL ATTRIBUTION (reused as-is) */
 const createGoalAttribution = require('../core/stats/goalAttribution');
-const { getGoalString } = createGoalAttribution({ state, Team, Goal, getTimeGame });
+const { getGoalString } = createGoalAttribution({ state, Team, Goal, getTimeGame, buildBox });
 
 /* GK (reused as-is) */
 const createGkHelpers = require('../core/stats/gk');
@@ -852,3 +853,13 @@ const ready = main().catch((err) => {
     return err;
 });
 module.exports = { ready };
+
+// Same fix as src/browser/entry.js — see its own comment for the full
+// incident. window.__reportInit is exposed by bffIndex.js's launchRoom()
+// before injection; the guard keeps this a no-op in the non-browser
+// tools/load-check.js stub environment.
+if (typeof window !== 'undefined' && typeof window.__reportInit === 'function') {
+    ready.then((result) => {
+        window.__reportInit(result instanceof Error ? { ok: false, error: result.message } : { ok: true });
+    });
+}

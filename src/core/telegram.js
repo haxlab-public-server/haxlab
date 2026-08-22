@@ -75,7 +75,14 @@ module.exports = function createTelegramBot({ db, telegramBotToken, generateRoom
 
     function init() {
         if (!telegramBotToken) return;
-        const TelegramBot = TelegramBotClass ?? require('node-telegram-bot-api');
+        // node-telegram-bot-api ^1.2.0 resolved to a version that switched
+        // its CJS interop shape — require(...) now returns the whole module
+        // object ({ TelegramBot, default, ... }), not the class itself, so
+        // plain `require(...)` here silently returned a non-constructor
+        // (surfaced 2026-08-22 on a freshly `npm ci`'d install; an older,
+        // already-installed node_modules on a long-running deploy never hit
+        // it). .TelegramBot is the actual class either way.
+        const TelegramBot = TelegramBotClass ?? require('node-telegram-bot-api').TelegramBot;
         bot = new TelegramBot(telegramBotToken, { polling: true });
         bot.onText(/^\/start\b/, (msg) => handleStart(msg).catch((err) => console.error('[telegram] /start failed:', err)));
         bot.onText(/^\/link\s+(\S+)/, (msg, match) => handleLink(msg, match).catch((err) => console.error('[telegram] /link failed:', err)));
