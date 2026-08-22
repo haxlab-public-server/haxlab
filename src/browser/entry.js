@@ -356,10 +356,10 @@ room.setPassword(state.roomPassword != '' ? state.roomPassword : null);
 const mentionWatchName = window.__secrets.mentionWatchName;
 
 // !gif (commands/player.js) — see gifClip.js's own doc comment for the
-// full HaxClip protocol. Connects immediately (with its own internal
-// reconnect loop) rather than lazily on first use, same "just start it,
-// let it sit idle until needed" convention as discordBot's own bridge
-// connection.
+// full HaxClip protocol. The actual WebSocket to HaxClip lives Node-side
+// (index.js's connectGifClipBridge()) and is reached here via
+// window.__gifSendClip; this module only builds payloads and handles the
+// replay upload (a plain https fetch, unaffected by that split).
 const createGifClip = require('../core/gifClip');
 const gifClip = createGifClip({
     haxclipWsUrl: window.__secrets.haxclipWsUrl,

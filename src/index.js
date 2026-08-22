@@ -228,6 +228,55 @@ function connectDiscordBridge() {
 }
 connectDiscordBridge();
 
+/* GIF CLIP BRIDGE (see core/gifClip.js's own doc comment for the feature
+ * itself). Node's own global WebSocket (stable since Node 22, no `ws`
+ * package needed) rather than the page constructing it directly — a
+ * browser page loaded over HTTPS (haxball.com/headless is) refuses to
+ * construct a plain ws:// WebSocket at all ("mixed content"), which used
+ * to throw synchronously and crash the WHOLE bundle's main() on every
+ * launch (found 2026-08-23 — see gifClip.js's own comment on the
+ * try/catch that stopped it from being fatal, kept as defense in depth
+ * even now that the real fix is "don't do this from the page at all").
+ * Node isn't a browser, so this restriction doesn't apply here. */
+let gifClipSocket = null;
+const GIF_CLIP_RECONNECT_DELAY_MS = 5000;
+
+function connectGifClipBridge() {
+    if (!haxclipWsUrl || !haxclipApiKey || !gifResultWebhookId || !gifResultWebhookToken) return;
+    let socket;
+    try {
+        socket = new WebSocket(`${haxclipWsUrl}/?key=${haxclipApiKey}&&webHook=${gifResultWebhookId}/${gifResultWebhookToken}`);
+    } catch (err) {
+        console.error('[gifClip] failed to construct WebSocket:', err.message);
+        setTimeout(connectGifClipBridge, GIF_CLIP_RECONNECT_DELAY_MS);
+        return;
+    }
+    socket.addEventListener('open', () => {
+        gifClipSocket = socket;
+    });
+    socket.addEventListener('close', () => {
+        gifClipSocket = null;
+        setTimeout(connectGifClipBridge, GIF_CLIP_RECONNECT_DELAY_MS);
+    });
+    socket.addEventListener('error', (err) => {
+        console.error('[gifClip] socket error:', err.message);
+    });
+}
+connectGifClipBridge();
+
+// Called by the page (via __gifSendClip, exposed in launchRoom() below)
+// once it's already uploaded the match's replay and has a real URL —
+// the upload itself stays in the page (a plain https:// fetch to a
+// Discord webhook, which was never subject to the mixed-content
+// restriction above; only the raw ws:// connection was).
+function handleGifSendClip(payload) {
+    if (!gifClipSocket || gifClipSocket.readyState !== WebSocket.OPEN) {
+        console.error('[gifClip] not connected, dropping clip request for', payload?.byUser?.username);
+        return;
+    }
+    gifClipSocket.send(JSON.stringify({ key: 'newClip', data: payload }));
+}
+
 /* DB BRIDGE */
 // One generic dispatcher rather than one page.exposeFunction per method —
 // the in-page client (dbBridgeClient.js) builds its whole `db` object from
@@ -346,6 +395,7 @@ async function launchRoom() {
         const newPage = await browser.newPage();
         await newPage.exposeFunction('__dbCall', handleDbCall);
         await newPage.exposeFunction('__discordSend', handleDiscordSend);
+        await newPage.exposeFunction('__gifSendClip', handleGifSendClip);
 
         // Real bug found 2026-08-22: addScriptTag() below only confirms the
         // bundle was INJECTED, not that entry.js's own async main() actually

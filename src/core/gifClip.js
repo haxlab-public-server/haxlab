@@ -6,18 +6,24 @@
  * posted straight to a dedicated Discord channel. We never see the GIF
  * bytes ourselves; HaxClip posts the finished result directly.
  *
- * Runs entirely in THIS page (the same realm as the rest of entry.js,
- * which HBInit() already gave native fetch/WebSocket/Blob — no bridging
- * to the Node orchestrator needed, same reasoning as HaxClip's own
- * reference room script talking to itself over a raw WebSocket).
+ * The actual WebSocket connection to HaxClip lives Node-side (index.js /
+ * bffIndex.js, connectGifClipBridge()) and is reached here via the
+ * window.__gifSendClip bridge — NOT a socket opened directly from this
+ * page. Real bug found 2026-08-23: `new WebSocket('ws://...')` THROWS
+ * synchronously (SecurityError, "mixed content") when called from a page
+ * loaded over HTTPS (haxball.com/headless is) against a plain ws://
+ * target, and that crashed the WHOLE bundle's main() on every launch.
+ * Node isn't a browser page and isn't subject to that restriction, so the
+ * connection moved there; this module now only builds the payload.
  *
  * Two Discord webhooks, both plain HTTPS POSTs (no bot/gateway involved):
  *   - uploadWebhookUrl: temporary home for the raw .hbr2 replay so HaxClip
  *     has a URL to fetch it from (Discord's own CDN, not a file server we'd
- *     have to run ourselves).
+ *     have to run ourselves). Stays in this page — https fetch to https
+ *     was never subject to the mixed-content issue above.
  *   - resultWebhookId/resultWebhookToken: handed to HaxClip itself at
- *     connect time — it posts the finished GIF there directly once
- *     rendering completes, entirely on its own.
+ *     connect time (Node-side now) — it posts the finished GIF there
+ *     directly once rendering completes, entirely on its own.
  *
  * One upload per match (not per clip request) — uploadReplay() is called
  * once in onGameStop with the match's own recording buffer; every queued
@@ -33,28 +39,6 @@ module.exports = function createGifClip({
     resultWebhookToken,
 }) {
     const enabled = Boolean(haxclipWsUrl && haxclipApiKey && uploadWebhookUrl && resultWebhookId && resultWebhookToken);
-    let socket = null;
-    let connected = false;
-    // 5s reconnect delay — HaxClip runs on a separate box (RUVDS) we don't
-    // control the uptime of from here; a brief restart there shouldn't
-    // need a room restart to recover from.
-    const RECONNECT_DELAY_MS = 5000;
-
-    function connect() {
-        if (!enabled) return;
-        socket = new WebSocket(`${haxclipWsUrl}/?key=${haxclipApiKey}&&webHook=${resultWebhookId}/${resultWebhookToken}`);
-        socket.addEventListener('open', () => {
-            connected = true;
-        });
-        socket.addEventListener('close', () => {
-            connected = false;
-            setTimeout(connect, RECONNECT_DELAY_MS);
-        });
-        socket.addEventListener('error', (err) => {
-            console.error('[gifClip] socket error:', err?.message || err);
-        });
-    }
-    connect();
 
     // Uploads the match's own replay buffer to get a public URL HaxClip can
     // fetch from — returns null (never throws) on any failure, since a
@@ -84,18 +68,15 @@ module.exports = function createGifClip({
 
     function sendClipRequest(replayUrl, playerName, playerId, matchTimeSeconds) {
         if (!enabled) return;
-        if (!connected || socket.readyState !== WebSocket.OPEN) {
-            console.error('[gifClip] HaxClip not connected, dropping clip request for', playerName);
+        if (typeof window.__gifSendClip !== 'function') {
+            console.error('[gifClip] __gifSendClip bridge unavailable, dropping clip request for', playerName);
             return;
         }
-        socket.send(JSON.stringify({
-            key: 'newClip',
-            data: {
-                url: replayUrl,
-                byUser: { username: playerName, id: playerId },
-                time: Math.round(matchTimeSeconds),
-            },
-        }));
+        window.__gifSendClip({
+            url: replayUrl,
+            byUser: { username: playerName, id: playerId },
+            time: Math.round(matchTimeSeconds),
+        });
     }
 
     return { enabled, uploadReplay, sendClipRequest };
