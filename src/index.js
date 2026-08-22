@@ -25,7 +25,10 @@ const net = require('node:net');
 const puppeteer = require('puppeteer');
 const esbuild = require('esbuild');
 
-const { roomPassword, token, testMode, mentionWatchName, discordMainBridgePort } = require('./core/config');
+const {
+    roomPassword, token, testMode, mentionWatchName, discordMainBridgePort,
+    haxclipWsUrl, haxclipApiKey, gifUploadWebhookUrl, gifResultWebhookId, gifResultWebhookToken,
+} = require('./core/config');
 const { createDatabaseApi } = require('../api/database');
 const { BRIDGED_METHODS } = require('./browser/dbBridgeClient');
 
@@ -382,7 +385,10 @@ async function launchRoom() {
         await newPage.waitForFunction(() => typeof window.HBInit === 'function', { timeout: 60000 });
         await newPage.evaluate((secrets) => {
             window.__secrets = secrets;
-        }, { token, roomPassword, testMode, mentionWatchName });
+        }, {
+            token, roomPassword, testMode, mentionWatchName,
+            haxclipWsUrl, haxclipApiKey, gifUploadWebhookUrl, gifResultWebhookId, gifResultWebhookToken,
+        });
 
         const bundle = await buildEntryBundle();
         await newPage.addScriptTag({ content: bundle });

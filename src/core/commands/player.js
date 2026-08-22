@@ -45,6 +45,7 @@ module.exports = function createPlayerCommands({
     updateTeams,
     getCommands,
     formatCoins,
+    gifClip,
     discordBot,
     formatBanRemaining,
     renderProgressBar,
@@ -423,6 +424,40 @@ module.exports = function createPlayerCommands({
                 HaxNotification.CHAT
             );
         }
+    }
+
+    // !gif — queues a ~10s clip around the moment this was typed (VIP+,
+    // max GIF_MAX_PER_MATCH per player per match). Doesn't render anything
+    // itself: just records the request (see state.gifRequests, reset each
+    // match in gameManagement.js's onGameStart) for onGameStop to hand off
+    // to gifClip.js in one batch once the match's own recording is
+    // actually available (room.stopRecording() hasn't run yet while a
+    // match is still live).
+    const GIF_MAX_PER_MATCH = 2;
+
+    function gifCommand(player) {
+        if (!gifClip.enabled) {
+            room.sendAnnouncement(`Команда !gif сейчас недоступна.`, player.id, errorColor, 'bold', HaxNotification.CHAT);
+            return;
+        }
+        if (state.gameState != State.PLAY) {
+            room.sendAnnouncement(`!gif можно использовать только во время матча !`, player.id, errorColor, 'bold', HaxNotification.CHAT);
+            return;
+        }
+        const auth = authArray[player.id][0];
+        const usedThisMatch = state.gifRequests.filter((r) => r.auth == auth).length;
+        if (usedThisMatch >= GIF_MAX_PER_MATCH) {
+            room.sendAnnouncement(`!gif можно использовать не больше ${GIF_MAX_PER_MATCH} раз за матч !`, player.id, errorColor, 'bold', HaxNotification.CHAT);
+            return;
+        }
+        state.gifRequests.push({ auth, playerId: player.id, playerName: player.name, time: room.getScores().time });
+        room.sendAnnouncement(
+            `🎬 Гифка запрошена — появится в discord-канале после матча (${usedThisMatch + 1}/${GIF_MAX_PER_MATCH} за игру) !`,
+            player.id,
+            successColor,
+            'bold',
+            HaxNotification.CHAT
+        );
     }
 
     // !rating — the 28-metric advanced analytics report (see
@@ -1173,6 +1208,7 @@ module.exports = function createPlayerCommands({
         globalStatsCommand,
         vsCommand,
         tipCommand,
+        gifCommand,
         ratingCommand,
         renameCommand,
         customColorsCommand,

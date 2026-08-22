@@ -20,6 +20,17 @@ const token = process.env.HAXBALL_TOKEN ?? ''; // from https://www.haxball.com/h
 // disable the whole feature.
 const mentionWatchName = process.env.MENTION_WATCH_NAME ?? '';
 
+// !gif (commands/player.js, core/gifClip.js) — same "room-side secret,
+// injected into the page as window.__secrets" as mentionWatchName above.
+// HaxClip is a separately-hosted service (a different box entirely, see
+// gifClip.js's own doc comment) — leave any of these empty to disable the
+// whole feature (gifClip.js's own `enabled` flag checks all five).
+const haxclipWsUrl = process.env.HAXCLIP_WS_URL ?? '';
+const haxclipApiKey = process.env.HAXCLIP_API_KEY ?? '';
+const gifUploadWebhookUrl = process.env.DISCORD_GIF_UPLOAD_WEBHOOK ?? ''; // temp home for the raw .hbr2 so HaxClip has a URL to fetch it from
+const gifResultWebhookId = process.env.DISCORD_GIF_RESULT_WEBHOOK_ID ?? ''; // HaxClip posts the finished GIF here directly
+const gifResultWebhookToken = process.env.DISCORD_GIF_RESULT_WEBHOOK_TOKEN ?? '';
+
 // Set by HaxBot_test.js (npm run test), never by hand in .env — a "[TEST] "
 // room name prefix (see roomConstants.js's buildGameConfig) and no
 // ghost-kick/AFK-kick (see entry.js's debugMode), so you can join a test
@@ -84,6 +95,11 @@ module.exports = {
     token,
     testMode,
     mentionWatchName,
+    haxclipWsUrl,
+    haxclipApiKey,
+    gifUploadWebhookUrl,
+    gifResultWebhookId,
+    gifResultWebhookToken,
     discordToken,
     telegramBotToken,
     discordLogChannelId,

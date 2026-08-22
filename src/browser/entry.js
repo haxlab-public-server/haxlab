@@ -355,6 +355,20 @@ room.setPassword(state.roomPassword != '' ? state.roomPassword : null);
 // — see its own onPlayerChat. Empty disables the whole feature.
 const mentionWatchName = window.__secrets.mentionWatchName;
 
+// !gif (commands/player.js) — see gifClip.js's own doc comment for the
+// full HaxClip protocol. Connects immediately (with its own internal
+// reconnect loop) rather than lazily on first use, same "just start it,
+// let it sit idle until needed" convention as discordBot's own bridge
+// connection.
+const createGifClip = require('../core/gifClip');
+const gifClip = createGifClip({
+    haxclipWsUrl: window.__secrets.haxclipWsUrl,
+    haxclipApiKey: window.__secrets.haxclipApiKey,
+    uploadWebhookUrl: window.__secrets.gifUploadWebhookUrl,
+    resultWebhookId: window.__secrets.gifResultWebhookId,
+    resultWebhookToken: window.__secrets.gifResultWebhookToken,
+});
+
 /* OPTIONS */
 
 const drawTimeLimit = Infinity;
@@ -1512,6 +1526,7 @@ const {
     globalStatsCommand,
     vsCommand,
     tipCommand,
+    gifCommand,
     ratingCommand,
     renameCommand,
     customColorsCommand,
@@ -1570,6 +1585,7 @@ const {
     discordBot,
     formatBanRemaining,
     renderProgressBar,
+    gifClip,
 });
 
 /* PAUSE VOTE */
@@ -1726,6 +1742,7 @@ const commands = createCommands({
     globalStatsCommand,
     vsCommand,
     tipCommand,
+    gifCommand,
     ratingCommand,
     renameCommand,
     customColorsCommand,
@@ -1937,6 +1954,8 @@ Object.assign(room, wrapEventHandlers(createGameManagementEvents({
     authArray,
     db,
     buildBox,
+    getRecordingName,
+    gifClip,
     resetMatchAnalytics,
 })));
 

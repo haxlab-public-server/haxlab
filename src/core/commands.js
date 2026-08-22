@@ -6,6 +6,7 @@ module.exports = function createCommands({
     globalStatsCommand,
     vsCommand,
     tipCommand,
+    gifCommand,
     ratingCommand,
     renameCommand,
     customColorsCommand,
@@ -152,6 +153,15 @@ module.exports = function createCommands({
     Аргумент 1: #<id> где <id> это id игрока, которого вы благодарите.
     Пример: !tip #3 благодарит игрока с id 3.`,
         function: tipCommand,
+    },
+    gif: {
+        aliases: ['клип', 'clip'],
+        roles: Role.VIP,
+        category: 'misc',
+        desc: `
+        Эта команда ставит в очередь короткую GIF-нарезку (~10 секунд) вокруг момента, когда вы её написали — появится в отдельном discord-канале уже после конца матча.
+    Не больше 2 раз за матч. Работает только во время матча.`,
+        function: gifCommand,
     },
     rating: {
         aliases: ['рейтинг'],

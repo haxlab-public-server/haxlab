@@ -42,6 +42,8 @@ module.exports = function createGameManagementEvents({
     authArray,
     db,
     buildBox,
+    getRecordingName,
+    gifClip,
     resetMatchAnalytics = () => {},
 }) {
     // Same-day rematch (item #13) takes priority over a general rivalry
@@ -122,6 +124,12 @@ module.exports = function createGameManagementEvents({
         // "everything per-match resets in onGameStart" convention as
         // pauseVoteUsed just above.
         state.tipUsedThisMatch = new Set();
+        // !gif (commands/player.js) — queued requests for this match, same
+        // "everything per-match resets in onGameStart" convention. Array,
+        // not a Set, since a request needs to carry its own timestamp/name
+        // through to onGameStop, and a player can queue up to
+        // GIF_MAX_PER_MATCH of them.
+        state.gifRequests = [];
         // core/stats/analytics/ — fresh per-tick telemetry each match, same
         // "everything per-match resets in onGameStart" convention.
         resetMatchAnalytics();
@@ -179,6 +187,23 @@ module.exports = function createGameManagementEvents({
             fetchSummaryEmbed(state.game).catch((err) => console.error('[onGameStop] fetchSummaryEmbed failed:', err));
             if (fetchRecordingVariable) {
                 setTimeout((gameEnd) => { fetchRecording(gameEnd, discordBot); }, 500, state.game);
+            }
+            // !gif (commands/player.js) — independent of fetchRecordingVariable
+            // above (a player explicitly asked for this, not something the
+            // room posts by default). Snapshot the queue now: state.gifRequests
+            // gets reset to [] the moment the NEXT match's onGameStart runs,
+            // which — same 500ms-later timing as fetchRecording above — could
+            // already have happened by the time this setTimeout callback
+            // actually fires if a new match starts fast.
+            if (state.gifRequests.length > 0) {
+                const gifRequestsSnapshot = state.gifRequests;
+                setTimeout(async (gameEnd, requests) => {
+                    const url = await gifClip.uploadReplay(gameEnd.rec, getRecordingName(gameEnd));
+                    if (!url) return;
+                    for (const req of requests) {
+                        gifClip.sendClipRequest(url, req.playerName, req.playerId, req.time);
+                    }
+                }, 500, state.game, gifRequestsSnapshot);
             }
         }
         state.cancelGameVariable = false;

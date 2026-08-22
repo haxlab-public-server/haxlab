@@ -21,7 +21,7 @@ const GLOBALS = new Set([
     'WeakMap', 'WeakSet', 'Promise', 'Symbol', 'RegExp', 'parseInt', 'parseFloat', 'isNaN',
     'isFinite', 'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'require',
     'module', 'exports', '__dirname', '__filename', 'process', 'Buffer', 'fetch', 'FormData',
-    'File', 'Blob', 'localStorage', 'structuredClone', 'encodeURIComponent', 'decodeURIComponent',
+    'File', 'Blob', 'WebSocket', 'localStorage', 'structuredClone', 'encodeURIComponent', 'decodeURIComponent',
     'arguments', 'Function', 'Intl', 'URL', 'URLSearchParams', 'AbortController', 'TextEncoder',
     'TextDecoder', 'queueMicrotask', 'atob', 'btoa',
     // Real browser globals — only ever referenced from src/browser/*, which
