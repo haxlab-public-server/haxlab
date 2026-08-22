@@ -56,10 +56,15 @@ module.exports = function createGifClip({
                 console.error('[gifClip] upload did not return an attachment URL:', JSON.stringify(data));
                 return null;
             }
-            // Discord CDN URLs carry auth/expiry query params after the
-            // real filename — HaxClip's own queue rejects anything not
-            // literally ending in ".hbr2" (see its QueueManager.js).
-            return url.split('?')[0];
+            // Real bug found 2026-08-23: this used to strip Discord's CDN
+            // auth/expiry query params (?ex=...&is=...&hm=...) to satisfy
+            // HaxClip's own "URL literally ends in .hbr2" check — but those
+            // params aren't decorative, Discord's CDN rejects the request
+            // without them (confirmed: HaxClip downloaded a 36-byte JSON
+            // error body instead of the real replay). Send the full signed
+            // URL; HaxClip's QueueManager.js was patched instead to
+            // validate the path only, ignoring the query string.
+            return url;
         } catch (err) {
             console.error('[gifClip] replay upload failed:', err?.message || err);
             return null;
