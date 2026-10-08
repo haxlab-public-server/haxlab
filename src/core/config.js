@@ -8,7 +8,7 @@
 // page). Anything that also needs to be visible inside the bundled in-page
 // entry (src/browser/entry.js) lives in roomConstants.js instead, and is
 // re-exported here so nothing else has to know about that split.
-const roomConstants = require('./roomConstants');
+const roomConstants = require('./roomConstants'); 
 
 const roomPassword = process.env.ROOM_PASSWORD ?? ''; // leave unset for no password
 const token = process.env.HAXBALL_TOKEN ?? ''; // from https://www.haxball.com/headlesstoken — expires in ~1 hour
