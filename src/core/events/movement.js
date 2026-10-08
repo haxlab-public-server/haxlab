@@ -168,6 +168,18 @@ module.exports = function createMovementEvents({
     }
 
     function onPlayerTeamChange(changedPlayer, byPlayer) {
+        // Diagnostic for the "greenbar only while on the field" reports
+        // (2026-08-23) — separate from the existing connection-drop
+        // [MONITOR] in index.js, which only fires on a hard disconnect.
+        // This logs a CPU-load snapshot on every field entry/exit so we
+        // can check whether host load actually tracks on-field player
+        // count, without needing a disconnect to happen first. window.__logFieldEntry
+        // is only defined on the main room (see index.js); guarded so this
+        // is a no-op anywhere else (BFF's own events.js doesn't call this
+        // shared handler).
+        if (typeof window.__logFieldEntry === 'function') {
+            window.__logFieldEntry(changedPlayer.name, changedPlayer.team != Team.SPECTATORS);
+        }
         handleLineupChangeTeamChange(changedPlayer);
         if (AFKSet.has(changedPlayer.id) && changedPlayer.team != Team.SPECTATORS) {
             room.setPlayerTeam(changedPlayer.id, Team.SPECTATORS);

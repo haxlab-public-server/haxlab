@@ -396,6 +396,15 @@ async function launchRoom() {
         await newPage.exposeFunction('__dbCall', handleDbCall);
         await newPage.exposeFunction('__discordSend', handleDiscordSend);
         await newPage.exposeFunction('__gifSendClip', handleGifSendClip);
+        // See movement.js's onPlayerTeamChange for why this exists — same
+        // [MONITOR] log line the connection-drop diagnostic below uses, but
+        // triggered by field entry/exit instead of a disconnect, so we can
+        // check whether host CPU load actually correlates with on-field
+        // player count directly (2026-08-23 "greenbar only while playing"
+        // reports).
+        await newPage.exposeFunction('__logFieldEntry', (playerName, enteredField) => {
+            logConnectionDropDiagnostics(`${playerName} ${enteredField ? 'entered' : 'left'} the field`);
+        });
 
         // Real bug found 2026-08-22: addScriptTag() below only confirms the
         // bundle was INJECTED, not that entry.js's own async main() actually

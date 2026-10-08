@@ -107,7 +107,15 @@ module.exports = function createOverflowPassword({
         if (!active) return;
         try {
             const sharedValue = await db.getSetting(PASSWORD_SETTING_KEY);
+            // checkOverflowPassword() may have called deactivate() while the
+            // read above was in flight (e.g. BFF's getSetting is a real
+            // cross-process round trip) — applying a password after that
+            // would leave the room stuck locked even though it was already
+            // told to drop it, which is exactly the "password set and never
+            // cleared" race.
+            if (!active) return;
             const sharedSetAt = Number(await db.getSetting(PASSWORD_SET_AT_SETTING_KEY)) || 0;
+            if (!active) return;
             const isStale = !sharedValue || Date.now() - sharedSetAt >= rotateIntervalMs;
             if (isStale) {
                 mintNewPassword();
@@ -116,7 +124,7 @@ module.exports = function createOverflowPassword({
             }
         } catch (err) {
             console.error('[overflowPassword] shared-state read failed, minting a local password instead:', err);
-            mintNewPassword();
+            if (active) mintNewPassword();
         }
     }
 
